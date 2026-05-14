@@ -23,14 +23,16 @@ NATS Streaming/STAN is not part of this plan.
 
 ### Current checkpoint
 
-The repository scaffold and the first wire-core slice are in place. The
+The repository scaffold, wire core, and immutable client transition slice are
+in place. The
 implementation currently provides validated subjects, filters, queue groups,
 headers, and messages; the closed wire-operation vocabulary; CRLF and payload
 framing over a caller-owned `Bytesrw.Bytes.Reader.t`; and a phase-blind codec.
 The codec intentionally leaves `INFO`/`CONNECT` JSON opaque and its framing
-errors stop the stream. The next implementation step is the immutable
-`Nats.Client` transition layer, which will introduce typed negotiation,
-structured errors, and lifecycle events before the Eio connection owner.
+errors stop the stream. `Nats.Client` now parses typed INFO, requires an
+explicit CONNECT transition, allocates subscription ids, preserves HMSG status,
+and exposes bounded incoming/timer transitions. The next implementation step
+is the serialized Eio connection owner.
 
 ## Working principles
 
@@ -87,9 +89,9 @@ deliveries        { sid : int; message : Nats.Message.t }
 ```
 
 Deliveries are not events. They have separate consumers and backpressure
-policies. A transition drains all complete operations available from the
-caller-owned `Bytesrw.Bytes.Reader.t`; incomplete input remains in that reader,
-never in `Client.t`.
+policies. A transition consumes at most one complete operation from the
+caller-owned `Bytesrw.Bytes.Reader.t`; the adapter loops around that bounded
+step. Incomplete input remains in that reader, never in `Client.t`.
 
 ### Runtime ownership
 
@@ -205,13 +207,14 @@ operations without a network or runtime dependency.
 
 - Define connection phases as a closed sum, including connecting/established,
   draining, and closed states.
-- Construct the initial client intent and emit the initial connection output in
-  the correct response to server `INFO`.
+- Construct the initial client intent, parse typed server `INFO`, and emit
+  `CONNECT` only through an explicit second transition.
 - Allocate client sids, track subscription intent, auto-unsubscribe counts,
   negotiated headers, server limits, and discovered URLs.
 - Implement command transitions for publish, subscribe, unsubscribe, ping and
   flush barriers, plus close/drain intent.
-- Route `MSG`/`HMSG` operations to explicit sid-tagged deliveries.
+- Route `MSG`/`HMSG` operations to explicit sid-tagged deliveries, preserving
+  HMSG status metadata for the Eio request layer.
 - Accept asynchronous `INFO`, interleaved `PING`, `PONG`, `+OK`, and `-ERR`.
 - Add `timer`/`next_timeout` only for protocol liveness; application request
   deadlines remain outside this state machine.

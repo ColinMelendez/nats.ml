@@ -306,24 +306,27 @@ make JSON the protocol payload.
 
 #### Errors and events
 
-`Nats.Error.t`, introduced with `Nats.Client`, should be a closed, structured
-variant covering at least:
+`Nats.Error.t`, introduced with `Nats.Client`, is a closed, structured core
+variant covering:
 
 - invalid subject/filter/header/configuration;
 - protocol framing or decoding failure;
-- server errors with the wire error code/text kept as separate fields;
-- authentication/TLS/connection/reconnect failures;
-- timeout, cancellation, closed, and draining states;
-- no responders and slow consumer;
-- transport-adjacent errors only; JetStream API errors belong to the
-  JetStream module and carry status, code, description, and optional metadata.
+- malformed typed INFO data, closed/draining state, and subscription identity;
+- negotiated header and payload-limit violations.
+
+The Eio facade adds authentication/TLS/connection/reconnect failures, timeout,
+cancellation, no-responders, and slow-consumer outcomes around this core. The
+wire server error text remains a structured field rather than a value callers
+must parse. JetStream API errors belong to the JetStream module and carry
+status, code, description, and optional metadata.
 
 Human-readable `message`/`pp` functions are for CLI/logging only. Callers and
 tests must match structured constructors and fields.
 
 `Nats.Event.t`, also introduced with `Nats.Client`, is separate from wire
-output. It should report server INFO updates, connected/reconnected/disconnected transitions, lame-duck mode,
-server errors, protocol notices, slow consumers, and closed state. An
+output. The pure machine reports server INFO updates, connected, lame-duck
+mode, server errors, protocol notices, flush completion, drain, and close. The
+Eio facade adds reconnect, disconnection, and slow-consumer events. An
 application message is delivered through a subscription, not hidden in a
 generic lifecycle callback.
 
@@ -366,7 +369,7 @@ Client.v       : config -> Client.t
 Client.outgoing: Client.t -> command -> (Client.t * wire_output, Error.t) result
 Client.incoming: Client.t -> now -> byte_reader -> transition
 Client.timer   : Client.t -> now -> transition
-Client.next_timeout: Client.t -> now -> Mtime.span option
+Client.next_timeout: Client.t -> Mtime.t option
 ```
 
 `command` is a closed client-owned vocabulary for publish, subscribe,
@@ -388,7 +391,7 @@ must remain:
 The transition result should make the delivery channel explicit, for example:
 
 ```text
-type delivery = { sid : int; message : Message.t }
+type delivery = { sid : int; message : Message.t; status : Op.status option }
 type transition = {
   state : Client.t;
   output : string list;
@@ -397,14 +400,17 @@ type transition = {
 }
 ```
 
-`Event.t` remains lifecycle-shaped. A delivery is not an event: it has a
-different consumer, backpressure policy, and ownership path in the Eio layer.
+`Event.t` contains only observations the pure machine can emit: typed INFO,
+connected, protocol notices, flush completion, server errors, drain, and close.
+Reconnect, disconnection, and slow-consumer events belong to the Eio facade. A
+delivery is not an event: it has a different consumer, status metadata,
+backpressure policy, and ownership path in the Eio layer.
 
 The parser must accept asynchronous `INFO`, interleaved control messages, and
 both payload-bearing and header-bearing message forms. One `incoming` call
-drains every complete operation available from the caller-owned reader and
-stops at the first incomplete operation; partial bytes remain in that reader,
-never in `Client.t`. It must reject invalid lengths, malformed subjects,
+consumes at most one complete operation; the adapter loops while the reader
+has data, bounding deliveries and output per transition. Partial bytes remain
+in that reader, never in `Client.t`. It must reject invalid lengths, malformed subjects,
 incomplete control lines at EOF, and protocol violations without exceptions
 escaping the boundary.
 
