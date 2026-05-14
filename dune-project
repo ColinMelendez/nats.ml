@@ -12,4 +12,6 @@
  (depends
   (ocaml (>= 5.2))
   bytesrw
+  jsont
+  mtime
   (windtrap :with-test)))

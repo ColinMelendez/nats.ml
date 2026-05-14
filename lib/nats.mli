@@ -20,3 +20,18 @@ module Packet = Packet
 
 module Codec = Codec
 (** Encoding and decoding of Core NATS wire operations. *)
+
+module Config = Config
+(** Transport-independent client settings. *)
+
+module Info = Info
+(** Typed server information received in [INFO]. *)
+
+module Error = Error
+(** Structured errors from the client state machine. *)
+
+module Event = Event
+(** Events emitted by the client state machine. *)
+
+module Client = Client
+(** The immutable, I/O-neutral Core NATS state machine. *)

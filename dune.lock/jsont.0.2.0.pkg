@@ -1,0 +1,27 @@
+(version 0.2.0)
+
+(build
+ (all_platforms
+  ((action
+    (run
+     ocaml
+     pkg/pkg.ml
+     build
+     --dev-pkg
+     %{pkg-self:dev}
+     --with-cmdliner
+     false
+     --with-bytesrw
+     %{pkg:bytesrw:installed}
+     --with-brr
+     false)))))
+
+(depends
+ (all_platforms
+  (ocaml ocamlfind ocamlbuild topkg bytesrw)))
+
+(source
+ (fetch
+  (url https://erratique.ch/software/jsont/releases/jsont-0.2.0.tbz)
+  (checksum
+   sha512=6206f73a66cb170b560a72e58f70b9fb2c20397b9ab819dceba49b6602b9b79e47ba307e6910e61ca4694555c66fdcd7a17490afb99548e8f43845a5a88913e7)))
