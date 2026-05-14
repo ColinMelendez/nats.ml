@@ -1,0 +1,37 @@
+(version 0.3.0)
+
+(build
+ (all_platforms
+  ((action
+    (run
+     ocaml
+     pkg/pkg.ml
+     build
+     --dev-pkg
+     %{pkg-self:dev}
+     --with-cmdliner
+     false
+     --with-b0
+     false
+     --with-conf-libblake3
+     false
+     --with-conf-mbedtls
+     false
+     --with-conf-libmd
+     false
+     --with-conf-xxhash
+     false
+     --with-conf-zlib
+     false
+     --with-conf-zstd
+     false)))))
+
+(depends
+ (all_platforms
+  (ocaml ocamlfind ocamlbuild topkg conf-pkg-config)))
+
+(source
+ (fetch
+  (url https://erratique.ch/software/bytesrw/releases/bytesrw-0.3.0.tbz)
+  (checksum
+   sha512=388858b0db210a62a16f56655746fdfadbc64b22c2abb5ed5a12b2872e4f8c34f045cdb953a5dda9b92f0003c7f9f34d70fa5b5bb19fd32fb6121bbaeb7ceba0)))

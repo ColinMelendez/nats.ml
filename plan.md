@@ -21,6 +21,17 @@ remaining NATS product surface is added behind later stability gates.
 
 NATS Streaming/STAN is not part of this plan.
 
+### Current checkpoint
+
+The repository scaffold and the first wire-core slice are in place. The
+implementation currently provides validated subjects, filters, queue groups,
+headers, and messages; the closed wire-operation vocabulary; CRLF and payload
+framing over a caller-owned `Bytesrw.Bytes.Reader.t`; and a phase-blind codec.
+The codec intentionally leaves `INFO`/`CONNECT` JSON opaque and its framing
+errors stop the stream. The next implementation step is the immutable
+`Nats.Client` transition layer, which will introduce typed negotiation,
+structured errors, and lifecycle events before the Eio connection owner.
+
 ## Working principles
 
 These are implementation invariants, not optional preferences.

@@ -1,0 +1,4 @@
+(test
+ (name test_nats)
+ (modules test_nats)
+ (libraries nats windtrap))

@@ -306,7 +306,8 @@ make JSON the protocol payload.
 
 #### Errors and events
 
-`Nats.Error.t` should be a closed, structured variant covering at least:
+`Nats.Error.t`, introduced with `Nats.Client`, should be a closed, structured
+variant covering at least:
 
 - invalid subject/filter/header/configuration;
 - protocol framing or decoding failure;
@@ -320,8 +321,8 @@ make JSON the protocol payload.
 Human-readable `message`/`pp` functions are for CLI/logging only. Callers and
 tests must match structured constructors and fields.
 
-`Nats.Event.t` is separate from wire output. It should report server INFO
-updates, connected/reconnected/disconnected transitions, lame-duck mode,
+`Nats.Event.t`, also introduced with `Nats.Client`, is separate from wire
+output. It should report server INFO updates, connected/reconnected/disconnected transitions, lame-duck mode,
 server errors, protocol notices, slow consumers, and closed state. An
 application message is delivered through a subscription, not hidden in a
 generic lifecycle callback.
@@ -344,6 +345,13 @@ contains an application message, while `INFO`, `SUB`, and `PING` do not. The
 codec is phase-blind; only `Client` decides whether an operation is valid in
 the current connection phase. There is no public `Nats.Protocol` module: the
 curated top-level interface and the `Op`/`Codec` pair are the protocol surface.
+
+`INFO` and `CONNECT` JSON is intentionally opaque at this layer. `Codec`
+checks that the operation carries a non-empty, line-safe JSON string but does
+not interpret its fields. `Client` owns typed negotiation data such as
+`max_payload`, header support, no-responders support, server URLs, nonces, and
+lame-duck state. `Packet.default_limits` are defensive parser bounds; a client
+must apply the negotiated `max_payload` separately when encoding publishes.
 
 `Nats.Client.t` is abstract. It owns protocol facts such as connection phase,
 server information, next client-assigned subscription id, active subscription
@@ -399,6 +407,12 @@ stops at the first incomplete operation; partial bytes remain in that reader,
 never in `Client.t`. It must reject invalid lengths, malformed subjects,
 incomplete control lines at EOF, and protocol violations without exceptions
 escaping the boundary.
+
+`Packet.read` returning `Need_more` means that the same reader is retained and
+retried after the transport appends bytes. A successful packet is consumed
+before `Codec.decode` runs; a subsequent codec error therefore poisons the
+stream just like a framing error. The client must close or reconnect after
+either fatal case, never skip bytes and continue.
 
 ### The Eio connection layer
 

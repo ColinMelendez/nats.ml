@@ -1,0 +1,7 @@
+_build*/
+*.install
+*.merlin
+*.corrected
+result
+.DS_Store
+compile_commands.json

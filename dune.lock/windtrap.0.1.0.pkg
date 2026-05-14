@@ -1,0 +1,19 @@
+(version 0.1.0)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs} @install))))))
+
+(depends
+ (all_platforms
+  (dune ocaml)))
+
+(source
+ (fetch
+  (url
+   https://github.com/invariant-hq/windtrap/releases/download/0.1.0/windtrap-0.1.0.tbz)
+  (checksum
+   sha512=c6cf83028bb09d0f2afeb38fce6825620873a6bbeff4b5b77e928bc2fc69262d49fe341961cba2b451c9dc9bd0df414f06bb73020c7131b125c6abd85c6bc5dd)))
