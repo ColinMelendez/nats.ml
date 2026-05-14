@@ -1,0 +1,659 @@
+# NATS client SDK for OCaml
+
+## Status
+
+This is the initial design proposal, based on the maintained NATS clients and
+the NATS protocol documentation available on 2026-08-10. It is deliberately a
+design document rather than an API commitment: names and exact module
+signatures should be checked against small working prototypes before they are
+stabilised.
+
+The recommendation is to build a feature-complete SDK in waves around a small,
+runtime-independent protocol core and an Eio integration. The core should own
+the protocol state machine; the Eio layer should own sockets, fibers, queues,
+timers, reconnect attempts, and the user-facing blocking/direct-style API.
+
+The first API-stability gate should cover Core NATS and its Eio facade. The
+longer-term SDK target is JetStream, Key-Value, Object Store, and Services, but
+those surfaces should stabilize only after the Core NATS connection,
+subscription, reconnect, and drain semantics have been exercised against a
+real server. NATS Streaming is intentionally out of scope. It is a separate,
+legacy protocol and compatibility with its APIs or data formats would weaken a
+new library without helping the NATS design.
+
+## 1. Research scope
+
+The official NATS ecosystem classifies clients as Tier 1, which track server
+releases, and Tier 2, which may lag in features. The Tier 1 set is Go,
+JavaScript/TypeScript, Python, Java, Rust, .NET, and C; this document gives
+those clients the most weight. The maintained Tier 2 set is Zig, Swift, Ruby,
+and Elixir. The classification is maintained by NATS in the
+[official ecosystem guide](https://docs.nats.io/concepts/ecosystem).
+
+### Maintained SDK comparison
+
+| SDK | General runtime and receive model | Feature shape | Design lesson for OCaml |
+| --- | --- | --- | --- |
+| [Go](https://github.com/nats-io/nats.go) | A mutable connection object; callback, synchronous, and channel subscriptions; request/reply and flush on the connection. | Core NATS, JetStream, KV, Object Store, and the `micro` Services API. The newer JetStream package separates stream, consumer, and message concerns and supports pull, push, ordered, fetch, and continuous consumption. | The reference client has excellent protocol coverage, but its several receive styles and historical APIs should not all become separate OCaml abstractions. |
+| [JavaScript/TypeScript](https://github.com/nats-io/nats.js) | A runtime-independent base client with transport packages for Node, Deno, Bun, and browser WebSockets. Subscriptions are async iterators by default, with callbacks as an explicit alternative. | Core, JetStream, KV, Object Store, and Services are separate modules over a common connection interface. Orbit helpers are intentionally separated from direct protocol-parity APIs. | A strong model for separating protocol logic from transports and for making the common receive path compositional. |
+| [Python](https://github.com/nats-io/nats.py) | Python 3 `asyncio`; subscriptions can use callbacks or async iteration. Connection options cover reconnect, TLS, authentication, and lifecycle callbacks. | Core and JetStream are prominent in the main client; the maintained documentation also exposes KV and Object Store APIs. | Async iteration is a useful usability reference, but an OCaml API should use direct style and typed results rather than Python-style callback conventions. |
+| [Java](https://github.com/nats-io/nats.java) | A connection with synchronous subscriptions, `Future` requests, and dispatcher callbacks. Builders expose connection, TLS, authentication, reconnect, and executor choices. | Core, JetStream, KV, Object Store, and a Service Framework. The client has typed request failure reasons and a deliberate distinction between core and higher-level APIs. | Typed failure categories and an explicit low-level escape hatch are valuable; exposing executor ownership as a central concern is not. |
+| [Rust](https://github.com/nats-io/nats.rs) (`async-nats`) | Tokio-based async client. A cloneable client handle produces `Subscriber` values implementing `Stream`; subscriber drain and unsubscribe are explicit. | Core, JetStream management and consumption, KV, Object Store, and Services, with typed consumer and acknowledgement models. | The typed resource/stream shape is the closest conceptual analogue to an OCaml module API, although the first OCaml adapter should not be tied to Tokio-like runtime assumptions. |
+| [.NET](https://github.com/nats-io/nats.net) | Modern API is async-first. `NatsClient` is a high-level facade and `NatsConnection` is the lower-level connection; subscriptions use `IAsyncEnumerable`/channels. | Split packages cover Core, JetStream, KV, Object Store, Services, serializers, and dependency injection. | Progressive disclosure works well: make the normal path short while retaining a lower-level connection and typed payload escape hatch. |
+| [C](https://github.com/nats-io/nats.c) | Opaque connection/subscription/message handles with explicit destruction; callback and synchronous subscriptions. The default implementation uses threads, with libevent/libuv integration points. | Core, JetStream, KV, Object Store, and `micro` Services, including reconnect, TLS, authentication, headers, pending limits, and slow-consumer reporting. | Explicit ownership and event-loop seams matter. The threading model belongs in an adapter, not in the protocol model. |
+
+The current Tier 2 implementations are useful for edge cases but should not
+drive the first architecture:
+
+| SDK | Current shape and notable boundary |
+| --- | --- |
+| [Zig](https://github.com/nats-io/nats.zig) | Core, JetStream, KV, and Micro Services with an explicit allocator and an async/future-oriented standard-library design; Object Store and mTLS are not complete in the current README. |
+| [Swift](https://github.com/nats-io/nats.swift) | Core NATS with Swift async/await and `AsyncSequence`; JetStream, KV, Object Store, and Services are presented as future work. |
+| [Ruby](https://github.com/nats-io/nats-pure.rb) | Thread-safe callback and blocking request APIs, with Core, JetStream, and Services. |
+| [Elixir](https://github.com/nats-io/nats.ex) | A GenServer/OTP process model with supervised reconnecting consumers and a Services implementation; its concurrency and ownership model is intentionally unlike an OCaml library. |
+
+This survey intentionally does not treat old language-specific repositories or
+NATS Streaming clients as architectural authorities. The official ecosystem
+page is the source of truth for the maintained-client set.
+
+## 2. What the protocol and product require
+
+NATS is a line-oriented protocol over a byte stream. Control lines and payloads
+are terminated by CRLF. The core vocabulary is `INFO`, `CONNECT`, `PUB`,
+`HPUB`, `SUB`, `UNSUB`, `MSG`, `HMSG`, `PING`, `PONG`, `+OK`, and `-ERR`.
+Headers add a second length pair around the header block and payload. `INFO`
+may arrive asynchronously after the initial server information, and protocol
+version 1 enables dynamic server discovery. These details are specified in the
+[NATS protocol reference](https://docs.nats.io/reference/reference-protocols/nats-protocol).
+
+The header block begins with the `NATS/1.0` version line and can carry repeated
+fields such as `Status` and `Description`; that version line is framing, not an
+ordinary application header. The Core connection should negotiate headers by
+default because no-responders and several modern server features depend on
+them. The client must also enforce the negotiated `max_payload` from `INFO`
+before emitting a publish.
+
+The feature set that a modern client must make coherent is:
+
+| Area | Observed behavior in official clients | Required design consequence |
+| --- | --- | --- |
+| Subjects | Case-sensitive dot-separated tokens; `*` matches one token and `>` matches the remaining tail. Publish subjects cannot be subscription wildcards. | Validate ordinary subjects and subscription filters at construction. Give the two concepts distinct types so invalid publish calls are unrepresentable. |
+| Messages and headers | Messages carry subject, optional reply subject, payload, and optional multi-valued headers. Header names are case-insensitive for lookup but their wire spelling is observable. | Keep payload opaque and immutable. Preserve header values and original spelling while providing case-insensitive lookup. |
+| Subscription identity | The client chooses a numeric subscription id in `SUB`; `MSG`/`HMSG` frames echo it. Queue groups, explicit unsubscribe, and auto-unsubscribe are standard. | Let `Client` allocate and own server ids while preserving subscription intent across reconnect. Expose an owned `Subscription.t` with `unsubscribe`, `drain`, `next`, and auto-unsubscribe operations. |
+| Request/reply | Clients create inbox subjects. Several official clients multiplex requests through one wildcard inbox; a per-request subscription remains useful when multiplexing is disabled. `503 No Responders` is a first-class failure when headers/no-responders are negotiated. | Provide one request operation with a structured timeout/no-responder result. Hide inbox subscriptions by default, but retain a low-level option for debugging and unusual routing. |
+| Flush and readiness | `flush` is a protocol barrier implemented with `PING`/`PONG`; a successful local write is not proof that the server processed a subscription or publish. | Expose `flush` as an explicit server-confirmation operation and document the distinction from socket write completion. |
+| Reconnect and discovery | Official clients reconnect by default, discover servers from `INFO`, restore subscriptions, and expose reconnect/lifecycle events. Reconnect buffers and retry limits are configurable. | Make reconnect policy part of configuration. Keep subscription intent separate from transient wire state so the protocol layer can replay `SUB` state safely. |
+| Drain and close | Close is immediate. Drain stops new work, drains subscriptions, flushes remaining output, and then closes; subscription drain processes already-cached messages. | Model `close` and `drain` as distinct terminal transitions. Make drain observable and cancellation-safe. See the [NATS drain guide](https://docs.nats.io/using-nats/developer/receiving/drain). |
+| Slow consumers | A server can disconnect a slow client; clients also impose pending limits and report local slow-consumer conditions. | Use bounded per-subscription queues. Never silently drop messages; report the condition and unsubscribe or fail according to an explicit policy. |
+| Security | CONNECT supports token, username/password, NKey/JWT-related fields, no-echo, headers, and TLS negotiation. TLS certificate handling belongs to the transport. | Keep credentials and nonce signing behind an authentication interface. Do not put private-key storage or TLS implementation in the pure protocol package. |
+| Cluster behavior | Multiple seed URLs, server-provided URLs, reconnect delay/backoff, max attempts, and lame-duck/connection lifecycle events are normal client features. | Represent configured and discovered servers separately, deduplicate them, and make the chosen server/event history inspectable without exposing mutable socket state. |
+| JetStream | A request/reply API layered over Core NATS. Streams own retained messages; consumers own delivery/ack state. Pull, push, ordered, durable, ephemeral, filtering, batch fetch, heartbeats, and acknowledgement policies are all important. | Make JetStream a typed capability over the same connection and subscription primitives, not a second transport. Separate management handles from consumption handles. |
+| Key-Value | A JetStream-backed bucket API with revisions, compare-and-set create/update, TTL, delete/purge, history, keys, and watches. | Expose revisions and operation kinds as typed values. Watch results must preserve ordering and cancellation. |
+| Object Store | A JetStream-backed chunked blob API with metadata, streaming get/put, list/watch, links, and seal/update operations. | Stream data; do not require the whole object in memory. Keep object metadata and the underlying message sequence separate. |
+| Services | A convention over Core NATS: endpoint/group definitions plus discovery and monitoring subjects such as `$SRV.PING`, `$SRV.INFO`, and `$SRV.STATS`. | Build Services from ordinary subscriptions, queue groups, and request/reply, adding typed endpoint and monitoring helpers rather than a parallel transport. |
+
+The broader product surface—Core, Services, JetStream, KV, Object Store,
+reconnect/drain, security, and WebSockets—is reflected in the official
+[NATS concepts guide](https://docs.nats.io/learn/). WebSockets are a transport
+feature, not a reason to make the protocol model browser- or socket-specific.
+
+## 3. Design goals expressed as caller code
+
+These sketches are the tests for the public shape. They are illustrative, not
+compiled API declarations.
+
+### Core publish and subscription
+
+The common case should be direct style, with no callback registry or promise
+plumbing in application code:
+
+```ocaml
+let run conn =
+  let subject = Nats.Subject.literal "orders.created" in
+  let filter = Nats.Subject.Filter.literal "orders.*" in
+  let sub = Nats_eio.Connection.subscribe conn filter in
+  match Nats_eio.Connection.publish conn ~subject "order-123" with
+  | Error error -> report_error error
+  | Ok () ->
+      (match Nats_eio.Connection.flush conn ~timeout:(Mtime.Span.of_sec 1.) with
+       | Error error -> report_error error
+       | Ok () ->
+           let rec consume () =
+             match Nats_eio.Subscription.next sub with
+             | Ok message ->
+                 handle_order message;
+                 consume ()
+             | Error Nats.Error.Closed -> ()
+             | Error error -> report_error error
+           in
+           consume ())
+```
+
+`literal` is reserved for programmer-written static names; configuration and
+user input use result-returning constructors.
+
+### Request/reply and failure categories
+
+Timeout, no responders, a server `-ERR`, cancellation, and a closed
+connection must not be distinguished by parsing a human-readable string:
+
+```ocaml
+match Nats_eio.Connection.request conn
+        ~timeout:(Mtime.Span.of_sec 2.)
+        (Nats.Subject.literal "orders.lookup")
+        "order-123" with
+| Ok reply -> use_reply reply
+| Error Nats.Error.No_responders -> handle_missing_service ()
+| Error Nats.Error.Timeout -> retry_or_fail ()
+| Error (Nats.Error.Server _ as error) -> report_error error
+| Error error -> report_error error
+```
+
+### A queue worker with graceful shutdown
+
+Queue groups and drain should compose with ordinary structured concurrency:
+
+```ocaml
+let worker =
+  Nats_eio.Connection.subscribe conn
+    ~queue:(Nats.Queue_group.literal "order-workers")
+    (Nats.Subject.Filter.literal "orders.created")
+in
+
+Eio.Switch.run @@ fun child_sw ->
+  Eio.Fiber.fork ~sw:child_sw (fun () ->
+    Nats_eio.Subscription.iter worker ~f:process_order);
+  wait_until_shutdown_requested ();
+  Nats_eio.Subscription.drain worker;
+  Nats_eio.Connection.drain conn
+```
+
+The exact integration with a parent switch is still open, but the ownership
+rule is not: the switch that creates a connection owns its termination.
+
+### JetStream pull consumption
+
+JetStream should expose a typed consumer rather than make users assemble API
+subjects and decode acknowledgement metadata themselves:
+
+```ocaml
+let js = Nats_eio.Jetstream.connect conn in
+let stream =
+  Nats_eio.Jetstream.Stream.create js
+    ~name:"ORDERS"
+    ~subjects:[Nats.Subject.Filter.literal "orders.>"]
+in
+let consumer = Nats_eio.Jetstream.Consumer.pull stream ~durable:"worker" in
+
+Nats_eio.Jetstream.Consumer.iter consumer ~f:(fun message ->
+  match process_order message with
+  | Ok () -> Nats_eio.Jetstream.Message.ack message
+  | Error _ -> Nats_eio.Jetstream.Message.nak message)
+```
+
+The high-level API should still expose raw request/reply and raw NATS messages
+for advanced JetStream features that arrive before a convenience wrapper.
+
+### The protocol core as a testable boundary
+
+An adapter should be able to drive the protocol without a socket:
+
+```ocaml
+let state = Nats.Client.v config in
+let state, output = Nats.Client.outgoing state command in
+let state, transition =
+  Nats.Client.incoming state ~now reader
+in
+(* transition.output is wire data; events and deliveries are separate. *)
+```
+
+The exact return record may evolve, but the invariant is fixed: bytes in and
+bytes out are separate from events, and the core does not perform I/O, sleep,
+DNS, TLS, randomness, or callbacks.
+
+## 4. Architectural alternatives
+
+Five credible designs were considered against the examples above.
+
+| Alternative | What it makes easy | What it makes hard | Decision |
+| --- | --- | --- | --- |
+| Mutable Eio connection as the whole library | A short application API; natural blocking operations. | Deterministic protocol tests, alternate transports, parser fuzzing, and reuse from another runtime. Protocol state and resource ownership become entangled. | Reject as the library boundary; retain this shape as the `nats-eio` facade. |
+| Pure protocol state machine only | Interop testing, formal reasoning, and transport portability. | Every user must implement connection ownership, reconnect, queues, and cancellation. It is a protocol toolkit, not an SDK. | Reject as the only public layer; make it the load-bearing core. |
+| Functorized runtime/backend abstraction | A single source-level design for Eio, Lwt, Unix, and future runtimes. | Functor plumbing leaks into every caller and does not remove the need to specify ownership and backpressure. It over-generalizes before a second backend exists. | Reject initially; keep the core I/O-free so a later adapter can be added without redesigning it. |
+| Callback/dispatcher-first API | Familiarity for Go, C, Java, and Python users; easy background delivery. | Inversion of control, exceptions/effect handling in callbacks, difficult backpressure, and awkward composition with Eio fibers. | Reject as the default; offer a small callback/iteration bridge over owned subscriptions. |
+| Pure core plus Eio direct-style facade | Deterministic protocol implementation, one coherent runtime API, and room for future adapters. | Requires a deliberate ownership protocol and a little adapter machinery. | Recommend. This is the best balance of portability, modern OCaml ergonomics, and feature completeness. |
+
+This also settles the package question. Do not publish a package per NATS
+feature at the beginning. Keep the pure protocol package small and make one
+runtime package expose Core, JetStream, KV, Object Store, and Services as they
+are implemented, all over the same connection. Stabilize those modules in
+separate waves; split optional features later only if dependency or release
+pressure demonstrates a real need.
+
+## 5. Recommended architecture
+
+### Package boundary
+
+The initial public packages should be:
+
+```text
+nats
+├── Nats.Subject
+├── Nats.Queue_group
+├── Nats.Header
+├── Nats.Message
+├── Nats.Op
+├── Nats.Error
+├── Nats.Event
+├── Nats.Codec
+├── Nats.Packet
+└── Nats.Client
+
+nats-eio
+├── Nats_eio.Connection
+├── Nats_eio.Subscription
+├── Nats_eio.Jetstream
+├── Nats_eio.Key_value
+├── Nats_eio.Object_store
+└── Nats_eio.Service
+```
+
+`nats` must not depend on Eio, Lwt, Unix, TLS, DNS, or a particular socket
+implementation. Its likely dependencies are limited to the byte-reader and
+time/value libraries needed to express an incremental protocol. `nats-eio`
+owns network dialing, TLS, DNS, timers, fibers, channels, cancellation, and
+buffer limits.
+
+The narrow waist is the pure transition
+
+```text
+bytes -> Packet -> Op -> Client -> (wire output, lifecycle events, deliveries)
+```
+
+Every runtime adapter and every higher-level feature uses that transition and
+the shared application `Nats.Message.t`; no feature gets a private socket
+path. `Op` is the protocol's wire AST. `Message` is the application message
+carried by publish and delivery operations; keeping those concepts separate
+prevents control lines and application data from becoming one overloaded type.
+
+### Domain modules
+
+#### Subjects and queues
+
+`Nats.Subject.t` represents a valid publish or reply subject. A distinct
+`Nats.Subject.Filter.t` represents a subscription filter and is the only type
+that can contain wildcards. `Nats.Queue_group.t` represents a queue group name.
+
+Each module should provide a result-returning parser, a programmer-literal
+constructor for fixed source-level values, a formatter, and accessors only
+where they improve composition. No caller should need to know the wire rules
+for wildcard placement.
+
+#### Headers and messages
+
+`Nats.Header.t` is an immutable, multi-valued map. It must:
+
+- preserve all values and their insertion order for wire encoding;
+- perform case-insensitive lookup;
+- preserve the first/original spelling when re-encoding;
+- distinguish absent, present-with-empty-value, and repeated values.
+
+`Nats.Message.t` contains an immutable payload (`string`), a subject, an
+optional reply subject, and headers. Payloads remain opaque: JSON, CBOR,
+binary codecs, and application-specific formats belong in small codec values
+passed to higher-level operations. The default API should not require a PPX or
+make JSON the protocol payload.
+
+#### Errors and events
+
+`Nats.Error.t` should be a closed, structured variant covering at least:
+
+- invalid subject/filter/header/configuration;
+- protocol framing or decoding failure;
+- server errors with the wire error code/text kept as separate fields;
+- authentication/TLS/connection/reconnect failures;
+- timeout, cancellation, closed, and draining states;
+- no responders and slow consumer;
+- transport-adjacent errors only; JetStream API errors belong to the
+  JetStream module and carry status, code, description, and optional metadata.
+
+Human-readable `message`/`pp` functions are for CLI/logging only. Callers and
+tests must match structured constructors and fields.
+
+`Nats.Event.t` is separate from wire output. It should report server INFO
+updates, connected/reconnected/disconnected transitions, lame-duck mode,
+server errors, protocol notices, slow consumers, and closed state. An
+application message is delivered through a subscription, not hidden in a
+generic lifecycle callback.
+
+### The pure protocol layer
+
+The pure package has four protocol responsibilities plus the application
+message model:
+
+1. `Nats.Message` and `Nats.Header` model application data.
+2. `Nats.Op` is the closed, phase-blind wire AST for `INFO`, `CONNECT`, `PUB`,
+   `MSG`, `PING`, and the other control operations.
+3. `Nats.Codec` maps `Op` values to and from bytes; `Nats.Packet` handles CRLF
+   framing, length checks, header-block bounds, and incremental reader
+   progress.
+4. `Nats.Client` is the asymmetric client state machine over `Op` values.
+
+`Nats.Op` is intentionally separate from `Nats.Message`: a `MSG` operation
+contains an application message, while `INFO`, `SUB`, and `PING` do not. The
+codec is phase-blind; only `Client` decides whether an operation is valid in
+the current connection phase. There is no public `Nats.Protocol` module: the
+curated top-level interface and the `Op`/`Codec` pair are the protocol surface.
+
+`Nats.Client.t` is abstract. It owns protocol facts such as connection phase,
+server information, next client-assigned subscription id, active subscription
+intent, pending protocol barriers, negotiated features, and discovered server
+URLs. It does not own a socket, a fiber, a mutex, a clock, a buffer, a random
+generator, or an application callback.
+
+The state machine should expose canonical transitions along these lines:
+
+```text
+Client.v       : config -> Client.t
+Client.outgoing: Client.t -> command -> (Client.t * wire_output, Error.t) result
+Client.incoming: Client.t -> now -> byte_reader -> transition
+Client.timer   : Client.t -> now -> transition
+Client.next_timeout: Client.t -> now -> Mtime.span option
+```
+
+`command` is a closed client-owned vocabulary for publish, subscribe,
+unsubscribe, ping/flush barriers, and connection intent. Adapters do not
+construct arbitrary `Op.SUB` values: `Client` allocates sids, tracks
+auto-unsubscribe counts, and keeps the intent needed for reconnect replay.
+
+The final signature may return records rather than tuples, but the separation
+must remain:
+
+- wire output is what the adapter writes;
+- events are what the adapter observes;
+- application deliveries are a separate result channel, each carrying the
+  client-assigned sid and a `Message.t`;
+- fatal errors are structured and may include required closing output;
+- time is supplied by the caller. Core NATS inbox names and reconnect jitter
+  are adapter concerns; any future core randomness is an explicit input.
+
+The transition result should make the delivery channel explicit, for example:
+
+```text
+type delivery = { sid : int; message : Message.t }
+type transition = {
+  state : Client.t;
+  output : string list;
+  events : Event.t list;
+  deliveries : delivery list;
+}
+```
+
+`Event.t` remains lifecycle-shaped. A delivery is not an event: it has a
+different consumer, backpressure policy, and ownership path in the Eio layer.
+
+The parser must accept asynchronous `INFO`, interleaved control messages, and
+both payload-bearing and header-bearing message forms. One `incoming` call
+drains every complete operation available from the caller-owned reader and
+stops at the first incomplete operation; partial bytes remain in that reader,
+never in `Client.t`. It must reject invalid lengths, malformed subjects,
+incomplete control lines at EOF, and protocol violations without exceptions
+escaping the boundary.
+
+### The Eio connection layer
+
+`Nats_eio.Connection.t` is the owned runtime capability. Creating it starts a
+single protocol owner that serializes application commands and socket input
+through the pure `Nats.Client` state machine. This avoids races between a
+reader, reconnect logic, and concurrent publishers without making protocol
+state mutable or globally shared.
+
+The connection owns:
+
+- configured and discovered server candidates;
+- the current TCP/TLS flow and connection phase;
+- reconnect backoff, attempt limits, jitter, and retry policy;
+- bounded per-subscription delivery queues;
+- request waiters and the shared inbox multiplexer;
+- a bounded lifecycle event stream with an explicit overflow policy;
+- cancellation and final resource cleanup.
+
+The normal user operations should be direct-style and result-returning:
+
+```text
+Connection.connect
+Connection.publish
+Connection.publish_msg
+Connection.subscribe
+Connection.request
+Connection.flush
+Connection.events
+Connection.drain
+Connection.close
+
+Subscription.next
+Subscription.iter
+Subscription.unsubscribe
+Subscription.drain
+Subscription.auto_unsubscribe
+```
+
+`publish` accepts a subject, optional reply subject, optional headers, and an
+immutable payload. `publish_msg` accepts a pre-built message for callers that
+need exact control. Core publish acknowledges successful handoff to the local
+connection machinery, not server processing; callers needing a server barrier
+use `flush`, and callers needing durable acknowledgement use JetStream publish.
+
+#### Receive and backpressure policy
+
+The default subscription is pull-based: `next` waits for a message and
+`iter` is a convenience loop. An adapter-level callback helper can be built on
+the same primitive, but the protocol core never invokes user code.
+
+Every subscription has a bounded queue. The default policy is correctness over
+silent loss: when the queue is full, the subscription is failed or locally
+unsubscribed and a structured slow-consumer event is emitted. Optional
+explicit policies may drop with an event or use a larger/unbounded queue, but
+there must be no implicit loss. The policy is local and independent from the
+server's pending limits.
+
+#### Requests
+
+Requests use a private inbox prefix and a shared wildcard subscription by
+default, as in the modern JavaScript and Zig clients. The implementation must
+also support a no-multiplexing/per-request subscription mode for diagnostics
+and compatibility with unusual servers. A request completes with exactly one
+of:
+
+- a response message;
+- `No_responders` when negotiated and received;
+- timeout;
+- cancellation;
+- connection close/drain;
+- a structured server error.
+
+Pending requests must not be silently replayed across reconnect. A future
+option may make selected requests retryable, but it must be opt-in and tied to
+an idempotency policy. Request timeout is an Eio waiter concern; the pure
+`Client.timer` handles protocol liveness such as ping/stale detection and must
+not become a global timer for application RPCs. Response, timeout, disconnect,
+and cancellation races must complete each waiter exactly once.
+
+#### Reconnect, drain, and close
+
+Reconnect is enabled by default. The connection should:
+
+1. preserve subscription intent and local limits;
+2. select a configured or server-discovered candidate;
+3. send `CONNECT`, re-establish active subscriptions, and restore
+   auto-unsubscribe state;
+4. expose the transition through `Event.t`;
+5. apply an explicit policy to buffered publishes.
+
+Buffered publish replay is inherently at-least-once at the transport boundary:
+a publish may have reached the server just before a disconnect and then be
+sent again. Therefore the default should not silently replay arbitrary Core
+publishes. If a reconnect buffer is enabled, the API must document the
+duplicate-delivery risk and provide size/overflow/error visibility. JetStream
+publish should use message ids when the caller needs deduplication.
+
+`close` stops immediately and releases resources. `drain` rejects new
+publishes/subscriptions, lets existing subscription queues and pending output
+finish, flushes, then closes. A connection drain must also drain or cancel
+request waiters deterministically. Subscription drain has the narrower meaning
+of unsubscribe while delivering already-received messages.
+
+### Authentication and transports
+
+The core needs only the data required to construct CONNECT and to sign a server
+nonce. It should accept authentication data or an explicit one-shot signing
+function such as:
+
+```text
+Auth.none
+Auth.token
+Auth.user_pass
+Auth.nkey_sign : sign:(nonce:string -> (signature:string, error) result) -> t
+Auth.jwt       : jwt:string -> sign:(nonce:string -> result) -> t
+```
+
+Private key parsing/storage belongs in an optional authentication module. Do
+not store a signing closure or PRNG state in `Client.t`; the Eio adapter keeps
+the credential capability and supplies the signature when constructing a
+CONNECT operation. The connection should support TLS configuration through the
+Eio adapter and set the protocol's TLS-required flag where appropriate. TCP is
+the first transport; WebSocket can later implement the same connection-facing
+transport seam.
+
+### JetStream, KV, Object Store, and Services
+
+These modules should be layered over `Connection.request` and
+`Connection.subscribe`:
+
+- `Nats_eio.Jetstream` provides a connection capability, typed API request and
+  response models, stream/consumer management, publish acknowledgements,
+  consumer handles, pull and push consumption, ordered consumers, fetch by
+  count/bytes, heartbeats, and acknowledgement operations (`ack`, `nak`,
+  `term`, `in_progress`, and synchronous ack where supported).
+- `Nats_eio.Key_value` provides bucket creation/opening, get/put, create/update
+  compare-and-set, delete/purge, revision/history, TTL, keys, status, and
+  cancellable watches. Watch entries preserve bucket, key, value, revision,
+  timestamp, and operation (`put`, `delete`, or `purge`).
+- `Nats_eio.Object_store` provides streaming put/get, metadata, list, watch,
+  update, link, and seal. Large objects must be transferred incrementally and
+  not assembled into one mandatory in-memory string.
+- `Nats_eio.Service` provides endpoint and group definitions, queue-backed
+  workers, typed request handlers, service metadata, and automatic responses to
+  discovery/monitoring subjects. It should compose from core subscriptions and
+  request/reply, so Services do not become a second lifecycle system.
+
+JetStream consumers deserve particular care. Pull consumption is the default
+for new code because it makes demand and backpressure explicit; push consumers
+remain fully supported. A consumer handle should expose both one-shot fetch
+and a long-lived iterator/loop, with cancellation that releases server-side
+resources. Acknowledgement methods must be tied to the delivered message's
+metadata, not reconstructed from application payloads.
+
+Management operations should use typed request/response codecs and preserve
+unknown server fields where practical. They should not require callers to
+construct `$JS.API.*` subjects or parse JSON error strings. The server-version
+minimum for each feature should be checked and returned as a structured error,
+not hidden behind a generic request failure.
+
+## 6. Testing and interoperability
+
+The protocol boundary should be tested as a black-box state machine, not only
+through individual helper functions:
+
+- feed valid and invalid raw frames through the parser, including fragmented
+  input, interleaved `INFO`, headers, empty payloads, and large lengths;
+- assert exact wire output for CONNECT, PUB/HPUB, SUB/UNSUB, PING/PONG, and
+  reconnect replay;
+- exercise request multiplexing, no responders, auto-unsubscribe, slow
+  consumers, drain, and server errors;
+- fuzz framing and control-line decoding for crash safety and bounded memory;
+- run in-memory client/server transition tests to verify the state machine
+  without a network;
+- run black-box integration tests against a real `nats-server` for reconnect,
+  cluster discovery, TLS/authentication, queue groups, JetStream, KV, Object
+  Store, and Services;
+- cross-check observable behavior with NATS by Example and at least one
+  official client for each feature family.
+
+The Eio adapter tests should verify ownership and cancellation: closing the
+parent switch closes the socket, waiting subscriptions terminate, pending
+requests receive a structured result, and a failed reconnect cannot leak a
+fiber. Tests should make server confirmation explicit—local writes must not be
+mistaken for `flush` success.
+
+## 7. Implementation sequence
+
+1. **Protocol vocabulary and invariants.** Define subjects, filters, queues,
+   headers, messages, errors, packet framing, and the client state machine.
+2. **Core NATS over Eio.** Implement TCP/TLS connection ownership, publish,
+   subscribe, queue groups, request/reply, headers, no responders, flush,
+   reconnect, discovery, drain, close, and bounded delivery queues.
+3. **Interop hardening.** Add parser fuzzing, raw-frame fixtures, reconnect and
+   drain tests, and a small compatibility matrix against the maintained Tier 1
+   clients and supported server versions.
+4. **JetStream foundation.** Add typed JSON API codecs, stream/consumer
+   management, publish acknowledgements, pull/push consumers, metadata, and
+   acknowledgements.
+5. **Durable services.** Add KV, Object Store, and Services on the JetStream/
+   Core primitives, with streaming and cancellation tests.
+6. **Ergonomic and operational polish.** Add codec helpers, structured event
+   observation, metrics hooks, WebSocket transport if justified, and optional
+   NKey/JWT helpers.
+
+The order intentionally gets Core NATS and the reconnect/drain invariants
+right before adding the JSON-heavy APIs. Every higher-level feature should
+consume the same connection and message abstractions rather than introduce a
+second client runtime.
+
+## 8. Non-goals and open decisions
+
+### Non-goals
+
+- NATS Streaming/STAN compatibility.
+- A callback-only public API.
+- A protocol core that depends on Eio, Lwt, Unix, TLS, DNS, or a socket.
+- Silent publish replay across reconnect.
+- Unbounded buffering as the default slow-consumer policy.
+- An untyped “send an arbitrary JetStream JSON request” API as the primary UX.
+
+### Decisions to validate in prototypes
+
+- Whether the subscription queue should default to a fixed size or require an
+  explicit limit in every connection configuration.
+- The exact Eio ownership shape: one protocol-owner fiber with command/reply
+  channels versus a small set of coordinated fibers.
+- Whether `Mtime.Span.t` is the public timeout type or whether the Eio facade
+  should provide a thin duration alias.
+- How much of NKey/JWT signing belongs in this repository versus a separate
+  credential package.
+- Whether raw JetStream models should preserve unknown JSON fields in an
+  extensible representation or reject unsupported server features early.
+- When a WebSocket adapter and a second runtime justify a new package.
+
+## References
+
+The primary sources used for this proposal are:
+
+- [NATS ecosystem and maintained-client tiers](https://docs.nats.io/concepts/ecosystem)
+- [NATS wire protocol](https://docs.nats.io/reference/reference-protocols/nats-protocol)
+- [NATS client development guide](https://docs.nats.io/reference/reference-protocols/nats-protocol/nats-client-dev)
+- [Reconnect behavior](https://docs.nats.io/using-nats/developer/connecting/reconnect)
+- [Drain behavior](https://docs.nats.io/using-nats/developer/receiving/drain)
+- [NATS concepts guide](https://docs.nats.io/learn/)
+- [NATS by Example](https://natsbyexample.com/)
+- [nats.go](https://github.com/nats-io/nats.go)
+- [nats.js](https://github.com/nats-io/nats.js)
+- [nats.py](https://github.com/nats-io/nats.py) and its [API documentation](https://nats-io.github.io/nats.py/)
+- [nats.java](https://github.com/nats-io/nats.java)
+- [async-nats](https://github.com/nats-io/nats.rs)
+- [nats.net](https://github.com/nats-io/nats.net)
+- [nats.c](https://github.com/nats-io/nats.c)
+- [nats.zig](https://github.com/nats-io/nats.zig)
+- [nats.swift](https://github.com/nats-io/nats.swift)
+- [nats-pure.rb](https://github.com/nats-io/nats-pure.rb)
+- [nats.ex](https://github.com/nats-io/nats.ex)
