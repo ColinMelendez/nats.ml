@@ -1,0 +1,19 @@
+(** Errors reported by the Eio connection facade. *)
+
+type slow_consumer = Events | Subscription of { sid : int }
+
+type t =
+  | Protocol of Nats.Error.t
+  | Invalid_capacity of { name : string; value : int }
+  | Command_queue_full of { capacity : int }
+  | Invalid_chunk_size of int
+  | Invalid_timeout of string
+  | Timeout
+  | Io of exn
+  | Slow_consumer of slow_consumer
+  | Disconnected
+  | Draining
+  | Closed
+
+val pp_slow_consumer : Format.formatter -> slow_consumer -> unit
+val pp : Format.formatter -> t -> unit
