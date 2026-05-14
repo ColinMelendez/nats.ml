@@ -80,12 +80,18 @@ let find_crlf string =
     done;
   !found
 
-let contains_line_break string =
+let contains_internal_line_break string =
   let found = ref false in
-  for position = 0 to String.length string - 1 do
+  let last = String.length string - 1 in
+  for position = 0 to last do
+    let trailing_carriage_return =
+      Int.equal position last && Char.equal (String.get string position) '\r'
+    in
     if
-      Char.equal (String.get string position) '\r'
-      || Char.equal (String.get string position) '\n'
+      (not trailing_carriage_return)
+      &&
+      (Char.equal (String.get string position) '\r'
+      || Char.equal (String.get string position) '\n')
     then found := true
   done;
   !found
@@ -215,39 +221,73 @@ let body_length = function
 let read ?(eod = false) ?(limits = default_limits) reader =
   if not (valid_limits limits) then Error Invalid_limits
   else
-    let prefix =
-      Bytesrw.Bytes.Reader.sniff (limits.max_line_bytes + 2) reader
+    let restore reader string =
+      let length = String.length string in
+      if length > 0 then
+        let bytes = Bytes.of_string string in
+        Bytesrw.Bytes.Reader.push_back reader
+          (Bytesrw.Bytes.Slice.make bytes ~first:0 ~length)
     in
-    if Int.equal (String.length prefix) 0 then
-      if eod then Error End_of_input else Error Need_more
-    else
+    let buffer = Buffer.create (Int.min limits.max_packet_bytes 4096) in
+    let add_slice slice = Bytesrw.Bytes.Slice.add_to_buffer buffer slice in
+    let restore_error error =
+      restore reader (Buffer.contents buffer);
+      Error error
+    in
+    let rec read_line () =
+      let prefix = Buffer.contents buffer in
       match find_crlf prefix with
-      | None ->
-          if contains_line_break prefix then Error Malformed_line
+      | Some line_end -> Ok (prefix, line_end)
+      | None -> (
+          if contains_internal_line_break prefix then Error Malformed_line
           else if String.length prefix >= limits.max_line_bytes + 2 then
             Error (Line_too_long { limit = limits.max_line_bytes })
-          else if eod then Error Unexpected_end
-          else Error Need_more
-      | Some line_end -> (
-          if line_end > limits.max_line_bytes then
-            Error (Line_too_long { limit = limits.max_line_bytes })
           else
-            let line = String.sub prefix 0 line_end in
-            match classify line limits with
-            | Error error -> Error error
-            | Ok framing -> (
-                match packet_size line_end framing with
-                | Error error -> Error error
-                | Ok size ->
-                    if size > limits.max_packet_bytes then
-                      Error
-                        (Packet_too_large
-                           { size; limit = limits.max_packet_bytes })
-                    else
-                      let complete = Bytesrw.Bytes.Reader.sniff size reader in
-                      if String.length complete < size then
-                        if eod then Error Unexpected_end else Error Need_more
-                      else
+            match Bytesrw.Bytes.Reader.read reader with
+            | slice when Bytesrw.Bytes.Slice.is_eod slice ->
+                if eod then
+                  if String.length prefix = 0 then Error End_of_input
+                  else Error Unexpected_end
+                else Error Need_more
+            | slice ->
+                add_slice slice;
+                read_line ())
+    in
+    let read_body size =
+      let rec loop () =
+        if Buffer.length buffer >= size then Ok ()
+        else
+          match Bytesrw.Bytes.Reader.read reader with
+          | slice when Bytesrw.Bytes.Slice.is_eod slice ->
+              if eod then Error Unexpected_end
+              else Error Need_more
+          | slice ->
+              add_slice slice;
+              loop ()
+      in
+      loop ()
+    in
+    match read_line () with
+    | Error error -> restore_error error
+    | Ok (complete, line_end) -> (
+        if line_end > limits.max_line_bytes then
+          restore_error (Line_too_long { limit = limits.max_line_bytes })
+        else
+          let line = String.sub complete 0 line_end in
+          match classify line limits with
+          | Error error -> restore_error error
+          | Ok framing -> (
+              match packet_size line_end framing with
+              | Error error -> restore_error error
+              | Ok size -> (
+                  if size > limits.max_packet_bytes then
+                    restore_error
+                      (Packet_too_large { size; limit = limits.max_packet_bytes })
+                  else
+                    match read_body size with
+                    | Error error -> restore_error error
+                    | Ok () ->
+                        let complete = Buffer.contents buffer in
                         let has_body =
                           match framing with Line -> false | _ -> true
                         in
@@ -256,14 +296,17 @@ let read ?(eod = false) ?(limits = default_limits) reader =
                           || Char.equal (String.get complete (size - 2)) '\r'
                              && Char.equal (String.get complete (size - 1)) '\n'
                         in
-                        if not valid_terminator then Error Invalid_terminator
-                        else
+                        if not valid_terminator then restore_error Invalid_terminator
+                        else (
+                          if String.length complete > size then
+                            restore reader
+                              (String.sub complete size
+                                 (String.length complete - size));
                           let body_start = line_end + 2 in
                           let body =
                             String.sub complete body_start (body_length framing)
                           in
-                          Bytesrw.Bytes.Reader.skip size reader;
-                          Ok { line; body; framing }))
+                          Ok { line; body; framing }))))
 
 let line packet = packet.line
 let body packet = packet.body

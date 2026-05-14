@@ -23,6 +23,18 @@ let read_operation wire =
       fail
         (Format.asprintf "%a while reading %S" Nats.Codec.pp_error error wire)
 
+let reader_of_slices strings =
+  let slices =
+    List.map Bytesrw.Bytes.Slice.of_string strings
+  in
+  let remaining = ref slices in
+  Bytesrw.Bytes.Reader.make (fun () ->
+      match !remaining with
+      | [] -> Bytesrw.Bytes.Slice.eod
+      | slice :: rest ->
+          remaining := rest;
+          slice)
+
 let expect_error result predicate =
   match result with
   | Ok _ -> fail "expected a validation error"
@@ -217,6 +229,14 @@ let () =
           match expect_codec_ok (Nats.Codec.read ~eod:true reader) with
           | Nats.Op.Pong -> ()
           | _ -> fail "expected PONG");
+      test "accepts framing split across reader slices" (fun () ->
+          let reader = reader_of_slices [ "PING\r"; "\nPONG\r"; "\n" ] in
+          (match expect_codec_ok (Nats.Codec.read reader) with
+          | Nats.Op.Ping -> ()
+          | _ -> fail "expected PING");
+          match expect_codec_ok (Nats.Codec.read ~eod:true reader) with
+          | Nats.Op.Pong -> ()
+          | _ -> fail "expected PONG");
       test "rejects payloads above the configured limit" (fun () ->
           let subject = Nats.Subject.literal "orders.created" in
           let operation = Nats.Op.Pub (Nats.Message.v ~subject "hello") in
@@ -247,4 +267,10 @@ let () =
           match Nats.Codec.read ~eod:true reader with
           | Error (Nats.Codec.Packet Nats.Packet.Unexpected_end) -> ()
           | _ -> fail "expected unexpected end of input");
+      test "restores the reader after a framing error" (fun () ->
+          let reader = Bytesrw.Bytes.Reader.of_string "PING\n" in
+          (match Nats.Codec.read ~eod:true reader with
+          | Error (Nats.Codec.Packet Nats.Packet.Malformed_line) -> ()
+          | _ -> fail "expected a malformed-line error");
+          equal int 0 (Bytesrw.Bytes.Reader.pos reader));
     ]
