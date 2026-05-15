@@ -11,7 +11,9 @@ module Config : sig
     ?event_capacity:int ->
     ?read_capacity:int ->
     ?read_chunk_size:int ->
+    ?inbox_prefix:string ->
     ?handshake_timeout:Mtime.Span.t ->
+    ?request_timeout:Mtime.Span.t ->
     ?flush_timeout:Mtime.Span.t ->
     ?drain_timeout:Mtime.Span.t ->
     unit ->
@@ -60,6 +62,20 @@ val subscribe :
   ?queue_group:Nats.Queue_group.t ->
   Nats.Subject.Filter.t ->
   (Subscription.t, Error.t) result
+
+val request :
+  ?timeout:Mtime.Span.t ->
+  ?headers:Nats.Header.t ->
+  t ->
+  Nats.Subject.t ->
+  string ->
+  (Nats.Message.t, Error.t) result
+
+val request_msg :
+  ?timeout:Mtime.Span.t ->
+  t ->
+  Nats.Message.t ->
+  (Nats.Message.t, Error.t) result
 
 val flush : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
 val drain : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result

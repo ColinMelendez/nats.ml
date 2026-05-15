@@ -7,8 +7,10 @@ type t =
   | Invalid_capacity of { name : string; value : int }
   | Command_queue_full of { capacity : int }
   | Invalid_chunk_size of int
+  | Invalid_inbox_prefix of Nats.Subject.error
   | Invalid_timeout of string
   | Timeout
+  | No_responders
   | Io of exn
   | Slow_consumer of slow_consumer
   | Disconnected

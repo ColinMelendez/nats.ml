@@ -5,8 +5,10 @@ type t =
   | Invalid_capacity of { name : string; value : int }
   | Command_queue_full of { capacity : int }
   | Invalid_chunk_size of int
+  | Invalid_inbox_prefix of Nats.Subject.error
   | Invalid_timeout of string
   | Timeout
+  | No_responders
   | Io of exn
   | Slow_consumer of slow_consumer
   | Disconnected
@@ -25,8 +27,11 @@ let pp ppf = function
       Format.fprintf ppf "command queue is full (capacity %d)" capacity
   | Invalid_chunk_size size ->
       Format.fprintf ppf "invalid read chunk size %d" size
+  | Invalid_inbox_prefix error ->
+      Format.fprintf ppf "invalid inbox prefix: %a" Nats.Subject.pp_error error
   | Invalid_timeout name -> Format.fprintf ppf "invalid %s timeout" name
   | Timeout -> Format.pp_print_string ppf "operation timed out"
+  | No_responders -> Format.pp_print_string ppf "no responders"
   | Io error -> Format.fprintf ppf "I/O error: %s" (Printexc.to_string error)
   | Slow_consumer kind ->
       Format.fprintf ppf "slow consumer: %a" pp_slow_consumer kind

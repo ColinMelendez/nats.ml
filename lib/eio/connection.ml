@@ -7,7 +7,9 @@ module Config = struct
     event_capacity : int;
     read_capacity : int;
     read_chunk_size : int;
+    inbox_prefix : Nats.Subject.t;
     handshake_timeout : Mtime.Span.t;
+    request_timeout : Mtime.Span.t;
     flush_timeout : Mtime.Span.t;
     drain_timeout : Mtime.Span.t;
   }
@@ -25,45 +27,62 @@ module Config = struct
   let v ?(core = Nats.Config.default) ?(credentials = Nats.Client.Connect.v ())
       ?(command_capacity = 128) ?(subscription_capacity = 256)
       ?(event_capacity = 64) ?(read_capacity = 4) ?(read_chunk_size = 65536)
-      ?(handshake_timeout = default_span) ?(flush_timeout = default_span)
+      ?(inbox_prefix = "_INBOX.ocaml") ?(handshake_timeout = default_span)
+      ?(request_timeout = default_span) ?(flush_timeout = default_span)
       ?(drain_timeout = default_span) () =
-    match validate_capacity "command" command_capacity with
-    | Error error -> Error error
-    | Ok command_capacity -> (
-        match validate_capacity "subscription" subscription_capacity with
+    match Nats.Subject.of_string inbox_prefix with
+    | Error error -> Error (Error.Invalid_inbox_prefix error)
+    | Ok inbox_prefix -> (
+        match validate_capacity "command" command_capacity with
         | Error error -> Error error
-        | Ok subscription_capacity -> (
-            match validate_capacity "event" event_capacity with
+        | Ok command_capacity -> (
+            match validate_capacity "subscription" subscription_capacity with
             | Error error -> Error error
-            | Ok event_capacity -> (
-                match validate_capacity "read" read_capacity with
+            | Ok subscription_capacity -> (
+                match validate_capacity "event" event_capacity with
                 | Error error -> Error error
-                | Ok read_capacity -> (
-                    if read_chunk_size <= 0 then
-                      Error (Error.Invalid_chunk_size read_chunk_size)
-                    else
-                      match validate_timeout "handshake" handshake_timeout with
-                      | Error error -> Error error
-                      | Ok handshake_timeout -> (
-                          match validate_timeout "flush" flush_timeout with
+                | Ok event_capacity -> (
+                    match validate_capacity "read" read_capacity with
+                    | Error error -> Error error
+                    | Ok read_capacity -> (
+                        if read_chunk_size <= 0 then
+                          Error (Error.Invalid_chunk_size read_chunk_size)
+                        else
+                          match
+                            validate_timeout "handshake" handshake_timeout
+                          with
                           | Error error -> Error error
-                          | Ok flush_timeout -> (
-                              match validate_timeout "drain" drain_timeout with
+                          | Ok handshake_timeout -> (
+                              match
+                                validate_timeout "request" request_timeout
+                              with
                               | Error error -> Error error
-                              | Ok drain_timeout ->
-                                  Ok
-                                    {
-                                      core;
-                                      credentials;
-                                      command_capacity;
-                                      subscription_capacity;
-                                      event_capacity;
-                                      read_capacity;
-                                      read_chunk_size;
-                                      handshake_timeout;
-                                      flush_timeout;
-                                      drain_timeout;
-                                    }))))))
+                              | Ok request_timeout -> (
+                                  match
+                                    validate_timeout "flush" flush_timeout
+                                  with
+                                  | Error error -> Error error
+                                  | Ok flush_timeout -> (
+                                      match
+                                        validate_timeout "drain" drain_timeout
+                                      with
+                                      | Error error -> Error error
+                                      | Ok drain_timeout ->
+                                          Ok
+                                            {
+                                              core;
+                                              credentials;
+                                              command_capacity;
+                                              subscription_capacity;
+                                              event_capacity;
+                                              read_capacity;
+                                              read_chunk_size;
+                                              inbox_prefix;
+                                              handshake_timeout;
+                                              request_timeout;
+                                              flush_timeout;
+                                              drain_timeout;
+                                            }))))))))
 
   let default =
     match v () with
@@ -187,6 +206,13 @@ and command =
       queue_group : Nats.Queue_group.t option;
       resolver : (Subscription.t, Error.t) result Eio.Promise.u;
     }
+  | Request of {
+      message : Nats.Message.t;
+      timeout : Mtime.Span.t;
+      setup : (int, Error.t) result Eio.Promise.u;
+      resolver : (Nats.Message.t, Error.t) result Eio.Promise.u;
+    }
+  | Cancel_request of { sid : int }
   | Unsubscribe of {
       sid : int;
       resolver : (unit, Error.t) result Eio.Promise.u;
@@ -203,6 +229,11 @@ and command =
 
 type flush_waiter = {
   resolver : (unit, Error.t) result Eio.Promise.u;
+  deadline : Mtime.t;
+}
+
+type request_waiter = {
+  resolver : (Nats.Message.t, Error.t) result Eio.Promise.u;
   deadline : Mtime.t;
 }
 
@@ -232,10 +263,12 @@ type t = {
   events : Event_stream.t;
   mutable state : Nats.Client.t;
   subscriptions : (int, Subscription.t) Hashtbl.t;
+  requests : (int, request_waiter) Hashtbl.t;
   mutable eof_seen : bool;
   mutable closed : bool;
   mutable connect_sent : bool;
   mutable pending_commands : int;
+  mutable active_request_setup : (int, Error.t) result Eio.Promise.u option;
   mutable handshake_deadline : Mtime.t option;
   mutable timer_generation : int;
   mutable scheduled_deadline : Mtime.t option;
@@ -271,6 +304,15 @@ let rec read_loop transport input work chunk_size =
   | Eio.Io (_, _) as error -> add_input input work (Failure error)
 
 let now t = t.clock.now ()
+let inbox_counter = Atomic.make 0
+
+let fresh_inbox t =
+  let sequence = Atomic.fetch_and_add inbox_counter 1 in
+  let timestamp = Mtime.to_uint64_ns (now t) in
+  Nats.Subject.literal
+    (Format.asprintf "%s.%Ld.%d"
+       (Nats.Subject.to_string t.config.Config.inbox_prefix)
+       timestamp sequence)
 
 let write_outputs t output =
   let rec loop = function
@@ -287,6 +329,9 @@ let write_outputs t output =
 
 let resolve_unit resolver value = Eio.Promise.resolve resolver value
 let resolve_ready t value = Eio.Promise.resolve t.ready value
+let resolve_setup t resolver value =
+  t.active_request_setup <- None;
+  resolve_unit resolver value
 
 let event t event =
   if Event_stream.push t.events event then Ok ()
@@ -308,6 +353,8 @@ let fail_waiter resolver error = resolve_unit resolver (Error error)
 let fail_command = function
   | Publish { resolver; _ } -> fail_waiter resolver Error.Closed
   | Subscribe { resolver; _ } -> fail_waiter resolver Error.Closed
+  | Request { setup; _ } -> resolve_unit setup (Error Error.Closed)
+  | Cancel_request _ -> ()
   | Unsubscribe { resolver; _ } -> fail_waiter resolver Error.Closed
   | Flush { resolver; _ } -> fail_waiter resolver Error.Closed
   | Drain { resolver; _ } -> fail_waiter resolver Error.Closed
@@ -325,19 +372,33 @@ let fail_pending_commands t =
   loop ();
   t.pending_commands <- 0
 
+let fail_requests t error =
+  let requests =
+    Hashtbl.fold (fun sid waiter acc -> (sid, waiter) :: acc) t.requests []
+  in
+  Hashtbl.clear t.requests;
+  List.iter (fun (_sid, waiter) -> fail_waiter waiter.resolver error) requests
+
 let finish t error =
   if not t.closed then (
     t.closed <- true;
+    (match t.active_request_setup with
+    | None -> ()
+    | Some resolver ->
+        t.active_request_setup <- None;
+        resolve_unit resolver (Error error));
     (match error with
     | Error.Disconnected | Error.Io _ | Error.Timeout ->
         Event_stream.push_terminal t.events Event.Disconnected
     | Error.Slow_consumer kind ->
         Event_stream.push_terminal t.events (Event.Slow_consumer kind)
     | Error.Invalid_capacity _ | Error.Command_queue_full _
-    | Error.Invalid_chunk_size _ | Error.Invalid_timeout _ ->
+    | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
+    | Error.Invalid_timeout _ | Error.No_responders ->
         ()
     | Error.Protocol _ | Error.Draining | Error.Closed -> ());
     close_subscriptions t error;
+    fail_requests t error;
     Queue.iter
       (function
         | Flush_waiter waiter -> fail_waiter waiter.resolver error
@@ -364,6 +425,14 @@ let remove_finished_subscriptions t =
     (fun sid _ -> if not (is_active sid) then finished := sid :: !finished)
     t.subscriptions;
   List.iter (fun sid -> close_subscription t sid Error.Closed) !finished
+
+let unsubscribe_sid t sid =
+  match Nats.Client.outgoing t.state (Nats.Client.Unsubscribe { sid }) with
+  | Error (Nats.Error.Unknown_subscription _) -> Ok ()
+  | Error error -> Error (command_error error)
+  | Ok transition ->
+      t.state <- transition.state;
+      write_outputs t transition.output
 
 let handle_event t event =
   match event with
@@ -409,37 +478,44 @@ let handle_deliveries t deliveries =
   let rec loop = function
     | [] -> Ok ()
     | (delivery : Nats.Client.delivery) :: rest -> (
-        match Hashtbl.find_opt t.subscriptions delivery.sid with
-        | None -> loop rest
-        | Some subscription -> (
-            let value : Subscription.delivery =
-              { message = delivery.message; status = delivery.status }
+        match Hashtbl.find_opt t.requests delivery.sid with
+        | Some waiter -> (
+            Hashtbl.remove t.requests delivery.sid;
+            let result =
+              match delivery.status with
+              | Some { code = 503; _ } -> Error Error.No_responders
+              | _ -> Ok delivery.message
             in
-            if Subscription.push subscription value then (
-              remove_finished_subscriptions t;
-              loop rest)
-            else
-              let slow_consumer =
-                Error.Slow_consumer (Error.Subscription { sid = delivery.sid })
-              in
-              close_subscription t delivery.sid slow_consumer;
-              match
-                event t
-                  (Event.Slow_consumer
-                     (Error.Subscription { sid = delivery.sid }))
-              with
-              | Error error -> Error error
-              | Ok () -> (
-                  let unsubscribe =
-                    Nats.Client.outgoing t.state
-                      (Nats.Client.Unsubscribe { sid = delivery.sid })
+            resolve_unit waiter.resolver result;
+            match unsubscribe_sid t delivery.sid with
+            | Ok () -> loop rest
+            | Error error -> Error error)
+        | None -> (
+            match Hashtbl.find_opt t.subscriptions delivery.sid with
+            | None -> loop rest
+            | Some subscription -> (
+                let value : Subscription.delivery =
+                  { message = delivery.message; status = delivery.status }
+                in
+                if Subscription.push subscription value then (
+                  remove_finished_subscriptions t;
+                  loop rest)
+                else
+                  let slow_consumer =
+                    Error.Slow_consumer
+                      (Error.Subscription { sid = delivery.sid })
                   in
-                  match unsubscribe with
-                  | Ok transition ->
-                      t.state <- transition.state;
-                      write_outputs t transition.output
-                  | Error (Nats.Error.Unknown_subscription _) -> Ok ()
-                  | Error error -> Error (protocol error))))
+                  close_subscription t delivery.sid slow_consumer;
+                  match
+                    event t
+                      (Event.Slow_consumer
+                         (Error.Subscription { sid = delivery.sid }))
+                  with
+                  | Error error -> Error error
+                  | Ok () -> (
+                      match unsubscribe_sid t delivery.sid with
+                      | Ok () -> loop rest
+                      | Error error -> Error error))))
   in
   loop deliveries
 
@@ -478,11 +554,11 @@ let rec drain_input t =
   | Some (Failure error) -> Error (io_error error)
 
 let consume_pending t length =
-  if length > 0 then
+  if length > 0 then (
     let value = Buffer.contents t.pending in
     let remaining = String.length value - length in
     Buffer.clear t.pending;
-    if remaining > 0 then Buffer.add_substring t.pending value length remaining
+    if remaining > 0 then Buffer.add_substring t.pending value length remaining)
 
 let apply_incoming t =
   match drain_input t with
@@ -494,15 +570,17 @@ let apply_incoming t =
         if String.length value = 0 && not end_of_data then Ok ()
         else
           let reader = Bytesrw.Bytes.Reader.of_string value in
-          match Nats.Client.incoming ~eod:end_of_data t.state ~now:(now t) reader with
+          match
+            Nats.Client.incoming ~eod:end_of_data t.state ~now:(now t) reader
+          with
           | Error error -> Error (protocol error)
-          | Ok transition ->
+          | Ok transition -> (
               let consumed = Bytesrw.Bytes.Reader.pos reader in
               if Int.equal consumed 0 && not end_of_data then Ok ()
-              else (
+              else
                 match apply_transition t transition with
                 | Error error -> Error error
-                | Ok () ->
+                | Ok () -> (
                     consume_pending t consumed;
                     if Nats.Client.phase t.state = Nats.Client.Closed then (
                       finish t Error.Disconnected;
@@ -513,7 +591,7 @@ let apply_incoming t =
                       | Ok () ->
                           if end_of_data || Buffer.length t.pending > 0 then
                             loop ()
-                          else Ok ())
+                          else Ok ()))
       in
       loop ()
 
@@ -579,6 +657,97 @@ let apply_outgoing t command =
               | Ok () ->
                   resolve_unit resolver (Ok subscription);
                   Ok ())))
+  | Request { message; timeout; setup; resolver } -> (
+      match Mtime.add_span (now t) timeout with
+      | None ->
+          resolve_setup t setup (Error Error.Timeout);
+          Ok ()
+      | Some deadline -> (
+          let inbox = fresh_inbox t in
+          let filter =
+            Nats.Subject.Filter.literal (Nats.Subject.to_string inbox)
+          in
+          match
+            Nats.Client.outgoing t.state
+              (Nats.Client.Subscribe { subject = filter; queue_group = None })
+          with
+          | Error error ->
+              resolve_setup t setup (Error (command_error error));
+              Ok ()
+          | Ok subscribe_transition -> (
+              match subscribe_transition.subscription_id with
+              | None ->
+                  let error =
+                    protocol
+                      (Nats.Error.Codec
+                         (Nats.Codec.Invalid_operation
+                            { keyword = "request SUB did not allocate an id" }))
+                  in
+                  resolve_setup t setup (Error error);
+                  Error error
+              | Some sid -> (
+                  match apply_transition t subscribe_transition with
+                  | Error error ->
+                      resolve_setup t setup (Error error);
+                      Error error
+                  | Ok () -> (
+                      match
+                        Nats.Client.outgoing t.state
+                          (Nats.Client.Auto_unsubscribe
+                             { sid; max_messages = 1 })
+                      with
+                      | Error error -> (
+                          let error = command_error error in
+                          resolve_setup t setup (Error error);
+                          match unsubscribe_sid t sid with
+                          | Ok () -> Ok ()
+                          | Error cleanup_error -> Error cleanup_error)
+                      | Ok auto_unsubscribe -> (
+                          match apply_transition t auto_unsubscribe with
+                          | Error error -> (
+                              resolve_setup t setup (Error error);
+                              match unsubscribe_sid t sid with
+                              | Ok () -> Ok ()
+                              | Error cleanup_error -> Error cleanup_error)
+                          | Ok () -> (
+                              Hashtbl.replace t.requests sid
+                                { resolver; deadline };
+                              let message =
+                                Nats.Message.v
+                                  ~subject:(Nats.Message.subject message)
+                                  ~reply_to:inbox
+                                  ~headers:(Nats.Message.headers message)
+                                  (Nats.Message.payload message)
+                              in
+                              match
+                                Nats.Client.outgoing t.state
+                                  (Nats.Client.Publish message)
+                              with
+                              | Error error -> (
+                                  Hashtbl.remove t.requests sid;
+                                  resolve_setup t setup
+                                    (Error (command_error error));
+                                  match unsubscribe_sid t sid with
+                                  | Ok () -> Ok ()
+                                  | Error error -> Error error)
+                              | Ok transition -> (
+                                  match apply_transition t transition with
+                                  | Error error ->
+                                      Hashtbl.remove t.requests sid;
+                                      resolve_setup t setup (Error error);
+                                      Error error
+                                  | Ok () ->
+                                      resolve_setup t setup (Ok sid);
+                                      Ok ()))))))))
+  | Cancel_request { sid } -> (
+      match Hashtbl.find_opt t.requests sid with
+      | None -> Ok ()
+      | Some waiter -> (
+          Hashtbl.remove t.requests sid;
+          fail_waiter waiter.resolver Error.Closed;
+          match unsubscribe_sid t sid with
+          | Error error -> Error error
+          | Ok () -> Ok ()))
   | Unsubscribe { sid; resolver } -> (
       match Nats.Client.outgoing t.state (Nats.Client.Unsubscribe { sid }) with
       | Error error ->
@@ -629,6 +798,7 @@ let apply_outgoing t command =
               | Some deadline ->
                   Queue.add (Drain_waiter { resolver; deadline }) t.barriers;
                   close_subscriptions t Error.Draining;
+                  fail_requests t Error.Draining;
                   Ok ())))
   | Close { resolver } -> (
       match Nats.Client.outgoing t.state Nats.Client.Close with
@@ -649,6 +819,27 @@ let apply_outgoing t command =
               finish t Error.Closed;
               Ok ()))
 
+let expire_requests t current =
+  let expired =
+    Hashtbl.fold
+      (fun sid waiter acc ->
+        if Mtime.compare current waiter.deadline >= 0 then sid :: acc else acc)
+      t.requests []
+  in
+  let rec loop = function
+    | [] -> Ok ()
+    | sid :: rest -> (
+        match Hashtbl.find_opt t.requests sid with
+        | None -> loop rest
+        | Some waiter -> (
+            Hashtbl.remove t.requests sid;
+            fail_waiter waiter.resolver Error.Timeout;
+            match unsubscribe_sid t sid with
+            | Error error -> Error error
+            | Ok () -> loop rest))
+  in
+  loop expired
+
 let timer_deadline t =
   let earliest current candidate =
     match current with
@@ -657,9 +848,19 @@ let timer_deadline t =
         if Mtime.is_earlier candidate ~than:current then Some candidate
         else Some current
   in
+  let request_deadline =
+    Hashtbl.fold
+      (fun _sid waiter deadline -> earliest deadline waiter.deadline)
+      t.requests None
+  in
   let deadline = t.handshake_deadline in
   let deadline =
     match Nats.Client.next_timeout t.state with
+    | None -> deadline
+    | Some candidate -> earliest deadline candidate
+  in
+  let deadline =
+    match request_deadline with
     | None -> deadline
     | Some candidate -> earliest deadline candidate
   in
@@ -694,7 +895,8 @@ let apply_timer t generation =
     let handshake_due =
       match (t.handshake_deadline, Nats.Client.phase t.state) with
       | Some deadline, (Nats.Client.Awaiting_info | Nats.Client.Awaiting_connect)
-        -> Mtime.compare current deadline >= 0
+        ->
+          Mtime.compare current deadline >= 0
       | _ -> false
     in
     let barrier_due =
@@ -705,33 +907,47 @@ let apply_timer t generation =
     in
     if handshake_due || barrier_due then finish t Error.Timeout
     else
-      let transition = Nats.Client.timer t.state ~now:current in
-      match apply_transition t transition with
+      match expire_requests t current with
       | Error error -> finish t error
-      | Ok () ->
-          if Nats.Client.phase t.state = Nats.Client.Closed then
-            finish t Error.Timeout)
+      | Ok () -> (
+          let transition = Nats.Client.timer t.state ~now:current in
+          match apply_transition t transition with
+          | Error error -> finish t error
+          | Ok () ->
+              if Nats.Client.phase t.state = Nats.Client.Closed then
+                finish t Error.Timeout))
 
 let rec owner_loop t =
-  if not t.closed then
-    match Eio.Stream.take t.work with
-    | Command command -> (
-        t.pending_commands <- t.pending_commands - 1;
-        match apply_outgoing t command with
-        | Ok () ->
-            schedule_timer t;
-            owner_loop t
-        | Error error -> finish t error)
-    | Input_ready -> (
-        match apply_incoming t with
-        | Ok () ->
-            schedule_timer t;
-            owner_loop t
-        | Error error -> finish t error)
-    | Timer generation ->
-        apply_timer t generation;
-        schedule_timer t;
-        owner_loop t
+  try
+    if not t.closed then
+      match Eio.Stream.take t.work with
+      | Command command -> (
+          (match command with
+          | Cancel_request _ -> ()
+          | _ -> t.pending_commands <- t.pending_commands - 1);
+          (match command with
+          | Request { setup; _ } -> t.active_request_setup <- Some setup
+          | _ -> ());
+          match apply_outgoing t command with
+          | Ok () ->
+              t.active_request_setup <- None;
+              schedule_timer t;
+              owner_loop t
+          | Error error ->
+              t.active_request_setup <- None;
+              finish t error)
+      | Input_ready -> (
+          match apply_incoming t with
+          | Ok () ->
+              schedule_timer t;
+              owner_loop t
+          | Error error -> finish t error)
+      | Timer generation ->
+          apply_timer t generation;
+          schedule_timer t;
+          owner_loop t
+  with Eio.Cancel.Cancelled _ ->
+    Eio.Cancel.protect (fun () -> finish t Error.Closed)
 
 let create ~sw ~clock ~config flow =
   let handshake_deadline =
@@ -764,10 +980,12 @@ let create ~sw ~clock ~config flow =
       events = Event_stream.create config.Config.event_capacity;
       state = Nats.Client.v config.Config.core;
       subscriptions = Hashtbl.create 16;
+      requests = Hashtbl.create 16;
       eof_seen = false;
       closed = false;
       connect_sent = false;
       pending_commands = 0;
+      active_request_setup = None;
       handshake_deadline;
       timer_generation = 0;
       scheduled_deadline = None;
@@ -776,6 +994,7 @@ let create ~sw ~clock ~config flow =
       barriers = Queue.create ();
     }
   in
+  Eio.Switch.on_release sw (fun () -> finish connection Error.Closed);
   schedule_timer connection;
   Eio.Fiber.fork ~sw (fun () ->
       read_loop transport input connection.work config.Config.read_chunk_size);
@@ -803,6 +1022,12 @@ let send t command promise =
     Eio.Stream.add t.work (Command command);
     Eio.Promise.await promise)
 
+let cancel_request t sid =
+  if t.closed then Ok ()
+  else (
+    Eio.Stream.add t.work (Command (Cancel_request { sid }));
+    Ok ())
+
 let publish_msg t message =
   let promise, resolver = Eio.Promise.create () in
   send t (Publish { message; resolver }) promise
@@ -817,6 +1042,36 @@ let subscribe t ?queue_group subject =
 let validate_timeout name timeout =
   if Mtime.Span.compare timeout Mtime.Span.zero > 0 then Ok timeout
   else Error (Error.Invalid_timeout name)
+
+let request_msg ?timeout t message =
+  let timeout = Option.value timeout ~default:t.config.Config.request_timeout in
+  match validate_timeout "request" timeout with
+  | Error error -> Error error
+  | Ok timeout -> (
+      let setup, setup_resolver = Eio.Promise.create () in
+      let response, response_resolver = Eio.Promise.create () in
+      let setup_result =
+        Eio.Cancel.protect (fun () ->
+            send t
+              (Request
+                 {
+                   message;
+                   timeout;
+                   setup = setup_resolver;
+                   resolver = response_resolver;
+                 })
+              setup)
+      in
+      match setup_result with
+      | Error error -> Error error
+      | Ok sid -> (
+          try Eio.Promise.await response
+          with Eio.Cancel.Cancelled _ as cancellation ->
+            ignore (Eio.Cancel.protect (fun () -> cancel_request t sid));
+            raise cancellation))
+
+let request ?timeout ?(headers = Nats.Header.empty) t subject payload =
+  request_msg ?timeout t (Nats.Message.v ~subject ~headers payload)
 
 let flush ?timeout t =
   let timeout = Option.value timeout ~default:t.config.Config.flush_timeout in

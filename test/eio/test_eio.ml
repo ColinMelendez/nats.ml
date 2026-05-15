@@ -95,10 +95,12 @@ let () =
           let split = String.length info_wire / 2 in
           with_connection
             ~reads:
-              [ `Return (String.sub info_wire 0 split);
+              [
+                `Return (String.sub info_wire 0 split);
                 `Return
                   (String.sub info_wire split (String.length info_wire - split));
-                `Await hold ]
+                `Await hold;
+              ]
             (fun ~sw:_ connection ->
               expect_ok (Nats_eio.Connection.publish connection subject "ok");
               expect_ok (Nats_eio.Connection.close connection);
@@ -114,8 +116,7 @@ let () =
               let subscription =
                 expect_ok (Nats_eio.Connection.subscribe connection filter)
               in
-              Eio.Promise.resolve partial_u
-                (Ok "MSG orders.created 1 5\r\nhe");
+              Eio.Promise.resolve partial_u (Ok "MSG orders.created 1 5\r\nhe");
               yield_n 3;
               expect_ok (Nats_eio.Connection.publish connection subject "ok");
               Eio.Promise.resolve rest_u (Ok "llo\r\n");
@@ -124,6 +125,120 @@ let () =
               in
               equal string "hello" (Nats.Message.payload delivery.message);
               expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "request handles replies, no responders, and timeout" (fun () ->
+          let response_one, response_one_u = Eio.Promise.create () in
+          let response_two, response_two_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v ~inbox_prefix:"_INBOX.test" ())
+          in
+          with_connection ~config
+            ~reads:
+              [
+                `Return info_wire;
+                `Await response_one;
+                `Await response_two;
+                `Await hold;
+              ]
+            (fun ~sw connection ->
+              let result_one, result_one_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_one_u
+                    (Nats_eio.Connection.request connection subject "lookup"));
+              yield_n 5;
+              Eio.Promise.resolve response_one_u
+                (Ok "MSG _INBOX.test.0.0 1 5\r\nreply\r\n");
+              (match Eio.Promise.await result_one with
+              | Ok message ->
+                  equal string "reply" (Nats.Message.payload message)
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected request reply, got %a"
+                       Nats_eio.Error.pp error));
+              let result_two, result_two_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_two_u
+                    (Nats_eio.Connection.request connection subject "missing"));
+              yield_n 5;
+              Eio.Promise.resolve response_two_u
+                (Ok
+                   "HMSG _INBOX.test.0.1 2 30 30\r\n\
+                    NATS/1.0 503 No Responders\r\n\
+                    \r\n\
+                    \r\n");
+              (match Eio.Promise.await result_two with
+              | Error Nats_eio.Error.No_responders -> ()
+              | Ok _ -> fail "expected no responders"
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected no responders, got %a"
+                       Nats_eio.Error.pp error));
+              (match
+                 Nats_eio.Connection.request
+                   ~timeout:Mtime.Span.(1 * ms)
+                   connection subject "slow"
+               with
+              | Error Nats_eio.Error.Timeout -> ()
+              | Ok _ -> fail "expected request timeout"
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected request timeout, got %a"
+                       Nats_eio.Error.pp error));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "cancelling a request leaves cleanup non-blocking" (fun () ->
+          let cancellation, cancellation_u = Eio.Promise.create () in
+          let result, result_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await hold ]
+            (fun ~sw connection ->
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Cancel.sub (fun cancel ->
+                      Eio.Promise.resolve cancellation_u cancel;
+                      try
+                        ignore
+                          (Nats_eio.Connection.request connection subject
+                             "cancel-me");
+                        Eio.Promise.resolve result_u `Completed
+                      with Eio.Cancel.Cancelled _ ->
+                        Eio.Promise.resolve result_u `Cancelled));
+              let cancel = Eio.Promise.await cancellation in
+              yield_n 5;
+              Eio.Cancel.cancel cancel (Failure "cancel request");
+              (match Eio.Promise.await result with
+              | `Cancelled -> ()
+              | `Completed -> fail "request unexpectedly completed");
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "drain fails pending requests before waiting for its barrier"
+        (fun () ->
+          let pong, pong_u = Eio.Promise.create () in
+          let request_result, request_result_u = Eio.Promise.create () in
+          let drain_result, drain_result_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await pong; `Await hold ]
+            (fun ~sw connection ->
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve request_result_u
+                    (Nats_eio.Connection.request connection subject "drain-me"));
+              yield_n 5;
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve drain_result_u
+                    (Nats_eio.Connection.drain connection));
+              yield_n 5;
+              (match Eio.Promise.await request_result with
+              | Error Nats_eio.Error.Draining -> ()
+              | Ok _ -> fail "request unexpectedly completed during drain"
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected draining request error, got %a"
+                       Nats_eio.Error.pp error));
+              Eio.Promise.resolve pong_u (Ok "PONG\r\n");
+              expect_ok (Eio.Promise.await drain_result);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "a full subscription reports a slow consumer without blocking"
         (fun () ->
@@ -146,7 +261,9 @@ let () =
               Eio.Promise.resolve messages_u (Ok two_messages);
               let first = expect_ok (Nats_eio.Subscription.next subscription) in
               equal string "a" (Nats.Message.payload first.message);
-              let second = expect_ok (Nats_eio.Subscription.next subscription) in
+              let second =
+                expect_ok (Nats_eio.Subscription.next subscription)
+              in
               equal string "b" (Nats.Message.payload second.message);
               match Nats_eio.Subscription.next subscription with
               | Error
@@ -163,7 +280,9 @@ let () =
                     (Format.asprintf "expected slow consumer, got %a"
                        Nats_eio.Error.pp error)));
       test "reports EOF after processing complete input" (fun () ->
-          with_connection ~reads:[ `Return info_wire ] (fun ~sw:_ connection ->
+          with_connection
+            ~reads:[ `Return info_wire ]
+            (fun ~sw:_ connection ->
               let events = Nats_eio.Connection.events connection in
               ignore (expect_core_event (Nats_eio.Event_stream.next events));
               ignore (expect_core_event (Nats_eio.Event_stream.next events));
@@ -193,7 +312,8 @@ let () =
           let config =
             expect_ok
               (Nats_eio.Connection.Config.v
-                 ~handshake_timeout:Mtime.Span.(1 * ms) ())
+                 ~handshake_timeout:Mtime.Span.(1 * ms)
+                 ())
           in
           Eio.Switch.run @@ fun sw ->
           let result =
