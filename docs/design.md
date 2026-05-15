@@ -143,9 +143,9 @@ match Nats_eio.Connection.request conn
         (Nats.Subject.literal "orders.lookup")
         "order-123" with
 | Ok reply -> use_reply reply
-| Error Nats.Error.No_responders -> handle_missing_service ()
-| Error Nats.Error.Timeout -> retry_or_fail ()
-| Error (Nats.Error.Server _ as error) -> report_error error
+| Error Nats_eio.Error.No_responders -> handle_missing_service ()
+| Error Nats_eio.Error.Timeout -> retry_or_fail ()
+| Error (Nats_eio.Error.Protocol error) -> report_core_error error
 | Error error -> report_error error
 ```
 
