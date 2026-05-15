@@ -138,6 +138,17 @@ module Event_stream = struct
     if Option.is_none t.terminal then Eio.Stream.add t.queue (Event event)
 end
 
+type subscription_drain_waiter = {
+  sid : int;
+  promise : (unit, Error.t) result Eio.Promise.t;
+  resolver : (unit, Error.t) result Eio.Promise.u;
+  deadline : Mtime.t;
+  mutable server_flushed : bool;
+  mutable done_seen : bool;
+  mutable completed : bool;
+  on_complete : (unit, Error.t) result -> unit;
+}
+
 module Subscription = struct
   type item = Message of delivery | Done of Error.t
   and delivery = { message : Nats.Message.t; status : Nats.Op.status option }
@@ -149,12 +160,23 @@ module Subscription = struct
     mutable terminal : Error.t option;
     mutable done_seen : bool;
     mutable active : bool;
+    mutable drain_waiter : subscription_drain_waiter option;
+    mutable drain_promise : (unit, Error.t) result Eio.Promise.t option;
+    mutable drain_resolver : (unit, Error.t) result Eio.Promise.u option;
+    mutable drain_result : (unit, Error.t) result option;
     unsubscribe_request : unit -> (unit, Error.t) result;
     auto_unsubscribe_request :
       max_messages:int -> (unit, Error.t) result;
+    drain_request :
+      timeout:Mtime.Span.t option ->
+      promise:(unit, Error.t) result Eio.Promise.t ->
+      resolver:(unit, Error.t) result Eio.Promise.u ->
+      (unit, Error.t) result;
+    cancel_drain_request : unit -> unit;
   }
 
-  let create ~sid ~capacity ~unsubscribe_request ~auto_unsubscribe_request =
+  let create ~sid ~capacity ~unsubscribe_request ~auto_unsubscribe_request
+      ~drain_request ~cancel_drain_request =
     {
       sid;
       queue =
@@ -163,8 +185,14 @@ module Subscription = struct
       terminal = None;
       done_seen = false;
       active = true;
+      drain_waiter = None;
+      drain_promise = None;
+      drain_resolver = None;
+      drain_result = None;
       unsubscribe_request;
       auto_unsubscribe_request;
+      drain_request;
+      cancel_drain_request;
     }
 
   let sid t = t.sid
@@ -176,11 +204,57 @@ module Subscription = struct
       Eio.Stream.add t.queue (Message delivery);
       true)
 
+  let complete_drain_waiter waiter result =
+    if not waiter.completed then (
+      waiter.completed <- true;
+      waiter.on_complete result;
+      Eio.Promise.resolve waiter.resolver result)
+
+  let clear_drain_state t =
+    t.drain_promise <- None;
+    t.drain_resolver <- None
+
+  let record_drain_result t result = t.drain_result <- Some result
+
+  let complete_drain t waiter result =
+    t.drain_waiter <- None;
+    record_drain_result t result;
+    clear_drain_state t;
+    complete_drain_waiter waiter result
+
+  let arm_drain t waiter = t.drain_waiter <- Some waiter
+
+  let fail_pending_drain t error =
+    match t.drain_waiter with
+    | Some waiter -> complete_drain t waiter (Error error)
+    | None -> (
+        match t.drain_resolver with
+        | None -> ()
+        | Some resolver ->
+            t.drain_result <- Some (Error error);
+            clear_drain_state t;
+            Eio.Promise.resolve resolver (Error error))
+
+  let cancel_drain t = fail_pending_drain t Error.Closed
+  let fail_drain t error = fail_pending_drain t error
+
   let terminate t error =
     t.active <- false;
     if Option.is_none t.terminal then (
       t.terminal <- Some error;
-      Eio.Stream.add t.queue (Done error))
+      Eio.Stream.add t.queue (Done error));
+    fail_pending_drain t error
+
+  let terminate_for_drain t =
+    t.active <- false;
+    if Option.is_none t.terminal then (
+      t.terminal <- Some Error.Closed;
+      Eio.Stream.add t.queue (Done Error.Closed));
+    match t.drain_waiter with
+    | None -> ()
+    | Some waiter ->
+        waiter.done_seen <- true;
+        if waiter.server_flushed then complete_drain t waiter (Ok ())
 
   let next t =
     if t.done_seen then
@@ -190,6 +264,11 @@ module Subscription = struct
       | Message delivery -> Ok delivery
       | Done error ->
           t.done_seen <- true;
+          (match t.drain_waiter with
+          | None -> ()
+          | Some waiter ->
+              waiter.done_seen <- true;
+              if waiter.server_flushed then complete_drain t waiter (Ok ()));
           Error error
 
   let unsubscribe t = if not t.active then Ok () else t.unsubscribe_request ()
@@ -197,6 +276,28 @@ module Subscription = struct
   let auto_unsubscribe t ~max_messages =
     if not t.active then Ok ()
     else t.auto_unsubscribe_request ~max_messages
+
+  let drain ?timeout t =
+    match t.drain_promise with
+    | Some promise -> Eio.Promise.await promise
+    | None -> (
+        match t.drain_result with
+        | Some result -> result
+        | None -> (
+            if not t.active then Ok ()
+            else
+              let promise, resolver = Eio.Promise.create () in
+              t.drain_promise <- Some promise;
+              t.drain_resolver <- Some resolver;
+              match t.drain_request ~timeout ~promise ~resolver with
+              | Error error ->
+                  clear_drain_state t;
+                  Error error
+              | Ok () -> (
+                  try Eio.Promise.await promise
+                  with Eio.Cancel.Cancelled _ as cancellation ->
+                    Eio.Cancel.protect (fun () -> t.cancel_drain_request ());
+                    raise cancellation)))
 
   let iter t ~f =
     let rec loop () =
@@ -229,6 +330,14 @@ and command =
       max_messages : int;
       resolver : (unit, Error.t) result Eio.Promise.u;
     }
+  | Drain_subscription of {
+      sid : int;
+      timeout : Mtime.Span.t;
+      subscription : Subscription.t;
+      promise : (unit, Error.t) result Eio.Promise.t;
+      resolver : (unit, Error.t) result Eio.Promise.u;
+    }
+  | Cancel_subscription_drain of { sid : int }
   | Request of {
       message : Nats.Message.t;
       timeout : Mtime.Span.t;
@@ -253,6 +362,7 @@ and command =
 type flush_waiter = {
   resolver : (unit, Error.t) result Eio.Promise.u;
   deadline : Mtime.t;
+  mutable completed : bool;
 }
 
 type request_waiter = {
@@ -266,6 +376,7 @@ type barrier =
       resolver : (unit, Error.t) result Eio.Promise.u;
       deadline : Mtime.t;
     }
+  | Subscription_drain_waiter of subscription_drain_waiter
 
 type transport = {
   read : Cstruct.t -> int;
@@ -287,6 +398,7 @@ type t = {
   mutable state : Nats.Client.t;
   subscriptions : (int, Subscription.t) Hashtbl.t;
   requests : (int, request_waiter) Hashtbl.t;
+  subscription_drains : (int, subscription_drain_waiter) Hashtbl.t;
   mutable eof_seen : bool;
   mutable closed : bool;
   mutable connect_sent : bool;
@@ -377,6 +489,9 @@ let fail_command = function
   | Publish { resolver; _ } -> fail_waiter resolver Error.Closed
   | Subscribe { resolver; _ } -> fail_waiter resolver Error.Closed
   | Auto_unsubscribe { resolver; _ } -> fail_waiter resolver Error.Closed
+  | Drain_subscription { subscription; _ } ->
+      Subscription.fail_pending_drain subscription Error.Closed
+  | Cancel_subscription_drain _ -> ()
   | Request { setup; _ } -> resolve_unit setup (Error Error.Closed)
   | Cancel_request _ -> ()
   | Unsubscribe { resolver; _ } -> fail_waiter resolver Error.Closed
@@ -403,6 +518,14 @@ let fail_requests t error =
   Hashtbl.clear t.requests;
   List.iter (fun (_sid, waiter) -> fail_waiter waiter.resolver error) requests
 
+let fail_subscription_drains t error =
+  let waiters =
+    Hashtbl.fold (fun _sid waiter acc -> waiter :: acc) t.subscription_drains []
+  in
+  List.iter
+    (fun waiter -> Subscription.complete_drain_waiter waiter (Error error))
+    waiters
+
 let finish t error =
   if not t.closed then (
     t.closed <- true;
@@ -423,10 +546,14 @@ let finish t error =
     | Error.Protocol _ | Error.Draining | Error.Closed -> ());
     close_subscriptions t error;
     fail_requests t error;
+    fail_subscription_drains t error;
     Queue.iter
       (function
-        | Flush_waiter waiter -> fail_waiter waiter.resolver error
-        | Drain_waiter waiter -> fail_waiter waiter.resolver error)
+        | Flush_waiter waiter ->
+            if not waiter.completed then fail_waiter waiter.resolver error
+        | Drain_waiter waiter -> fail_waiter waiter.resolver error
+        | Subscription_drain_waiter waiter ->
+            Subscription.complete_drain_waiter waiter (Error error))
       t.barriers;
     Queue.clear t.barriers;
     fail_pending_commands t;
@@ -444,9 +571,12 @@ let remove_finished_subscriptions t =
         Int.equal sid subscription.sid)
       active
   in
+  let is_draining sid = Hashtbl.mem t.subscription_drains sid in
   let finished = ref [] in
   Hashtbl.iter
-    (fun sid _ -> if not (is_active sid) then finished := sid :: !finished)
+    (fun sid _ ->
+      if (not (is_active sid)) && not (is_draining sid) then
+        finished := sid :: !finished)
     t.subscriptions;
   List.iter (fun sid -> close_subscription t sid Error.Closed) !finished
 
@@ -473,12 +603,28 @@ let handle_event t event =
       else
         match Queue.take t.barriers with
         | Flush_waiter waiter ->
-            resolve_unit waiter.resolver (Ok ());
+            if not waiter.completed then (
+              waiter.completed <- true;
+              resolve_unit waiter.resolver (Ok ()))
+            else ();
             Ok ()
         | Drain_waiter waiter ->
             resolve_unit waiter.resolver (Ok ());
             finish t Error.Closed;
-            Ok ())
+            Ok ()
+        | Subscription_drain_waiter waiter ->
+            if waiter.completed then Ok ()
+            else (
+              waiter.server_flushed <- true;
+              match Hashtbl.find_opt t.subscriptions waiter.sid with
+              | None ->
+                  Subscription.complete_drain_waiter waiter (Error Error.Closed);
+                  Ok ()
+              | Some subscription ->
+                  if waiter.done_seen then
+                    Subscription.complete_drain subscription waiter (Ok ())
+                  else Hashtbl.replace t.subscription_drains waiter.sid waiter;
+                  Ok ()))
   | Nats.Event.Closed -> Ok ()
   | Nats.Event.Draining -> Ok ()
   | Nats.Event.Lame_duck_mode | Nats.Event.Server_error _
@@ -686,6 +832,45 @@ let apply_outgoing t command =
                         (Command
                            (Auto_unsubscribe { sid; max_messages; resolver }));
                       Eio.Promise.await promise)
+                  ~drain_request:(fun ~timeout ~promise ~resolver ->
+                    let timeout =
+                      Option.value timeout
+                        ~default:t.config.Config.drain_timeout
+                    in
+                    if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then
+                      Error (Error.Invalid_timeout "drain")
+                    else if t.closed then Error Error.Closed
+                    else if
+                      t.pending_commands >= t.config.Config.command_capacity
+                    then
+                      Error
+                        (Error.Command_queue_full
+                           { capacity = t.config.Config.command_capacity })
+                    else
+                      match Mtime.add_span (now t) timeout with
+                      | None -> Error Error.Timeout
+                      | Some _ -> (
+                          match Hashtbl.find_opt t.subscriptions sid with
+                          | None -> Error Error.Closed
+                          | Some subscription ->
+                              Eio.Cancel.protect (fun () ->
+                                  t.pending_commands <- t.pending_commands + 1;
+                                  Eio.Stream.add t.work
+                                    (Command
+                                       (Drain_subscription
+                                          {
+                                            sid;
+                                            timeout;
+                                            subscription;
+                                            promise;
+                                            resolver;
+                                          })));
+                              Ok ()))
+                  ~cancel_drain_request:(fun () ->
+                    Eio.Cancel.protect (fun () ->
+                        if not t.closed then
+                          Eio.Stream.add t.work
+                            (Command (Cancel_subscription_drain { sid }))))
               in
               Hashtbl.replace t.subscriptions sid subscription;
               match apply_transition t transition with
@@ -715,6 +900,74 @@ let apply_outgoing t command =
           | Ok () ->
               resolve_unit resolver (Ok ());
               Ok ()))
+  | Drain_subscription { sid; timeout; subscription; promise; resolver } -> (
+      match Hashtbl.find_opt t.subscriptions sid with
+      | None ->
+          Subscription.fail_pending_drain subscription Error.Closed;
+          Ok ()
+      | Some subscription -> (
+          match Mtime.add_span (now t) timeout with
+          | None ->
+              Subscription.fail_pending_drain subscription Error.Timeout;
+              Ok ()
+          | Some deadline -> (
+              let waiter =
+                {
+                  sid;
+                  promise;
+                  resolver;
+                  deadline;
+                  server_flushed = false;
+                  done_seen = false;
+                  completed = false;
+                  on_complete =
+                    (fun result ->
+                      Subscription.record_drain_result subscription result;
+                      Subscription.clear_drain_state subscription;
+                      Hashtbl.remove t.subscription_drains sid;
+                      Hashtbl.remove t.subscriptions sid);
+                }
+              in
+              Subscription.arm_drain subscription waiter;
+              Hashtbl.replace t.subscription_drains sid waiter;
+              match
+                Nats.Client.outgoing t.state (Nats.Client.Unsubscribe { sid })
+              with
+              | Error (Nats.Error.Unknown_subscription _) ->
+                  Subscription.terminate subscription Error.Closed;
+                  Ok ()
+              | Error error ->
+                  Subscription.terminate subscription (command_error error);
+                  Ok ()
+              | Ok unsubscribe_transition -> (
+                  match apply_transition t unsubscribe_transition with
+                  | Error error ->
+                      Subscription.complete_drain subscription waiter
+                        (Error error);
+                      Error error
+                  | Ok () -> (
+                      Subscription.terminate_for_drain subscription;
+                      match Nats.Client.outgoing t.state Nats.Client.Flush with
+                      | Error error ->
+                          Subscription.complete_drain subscription waiter
+                            (Error (command_error error));
+                          Ok ()
+                      | Ok flush_transition -> (
+                          match apply_transition t flush_transition with
+                          | Error error ->
+                              Subscription.complete_drain subscription waiter
+                                (Error error);
+                              Error error
+                          | Ok () ->
+                              Queue.add (Subscription_drain_waiter waiter)
+                                t.barriers;
+                              Ok ()))))))
+  | Cancel_subscription_drain { sid } -> (
+      match Hashtbl.find_opt t.subscriptions sid with
+      | None -> Ok ()
+      | Some subscription ->
+          Subscription.cancel_drain subscription;
+          Ok ())
   | Request { message; timeout; setup; resolver } -> (
       match Mtime.add_span (now t) timeout with
       | None ->
@@ -836,7 +1089,9 @@ let apply_outgoing t command =
                   fail_waiter resolver Error.Timeout;
                   Error Error.Timeout
               | Some deadline ->
-                  Queue.add (Flush_waiter { resolver; deadline }) t.barriers;
+                  Queue.add
+                    (Flush_waiter { resolver; deadline; completed = false })
+                    t.barriers;
                   Ok ())))
   | Drain { timeout; resolver } -> (
       match Nats.Client.outgoing t.state Nats.Client.Drain with
@@ -880,7 +1135,7 @@ let apply_outgoing t command =
 let expire_requests t current =
   let expired =
     Hashtbl.fold
-      (fun sid waiter acc ->
+      (fun sid (waiter : request_waiter) acc ->
         if Mtime.compare current waiter.deadline >= 0 then sid :: acc else acc)
       t.requests []
   in
@@ -898,6 +1153,45 @@ let expire_requests t current =
   in
   loop expired
 
+let expire_subscription_drains t current =
+  let expired =
+    Hashtbl.fold
+      (fun sid (waiter : subscription_drain_waiter) acc ->
+        if Mtime.compare current waiter.deadline >= 0 then sid :: acc else acc)
+      t.subscription_drains []
+  in
+  List.iter
+    (fun sid ->
+      match Hashtbl.find_opt t.subscription_drains sid with
+      | None -> ()
+      | Some waiter -> (
+          match Hashtbl.find_opt t.subscriptions sid with
+          | None ->
+              Subscription.complete_drain_waiter waiter (Error Error.Timeout)
+          | Some subscription ->
+              Subscription.fail_drain subscription Error.Timeout))
+    expired
+
+let expire_barriers t current =
+  let retained = ref [] in
+  let connection_timeout = ref false in
+  Queue.iter
+    (function
+      | Flush_waiter waiter
+        when (not waiter.completed)
+             && Mtime.compare current waiter.deadline >= 0 ->
+          waiter.completed <- true;
+          fail_waiter waiter.resolver Error.Timeout;
+          retained := Flush_waiter waiter :: !retained
+      | Drain_waiter waiter when Mtime.compare current waiter.deadline >= 0 ->
+          fail_waiter waiter.resolver Error.Timeout;
+          connection_timeout := true
+      | barrier -> retained := barrier :: !retained)
+    t.barriers;
+  Queue.clear t.barriers;
+  List.iter (fun barrier -> Queue.add barrier t.barriers) (List.rev !retained);
+  !connection_timeout
+
 let timer_deadline t =
   let earliest current candidate =
     match current with
@@ -908,8 +1202,15 @@ let timer_deadline t =
   in
   let request_deadline =
     Hashtbl.fold
-      (fun _sid waiter deadline -> earliest deadline waiter.deadline)
+      (fun _sid (waiter : request_waiter) deadline ->
+        earliest deadline waiter.deadline)
       t.requests None
+  in
+  let subscription_drain_deadline =
+    Hashtbl.fold
+      (fun _sid (waiter : subscription_drain_waiter) deadline ->
+        earliest deadline waiter.deadline)
+      t.subscription_drains None
   in
   let deadline = t.handshake_deadline in
   let deadline =
@@ -922,10 +1223,26 @@ let timer_deadline t =
     | None -> deadline
     | Some candidate -> earliest deadline candidate
   in
-  match Queue.peek_opt t.barriers with
+  let deadline =
+    match subscription_drain_deadline with
+    | None -> deadline
+    | Some candidate -> earliest deadline candidate
+  in
+  let barrier_deadline = ref None in
+  Queue.iter
+    (function
+      | Flush_waiter waiter when not waiter.completed ->
+          barrier_deadline := earliest !barrier_deadline waiter.deadline
+      | Flush_waiter _ -> ()
+      | Drain_waiter waiter ->
+          barrier_deadline := earliest !barrier_deadline waiter.deadline
+      | Subscription_drain_waiter waiter when not waiter.completed ->
+          barrier_deadline := earliest !barrier_deadline waiter.deadline
+      | Subscription_drain_waiter _ -> ())
+    t.barriers;
+  match !barrier_deadline with
   | None -> deadline
-  | Some (Flush_waiter waiter) -> earliest deadline waiter.deadline
-  | Some (Drain_waiter waiter) -> earliest deadline waiter.deadline
+  | Some candidate -> earliest deadline candidate
 
 let schedule_timer t =
   let start deadline =
@@ -960,20 +1277,25 @@ let apply_timer t generation =
     let barrier_due =
       match Queue.peek_opt t.barriers with
       | None -> false
-      | Some (Flush_waiter waiter) -> Mtime.compare current waiter.deadline >= 0
+      | Some (Flush_waiter waiter) ->
+          (not waiter.completed) && Mtime.compare current waiter.deadline >= 0
       | Some (Drain_waiter waiter) -> Mtime.compare current waiter.deadline >= 0
+      | Some (Subscription_drain_waiter _) -> false
     in
     if handshake_due || barrier_due then finish t Error.Timeout
-    else
-      match expire_requests t current with
-      | Error error -> finish t error
-      | Ok () -> (
-          let transition = Nats.Client.timer t.state ~now:current in
-          match apply_transition t transition with
-          | Error error -> finish t error
-          | Ok () ->
-              if Nats.Client.phase t.state = Nats.Client.Closed then
-                finish t Error.Timeout))
+    else (
+      expire_subscription_drains t current;
+      if expire_barriers t current then finish t Error.Timeout
+      else
+        match expire_requests t current with
+        | Error error -> finish t error
+        | Ok () -> (
+            let transition = Nats.Client.timer t.state ~now:current in
+            match apply_transition t transition with
+            | Error error -> finish t error
+            | Ok () ->
+                if Nats.Client.phase t.state = Nats.Client.Closed then
+                  finish t Error.Timeout)))
 
 let rec owner_loop t =
   try
@@ -981,7 +1303,7 @@ let rec owner_loop t =
       match Eio.Stream.take t.work with
       | Command command -> (
           (match command with
-          | Cancel_request _ -> ()
+          | Cancel_request _ | Cancel_subscription_drain _ -> ()
           | _ -> t.pending_commands <- t.pending_commands - 1);
           (match command with
           | Request { setup; _ } -> t.active_request_setup <- Some setup
@@ -1039,6 +1361,7 @@ let create ~sw ~clock ~config flow =
       state = Nats.Client.v config.Config.core;
       subscriptions = Hashtbl.create 16;
       requests = Hashtbl.create 16;
+      subscription_drains = Hashtbl.create 16;
       eof_seen = false;
       closed = false;
       connect_sent = false;

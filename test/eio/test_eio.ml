@@ -294,6 +294,352 @@ let () =
               expect_ok (Eio.Promise.await iter_result);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "subscription drain preserves queued messages until the barrier"
+        (fun () ->
+          let messages, messages_u = Eio.Promise.create () in
+          let pong, pong_u = Eio.Promise.create () in
+          let first, first_u = Eio.Promise.create () in
+          let second, second_u = Eio.Promise.create () in
+          let iter_result, iter_result_u = Eio.Promise.create () in
+          let drain_result, drain_result_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:
+              [ `Return info_wire; `Await messages; `Await pong; `Await hold ]
+            (fun ~sw connection ->
+              let subscription =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              Eio.Promise.resolve messages_u
+                (Ok
+                   ("MSG orders.created 1 1\r\na\r\n"
+                  ^ "MSG orders.created 1 1\r\nb\r\n"));
+              yield_n 5;
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve drain_result_u
+                    (Nats_eio.Subscription.drain subscription));
+              yield_n 5;
+              let count = ref 0 in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve iter_result_u
+                    (Nats_eio.Subscription.iter subscription ~f:(fun delivery ->
+                         (match !count with
+                         | 0 ->
+                             Eio.Promise.resolve first_u
+                               (Nats.Message.payload delivery.message)
+                         | 1 ->
+                             Eio.Promise.resolve second_u
+                               (Nats.Message.payload delivery.message)
+                         | _ -> ());
+                         count := !count + 1)));
+              equal string "a" (Eio.Promise.await first);
+              equal string "b" (Eio.Promise.await second);
+              Eio.Promise.resolve pong_u (Ok "PONG\r\n");
+              expect_ok (Eio.Promise.await drain_result);
+              expect_ok (Eio.Promise.await iter_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "subscription drain timeout leaves its terminal item queued"
+        (fun () ->
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await hold ]
+            (fun ~sw:_ connection ->
+              let subscription =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              (match
+                 Nats_eio.Subscription.drain
+                   ~timeout:Mtime.Span.(1 * ms)
+                   subscription
+               with
+              | Error Nats_eio.Error.Timeout -> ()
+              | Ok () -> fail "expected subscription drain timeout"
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected drain timeout, got %a"
+                       Nats_eio.Error.pp error));
+              (match Nats_eio.Subscription.next subscription with
+              | Error Nats_eio.Error.Closed -> ()
+              | Ok _ -> fail "expected the terminal item after drain timeout"
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected closed subscription, got %a"
+                       Nats_eio.Error.pp error));
+              (match Nats_eio.Subscription.drain subscription with
+              | Error Nats_eio.Error.Timeout -> ()
+              | Ok () -> fail "a timed-out drain was reported as successful"
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected the prior drain timeout, got %a"
+                       Nats_eio.Error.pp error));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "concurrent subscription drains share one barrier" (fun () ->
+          let pong, pong_u = Eio.Promise.create () in
+          let first_result, first_result_u = Eio.Promise.create () in
+          let second_result, second_result_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v
+                 ~drain_timeout:Mtime.Span.(1 * min)
+                 ())
+          in
+          with_connection ~config
+            ~reads:[ `Return info_wire; `Await pong; `Await hold ]
+            (fun ~sw connection ->
+              let subscription =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_result_u
+                    (Nats_eio.Subscription.drain subscription));
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve second_result_u
+                    (Nats_eio.Subscription.drain subscription));
+              yield_n 6;
+              match Eio.Promise.peek second_result with
+              | Some _ -> fail "the second drain completed before the barrier"
+              | None ->
+                  Eio.Promise.resolve pong_u (Ok "PONG\r\n");
+                  expect_ok (Eio.Promise.await first_result);
+                  expect_ok (Eio.Promise.await second_result);
+                  (match Nats_eio.Subscription.next subscription with
+                  | Error Nats_eio.Error.Closed -> ()
+                  | Ok _ -> fail "expected the queued terminal marker"
+                  | Error error ->
+                      fail
+                        (Format.asprintf
+                           "expected a closed subscription, got %a"
+                           Nats_eio.Error.pp error));
+                  expect_ok (Nats_eio.Connection.close connection);
+                  Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "cancelling a subscription drain leaves the owner non-blocking"
+        (fun () ->
+          let cancellation, cancellation_u = Eio.Promise.create () in
+          let result, result_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v
+                 ~drain_timeout:Mtime.Span.(1 * min)
+                 ())
+          in
+          with_connection ~config
+            ~reads:[ `Return info_wire; `Await hold ]
+            (fun ~sw connection ->
+              let subscription =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Cancel.sub (fun cancel ->
+                      Eio.Promise.resolve cancellation_u cancel;
+                      try
+                        ignore (Nats_eio.Subscription.drain subscription);
+                        Eio.Promise.resolve result_u `Completed
+                      with Eio.Cancel.Cancelled _ ->
+                        Eio.Promise.resolve result_u `Cancelled));
+              let cancel = Eio.Promise.await cancellation in
+              yield_n 5;
+              Eio.Cancel.cancel cancel (Failure "cancel subscription drain");
+              (match Eio.Promise.await result with
+              | `Cancelled -> ()
+              | `Completed -> fail "subscription drain unexpectedly completed");
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "subscription drain timeout preserves barrier ordering" (fun () ->
+          let first_pong, first_pong_u = Eio.Promise.create () in
+          let second_pong, second_pong_u = Eio.Promise.create () in
+          let drain_result, drain_result_u = Eio.Promise.create () in
+          let flush_result, flush_result_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v
+                 ~flush_timeout:Mtime.Span.(1 * s)
+                 ())
+          in
+          with_connection ~config
+            ~reads:
+              [
+                `Return info_wire;
+                `Await first_pong;
+                `Await second_pong;
+                `Await hold;
+              ]
+            (fun ~sw connection ->
+              let subscription =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve drain_result_u
+                    (Nats_eio.Subscription.drain
+                       ~timeout:Mtime.Span.(1 * ms)
+                       subscription));
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve flush_result_u
+                    (Nats_eio.Connection.flush connection));
+              yield_n 8;
+              (match Eio.Promise.await drain_result with
+              | Error Nats_eio.Error.Timeout -> ()
+              | Ok () -> fail "expected the subscription drain to time out"
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected drain timeout, got %a"
+                       Nats_eio.Error.pp error));
+              Eio.Promise.resolve first_pong_u (Ok "PONG\r\n");
+              yield_n 3;
+              (match Eio.Promise.peek flush_result with
+              | None -> ()
+              | Some _ -> fail "the later flush consumed the drain PONG");
+              Eio.Promise.resolve second_pong_u (Ok "PONG\r\n");
+              expect_ok (Eio.Promise.await flush_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "a delivery on another subscription does not abort a drain"
+        (fun () ->
+          let message, message_u = Eio.Promise.create () in
+          let pong, pong_u = Eio.Promise.create () in
+          let drain_result, drain_result_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v
+                 ~drain_timeout:Mtime.Span.(1 * min)
+                 ())
+          in
+          with_connection ~config
+            ~reads:
+              [ `Return info_wire; `Await message; `Await pong; `Await hold ]
+            (fun ~sw connection ->
+              let draining =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              let other =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve drain_result_u
+                    (Nats_eio.Subscription.drain draining));
+              yield_n 5;
+              Eio.Promise.resolve message_u
+                (Ok "MSG orders.created 2 1\r\nb\r\n");
+              yield_n 3;
+              Eio.Promise.resolve pong_u (Ok "PONG\r\n");
+              expect_ok (Eio.Promise.await drain_result);
+              let delivery = expect_ok (Nats_eio.Subscription.next other) in
+              equal string "b" (Nats.Message.payload delivery.message);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "a later flush still times out behind a retired drain barrier"
+        (fun () ->
+          let first_pong, first_pong_u = Eio.Promise.create () in
+          let drain_result, drain_result_u = Eio.Promise.create () in
+          let flush_result, flush_result_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v
+                 ~drain_timeout:Mtime.Span.(1 * ms)
+                 ~flush_timeout:Mtime.Span.(2 * ms)
+                 ())
+          in
+          with_connection ~config
+            ~reads:[ `Return info_wire; `Await first_pong; `Await hold ]
+            (fun ~sw connection ->
+              let subscription =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve drain_result_u
+                    (Nats_eio.Subscription.drain subscription));
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve flush_result_u
+                    (Nats_eio.Connection.flush connection));
+              (match Eio.Promise.await drain_result with
+              | Error Nats_eio.Error.Timeout -> ()
+              | Ok () -> fail "expected the subscription drain to time out"
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected drain timeout, got %a"
+                       Nats_eio.Error.pp error));
+              (match Eio.Promise.await flush_result with
+              | Error Nats_eio.Error.Timeout -> ()
+              | Ok () -> fail "expected the later flush to time out"
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected flush timeout, got %a"
+                       Nats_eio.Error.pp error));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve first_pong_u (Error End_of_file);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "a timed-out flush keeps its PONG slot behind a drain" (fun () ->
+          let first_pong, first_pong_u = Eio.Promise.create () in
+          let second_pong, second_pong_u = Eio.Promise.create () in
+          let third_pong, third_pong_u = Eio.Promise.create () in
+          let drain_result, drain_result_u = Eio.Promise.create () in
+          let first_flush, first_flush_u = Eio.Promise.create () in
+          let second_flush, second_flush_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v
+                 ~drain_timeout:Mtime.Span.(1 * ms)
+                 ~flush_timeout:Mtime.Span.(1 * min)
+                 ())
+          in
+          with_connection ~config
+            ~reads:
+              [
+                `Return info_wire;
+                `Await first_pong;
+                `Await second_pong;
+                `Await third_pong;
+                `Await hold;
+              ]
+            (fun ~sw connection ->
+              let subscription =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve drain_result_u
+                    (Nats_eio.Subscription.drain
+                       ~timeout:Mtime.Span.(1 * ms)
+                       subscription));
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_flush_u
+                    (Nats_eio.Connection.flush
+                       ~timeout:Mtime.Span.(2 * ms)
+                       connection));
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve second_flush_u
+                    (Nats_eio.Connection.flush connection));
+              (match Eio.Promise.await drain_result with
+              | Error Nats_eio.Error.Timeout -> ()
+              | Ok () -> fail "expected the subscription drain to time out"
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected drain timeout, got %a"
+                       Nats_eio.Error.pp error));
+              (match Eio.Promise.await first_flush with
+              | Error Nats_eio.Error.Timeout -> ()
+              | Ok () -> fail "expected the first flush to time out"
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected first flush timeout, got %a"
+                       Nats_eio.Error.pp error));
+              Eio.Promise.resolve first_pong_u (Ok "PONG\r\n");
+              yield_n 3;
+              Eio.Promise.resolve second_pong_u (Ok "PONG\r\n");
+              yield_n 3;
+              (match Eio.Promise.peek second_flush with
+              | None -> ()
+              | Some _ -> fail "the second flush consumed the first flush PONG");
+              Eio.Promise.resolve third_pong_u (Ok "PONG\r\n");
+              expect_ok (Eio.Promise.await second_flush);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "a full subscription reports a slow consumer without blocking"
         (fun () ->
           let messages, messages_u = Eio.Promise.create () in

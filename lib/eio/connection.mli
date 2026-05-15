@@ -37,6 +37,7 @@ module Subscription : sig
   val iter : t -> f:(delivery -> unit) -> (unit, Error.t) result
   val unsubscribe : t -> (unit, Error.t) result
   val auto_unsubscribe : t -> max_messages:int -> (unit, Error.t) result
+  val drain : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
 end
 
 type t
