@@ -150,9 +150,11 @@ module Subscription = struct
     mutable done_seen : bool;
     mutable active : bool;
     unsubscribe_request : unit -> (unit, Error.t) result;
+    auto_unsubscribe_request :
+      max_messages:int -> (unit, Error.t) result;
   }
 
-  let create ~sid ~capacity ~unsubscribe_request =
+  let create ~sid ~capacity ~unsubscribe_request ~auto_unsubscribe_request =
     {
       sid;
       queue =
@@ -162,6 +164,7 @@ module Subscription = struct
       done_seen = false;
       active = true;
       unsubscribe_request;
+      auto_unsubscribe_request;
     }
 
   let sid t = t.sid
@@ -190,6 +193,21 @@ module Subscription = struct
           Error error
 
   let unsubscribe t = if not t.active then Ok () else t.unsubscribe_request ()
+
+  let auto_unsubscribe t ~max_messages =
+    if not t.active then Ok ()
+    else t.auto_unsubscribe_request ~max_messages
+
+  let iter t ~f =
+    let rec loop () =
+      match next t with
+      | Ok delivery ->
+          f delivery;
+          loop ()
+      | Error (Error.Closed | Error.Draining) -> Ok ()
+      | Error error -> Error error
+    in
+    loop ()
 end
 
 type input = Data of bytes | Eof | Failure of exn
@@ -205,6 +223,11 @@ and command =
       subject : Nats.Subject.Filter.t;
       queue_group : Nats.Queue_group.t option;
       resolver : (Subscription.t, Error.t) result Eio.Promise.u;
+    }
+  | Auto_unsubscribe of {
+      sid : int;
+      max_messages : int;
+      resolver : (unit, Error.t) result Eio.Promise.u;
     }
   | Request of {
       message : Nats.Message.t;
@@ -353,6 +376,7 @@ let fail_waiter resolver error = resolve_unit resolver (Error error)
 let fail_command = function
   | Publish { resolver; _ } -> fail_waiter resolver Error.Closed
   | Subscribe { resolver; _ } -> fail_waiter resolver Error.Closed
+  | Auto_unsubscribe { resolver; _ } -> fail_waiter resolver Error.Closed
   | Request { setup; _ } -> resolve_unit setup (Error Error.Closed)
   | Cancel_request _ -> ()
   | Unsubscribe { resolver; _ } -> fail_waiter resolver Error.Closed
@@ -647,6 +671,21 @@ let apply_outgoing t command =
                       Eio.Stream.add t.work
                         (Command (Unsubscribe { sid; resolver }));
                       Eio.Promise.await promise)
+                  ~auto_unsubscribe_request:(fun ~max_messages ->
+                    if t.closed then Error Error.Closed
+                    else if
+                      t.pending_commands >= t.config.Config.command_capacity
+                    then
+                      Error
+                        (Error.Command_queue_full
+                           { capacity = t.config.Config.command_capacity })
+                    else
+                      let promise, resolver = Eio.Promise.create () in
+                      t.pending_commands <- t.pending_commands + 1;
+                      Eio.Stream.add t.work
+                        (Command
+                           (Auto_unsubscribe { sid; max_messages; resolver }));
+                      Eio.Promise.await promise)
               in
               Hashtbl.replace t.subscriptions sid subscription;
               match apply_transition t transition with
@@ -657,6 +696,25 @@ let apply_outgoing t command =
               | Ok () ->
                   resolve_unit resolver (Ok subscription);
                   Ok ())))
+  | Auto_unsubscribe { sid; max_messages; resolver } -> (
+      match
+        Nats.Client.outgoing t.state
+          (Nats.Client.Auto_unsubscribe { sid; max_messages })
+      with
+      | Error (Nats.Error.Unknown_subscription _) ->
+          resolve_unit resolver (Ok ());
+          Ok ()
+      | Error error ->
+          fail_waiter resolver (command_error error);
+          Ok ()
+      | Ok transition -> (
+          match apply_transition t transition with
+          | Error error ->
+              fail_waiter resolver error;
+              Error error
+          | Ok () ->
+              resolve_unit resolver (Ok ());
+              Ok ()))
   | Request { message; timeout; setup; resolver } -> (
       match Mtime.add_span (now t) timeout with
       | None ->

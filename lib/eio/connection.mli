@@ -34,7 +34,9 @@ module Subscription : sig
 
   val sid : t -> int
   val next : t -> (delivery, Error.t) result
+  val iter : t -> f:(delivery -> unit) -> (unit, Error.t) result
   val unsubscribe : t -> (unit, Error.t) result
+  val auto_unsubscribe : t -> max_messages:int -> (unit, Error.t) result
 end
 
 type t

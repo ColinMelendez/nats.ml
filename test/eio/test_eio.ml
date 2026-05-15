@@ -240,6 +240,60 @@ let () =
               Eio.Promise.resolve pong_u (Ok "PONG\r\n");
               expect_ok (Eio.Promise.await drain_result);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "auto-unsubscribe bounds deliveries and iter stops cleanly"
+        (fun () ->
+          let messages_one, messages_one_u = Eio.Promise.create () in
+          let messages_two, messages_two_u = Eio.Promise.create () in
+          let iter_payload, iter_payload_u = Eio.Promise.create () in
+          let iter_result, iter_result_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:
+              [ `Return info_wire; `Await messages_one; `Await messages_two;
+                `Await hold ]
+            (fun ~sw connection ->
+              let subscription =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              expect_ok
+                (Nats_eio.Subscription.auto_unsubscribe subscription
+                   ~max_messages:2);
+              Eio.Promise.resolve messages_one_u
+                (Ok
+                   ("MSG orders.created 1 1\r\na\r\n"
+                   ^ "MSG orders.created 1 1\r\nb\r\n"
+                   ^ "MSG orders.created 1 1\r\nc\r\n"));
+              let first = expect_ok (Nats_eio.Subscription.next subscription) in
+              let second =
+                expect_ok (Nats_eio.Subscription.next subscription)
+              in
+              equal string "a" (Nats.Message.payload first.message);
+              equal string "b" (Nats.Message.payload second.message);
+              (match Nats_eio.Subscription.next subscription with
+              | Error Nats_eio.Error.Closed -> ()
+              | Ok _ -> fail "expected the auto-unsubscribed subscription to end"
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected subscription close, got %a"
+                       Nats_eio.Error.pp error));
+              let iter_subscription =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              expect_ok
+                (Nats_eio.Subscription.auto_unsubscribe iter_subscription
+                   ~max_messages:1);
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve iter_result_u
+                    (Nats_eio.Subscription.iter iter_subscription
+                       ~f:(fun delivery ->
+                         Eio.Promise.resolve iter_payload_u
+                           (Nats.Message.payload delivery.message))));
+              Eio.Promise.resolve messages_two_u
+                (Ok "MSG orders.created 2 1\r\nz\r\n");
+              equal string "z" (Eio.Promise.await iter_payload);
+              expect_ok (Eio.Promise.await iter_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "a full subscription reports a slow consumer without blocking"
         (fun () ->
           let messages, messages_u = Eio.Promise.create () in
