@@ -226,7 +226,7 @@ let info_events info =
 
 let incoming_message (state : t) now sid message status =
   match find_subscription sid state.subscriptions with
-  | None -> Error (Error.Unknown_subscription { sid })
+  | None -> Ok (empty_transition state)
   | Some subscription ->
       let subscriptions =
         match subscription.remaining with

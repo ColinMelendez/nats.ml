@@ -127,8 +127,13 @@ let () =
             | Ok value -> value
             | Error error -> fail_with Nats.Codec.pp_error error
           in
-          let delivered = incoming subscribed.state wire in
-          match delivered.deliveries with
+          let auto =
+            expect_client
+              (Nats.Client.outgoing subscribed.state
+                 (Nats.Client.Auto_unsubscribe { sid = 1; max_messages = 1 }))
+          in
+          let delivered = incoming auto.state wire in
+          (match delivered.deliveries with
           | [
            {
              sid = 1;
@@ -138,6 +143,8 @@ let () =
           ] ->
               ()
           | _ -> fail "expected one status-bearing delivery");
+          let ignored = incoming delivered.state wire in
+          equal int 0 (List.length ignored.deliveries));
       test "publish uses negotiated max_payload" (fun () ->
           let connected = connected_client () in
           let message =
