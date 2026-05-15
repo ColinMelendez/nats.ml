@@ -183,4 +183,29 @@ let () =
                   fail
                     (Format.asprintf "expected disconnect event, got %a"
                        Nats_eio.Error.pp error)));
+      test "times out a silent handshake" (fun () ->
+          Eio_mock.Backend.run_full @@ fun env ->
+          let hold, hold_u = Eio.Promise.create () in
+          let flow = Eio_mock.Flow.make "silent-nats-server" in
+          Eio_mock.Flow.on_read flow [ `Await hold ];
+          let net = Eio_mock.Net.make "silent-nats-network" in
+          Eio_mock.Net.on_connect net [ `Return flow ];
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v
+                 ~handshake_timeout:Mtime.Span.(1 * ms) ())
+          in
+          Eio.Switch.run @@ fun sw ->
+          let result =
+            Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock ~config
+              address
+          in
+          Eio.Promise.resolve hold_u (Error End_of_file);
+          match result with
+          | Error Nats_eio.Error.Timeout -> ()
+          | Error error ->
+              fail
+                (Format.asprintf "expected handshake timeout, got %a"
+                   Nats_eio.Error.pp error)
+          | Ok _ -> fail "expected the silent handshake to time out");
     ]

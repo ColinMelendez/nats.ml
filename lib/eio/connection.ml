@@ -7,6 +7,7 @@ module Config = struct
     event_capacity : int;
     read_capacity : int;
     read_chunk_size : int;
+    handshake_timeout : Mtime.Span.t;
     flush_timeout : Mtime.Span.t;
     drain_timeout : Mtime.Span.t;
   }
@@ -24,7 +25,8 @@ module Config = struct
   let v ?(core = Nats.Config.default) ?(credentials = Nats.Client.Connect.v ())
       ?(command_capacity = 128) ?(subscription_capacity = 256)
       ?(event_capacity = 64) ?(read_capacity = 4) ?(read_chunk_size = 65536)
-      ?(flush_timeout = default_span) ?(drain_timeout = default_span) () =
+      ?(handshake_timeout = default_span) ?(flush_timeout = default_span)
+      ?(drain_timeout = default_span) () =
     match validate_capacity "command" command_capacity with
     | Error error -> Error error
     | Ok command_capacity -> (
@@ -40,24 +42,28 @@ module Config = struct
                     if read_chunk_size <= 0 then
                       Error (Error.Invalid_chunk_size read_chunk_size)
                     else
-                      match validate_timeout "flush" flush_timeout with
+                      match validate_timeout "handshake" handshake_timeout with
                       | Error error -> Error error
-                      | Ok flush_timeout -> (
-                          match validate_timeout "drain" drain_timeout with
+                      | Ok handshake_timeout -> (
+                          match validate_timeout "flush" flush_timeout with
                           | Error error -> Error error
-                          | Ok drain_timeout ->
-                              Ok
-                                {
-                                  core;
-                                  credentials;
-                                  command_capacity;
-                                  subscription_capacity;
-                                  event_capacity;
-                                  read_capacity;
-                                  read_chunk_size;
-                                  flush_timeout;
-                                  drain_timeout;
-                                })))))
+                          | Ok flush_timeout -> (
+                              match validate_timeout "drain" drain_timeout with
+                              | Error error -> Error error
+                              | Ok drain_timeout ->
+                                  Ok
+                                    {
+                                      core;
+                                      credentials;
+                                      command_capacity;
+                                      subscription_capacity;
+                                      event_capacity;
+                                      read_capacity;
+                                      read_chunk_size;
+                                      handshake_timeout;
+                                      flush_timeout;
+                                      drain_timeout;
+                                    }))))))
 
   let default =
     match v () with
@@ -230,6 +236,7 @@ type t = {
   mutable closed : bool;
   mutable connect_sent : bool;
   mutable pending_commands : int;
+  mutable handshake_deadline : Mtime.t option;
   mutable timer_generation : int;
   mutable scheduled_deadline : Mtime.t option;
   ready_promise : (unit, Error.t) result Eio.Promise.t;
@@ -362,6 +369,7 @@ let handle_event t event =
   match event with
   | Nats.Event.Info _ -> Ok ()
   | Nats.Event.Connected ->
+      t.handshake_deadline <- None;
       if not t.connect_sent then Ok ()
       else if Eio.Promise.is_resolved t.ready_promise then Ok ()
       else (
@@ -649,48 +657,60 @@ let timer_deadline t =
         if Mtime.is_earlier candidate ~than:current then Some candidate
         else Some current
   in
-  let deadline = Nats.Client.next_timeout t.state in
+  let deadline = t.handshake_deadline in
+  let deadline =
+    match Nats.Client.next_timeout t.state with
+    | None -> deadline
+    | Some candidate -> earliest deadline candidate
+  in
   match Queue.peek_opt t.barriers with
   | None -> deadline
   | Some (Flush_waiter waiter) -> earliest deadline waiter.deadline
   | Some (Drain_waiter waiter) -> earliest deadline waiter.deadline
 
-let same_deadline left right =
-  match (left, right) with
-  | None, None -> true
-  | Some left, Some right -> Int.equal (Mtime.compare left right) 0
-  | None, Some _ | Some _, None -> false
-
 let schedule_timer t =
-  let deadline = timer_deadline t in
-  if (not t.closed) && not (same_deadline t.scheduled_deadline deadline) then (
+  let start deadline =
     t.timer_generation <- t.timer_generation + 1;
-    t.scheduled_deadline <- deadline;
-    match deadline with
-    | None -> ()
-    | Some deadline ->
-        let generation = t.timer_generation in
-        Eio.Fiber.fork ~sw:t.sw (fun () ->
-            t.clock.sleep_until deadline;
-            if not t.closed then Eio.Stream.add t.work (Timer generation)))
+    t.scheduled_deadline <- Some deadline;
+    let generation = t.timer_generation in
+    Eio.Fiber.fork ~sw:t.sw (fun () ->
+        t.clock.sleep_until deadline;
+        if not t.closed then Eio.Stream.add t.work (Timer generation))
+  in
+  if not t.closed then
+    match (t.scheduled_deadline, timer_deadline t) with
+    | None, None -> ()
+    | Some _, None ->
+        t.timer_generation <- t.timer_generation + 1;
+        t.scheduled_deadline <- None
+    | None, Some deadline -> start deadline
+    | Some scheduled, Some deadline ->
+        if Mtime.is_earlier deadline ~than:scheduled then start deadline
 
 let apply_timer t generation =
-  if Int.equal generation t.timer_generation then
+  if Int.equal generation t.timer_generation then (
+    t.scheduled_deadline <- None;
     let current = now t in
+    let handshake_due =
+      match (t.handshake_deadline, Nats.Client.phase t.state) with
+      | Some deadline, (Nats.Client.Awaiting_info | Nats.Client.Awaiting_connect)
+        -> Mtime.compare current deadline >= 0
+      | _ -> false
+    in
     let barrier_due =
       match Queue.peek_opt t.barriers with
       | None -> false
       | Some (Flush_waiter waiter) -> Mtime.compare current waiter.deadline >= 0
       | Some (Drain_waiter waiter) -> Mtime.compare current waiter.deadline >= 0
     in
-    if barrier_due then finish t Error.Timeout
+    if handshake_due || barrier_due then finish t Error.Timeout
     else
       let transition = Nats.Client.timer t.state ~now:current in
       match apply_transition t transition with
       | Error error -> finish t error
       | Ok () ->
           if Nats.Client.phase t.state = Nats.Client.Closed then
-            finish t Error.Timeout
+            finish t Error.Timeout)
 
 let rec owner_loop t =
   if not t.closed then
@@ -714,6 +734,9 @@ let rec owner_loop t =
         owner_loop t
 
 let create ~sw ~clock ~config flow =
+  let handshake_deadline =
+    Mtime.add_span (Eio.Time.Mono.now clock) config.Config.handshake_timeout
+  in
   let clock =
     {
       now = (fun () -> Eio.Time.Mono.now clock);
@@ -745,6 +768,7 @@ let create ~sw ~clock ~config flow =
       closed = false;
       connect_sent = false;
       pending_commands = 0;
+      handshake_deadline;
       timer_generation = 0;
       scheduled_deadline = None;
       ready_promise = ready;
@@ -752,6 +776,7 @@ let create ~sw ~clock ~config flow =
       barriers = Queue.create ();
     }
   in
+  schedule_timer connection;
   Eio.Fiber.fork ~sw (fun () ->
       read_loop transport input connection.work config.Config.read_chunk_size);
   Eio.Fiber.fork ~sw (fun () -> owner_loop connection);

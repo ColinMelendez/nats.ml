@@ -11,6 +11,7 @@ module Config : sig
     ?event_capacity:int ->
     ?read_capacity:int ->
     ?read_chunk_size:int ->
+    ?handshake_timeout:Mtime.Span.t ->
     ?flush_timeout:Mtime.Span.t ->
     ?drain_timeout:Mtime.Span.t ->
     unit ->
