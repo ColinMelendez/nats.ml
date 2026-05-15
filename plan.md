@@ -34,10 +34,13 @@ explicit CONNECT transition, allocates subscription ids, preserves HMSG status,
 and exposes bounded incoming/timer transitions. The first Eio vertical slice
 is now present as a separate `nats-eio` package:
 it owns a serialized protocol fiber, a non-blocking pending-input buffer,
-direct-style publish/subscribe/flush/close operations, bounded subscription
-and event streams, EOF/error shutdown, and mock-transport coverage for
-fragmented and coalesced frames. This is an implementation checkpoint, not
-the G2 stability gate: dialing policy, TLS, requests, reconnect, cancellation,
+direct-style publish/subscribe/request/flush/drain/close operations, bounded
+subscription and event streams, EOF/error shutdown, per-request inboxes,
+structured no-responders results, local request deadlines, and
+cancellation-safe waiter cleanup. Mock-transport coverage exercises
+fragmented/coalesced frames, replies, no responders, timeouts, cancellation,
+and drain ordering. This is an implementation checkpoint, not the G2
+stability gate: dialing policy, TLS, reconnect, subscription-drain helpers,
 and real-server acceptance tests remain ahead.
 
 ## Working principles
@@ -257,23 +260,25 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
 ### Work
 
 - Current foundation: the `nats-eio` package provides the serialized owner,
-  direct-style Core publish/subscribe/flush/close operations, bounded delivery
-  and event streams, structured adapter errors, and non-blocking fragmented
-  input handling.
+  direct-style Core publish/subscribe/request/flush/drain/close operations,
+  bounded delivery and event streams, structured adapter errors, and
+  non-blocking fragmented input handling.
 - Dial configured servers through Eio, with TLS support in the adapter.
 - Start one protocol-owner fiber per connection and serialize all commands
   through it.
-- Add `Connection.connect`, `publish`, `publish_msg`, `subscribe`, `request`,
-  `flush`, `events`, `drain`, and `close`.
+- The current connection surface includes `connect`, `publish`, `publish_msg`,
+  `subscribe`, `request`, `request_msg`, `flush`, `events`, `drain`, and
+  `close`.
 - Add owned `Subscription.next`, `iter`, `unsubscribe`, `drain`, and
   auto-unsubscribe operations.
-- Implement queue groups, headers, no-responders, request inbox multiplexing,
-  and a per-request fallback.
+- Implement queue groups, headers, structured no-responders, and the
+  per-request inbox fallback. Shared inbox multiplexing remains a later
+  optimization once reconnect semantics are defined.
 - Generate inbox names in the adapter; make the prefix configurable.
 - Add configured/discovered server selection, reconnect backoff, retry limits,
   lifecycle events, and subscription replay.
-- Define the fate of pending requests and flush barriers on disconnect: they
-  fail structurally and exactly once; they never hang or silently replay.
+- Pending requests and flush barriers now fail structurally and exactly once
+  on disconnect, cancellation, timeout, and drain; they never silently replay.
 - Enforce bounded subscription and event queues with an explicit overflow
   policy. Distinguish local slow consumers from remote/server disconnects.
 - Add token, username/password, and explicit nonce-signing hooks without
