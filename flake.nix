@@ -19,6 +19,7 @@
           test = pkgs.mkShell {
             packages = with pkgs; [
               curl
+              gmp
               git
               pkg-config
             ] ++ (with ocamlPackages_latest; [
@@ -30,6 +31,7 @@
           default = pkgs.mkShell {
             packages = with pkgs; [
               curl
+              gmp
               git
               pkg-config
               nixfmt

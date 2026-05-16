@@ -30,5 +30,6 @@
   bytesrw
   eio
   cstruct
+  tls-eio
   mtime
   (windtrap :with-test)))
