@@ -57,6 +57,11 @@ val prepare_reconnect : t -> t
     client-assigned subscription ids and their replay intent. Use it after an
     unexpected transport loss, before receiving the next server [INFO]. *)
 
+val forget_subscription : t -> int -> t
+(** [forget_subscription state sid] removes the local replay intent for [sid]
+    without emitting wire output. It is intended for adapter-owned ephemeral
+    subscriptions, such as a request inbox whose request has failed. *)
+
 val outgoing : t -> command -> (transition, Error.t) result
 
 val incoming :

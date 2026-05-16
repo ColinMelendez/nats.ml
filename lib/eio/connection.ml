@@ -104,23 +104,53 @@ module Event_stream = struct
   type t = {
     queue : item Eio.Stream.t;
     capacity : int;
+    control_capacity : int;
+    storage_capacity : int;
     mutable terminal : Error.t option;
     mutable done_seen : bool;
+    mutable control_sequence : bool;
+    mutable control_hold : bool;
   }
 
   let create capacity =
+    let add_capacity extra value =
+      if value >= max_int - extra then max_int else value + extra
+    in
+    let control_capacity = add_capacity 8 capacity in
+    let storage_capacity = add_capacity 10 capacity in
     {
-      queue =
-        Eio.Stream.create
-          (if capacity >= max_int - 1 then max_int else capacity + 2);
+      queue = Eio.Stream.create storage_capacity;
       capacity;
+      control_capacity;
+      storage_capacity;
       terminal = None;
       done_seen = false;
+      control_sequence = false;
+      control_hold = false;
     }
 
   let push t event =
     if Option.is_some t.terminal then false
-    else if Eio.Stream.length t.queue >= t.capacity then false
+    else
+      let capacity =
+        if t.control_sequence then t.control_capacity else t.capacity
+      in
+      if Eio.Stream.length t.queue >= capacity then false
+      else (
+        Eio.Stream.add t.queue (Event event);
+        true)
+
+  let begin_control_sequence t =
+    t.control_sequence <- true;
+    t.control_hold <- true
+
+  let end_control_sequence t =
+    t.control_hold <- false;
+    if Eio.Stream.length t.queue <= t.capacity then t.control_sequence <- false
+
+  let push_control t event =
+    if Option.is_some t.terminal then false
+    else if Eio.Stream.length t.queue >= t.control_capacity then false
     else (
       Eio.Stream.add t.queue (Event event);
       true)
@@ -129,7 +159,12 @@ module Event_stream = struct
     if t.done_seen then
       match t.terminal with Some error -> Error error | None -> assert false
     else
-      match Eio.Stream.take t.queue with
+      let value = Eio.Stream.take t.queue in
+      if
+        t.control_sequence && (not t.control_hold)
+        && Eio.Stream.length t.queue <= t.capacity
+      then t.control_sequence <- false;
+      match value with
       | Event event -> Ok event
       | Done error ->
           t.done_seen <- true;
@@ -388,7 +423,7 @@ type flow =
       -> flow
 
 type dial = unit -> (flow, Error.t) result
-type transport = { mutable flow : flow }
+type transport = { mutable flow : flow; mutable closed : bool }
 
 type reader = {
   cancel : Eio.Cancel.t;
@@ -416,11 +451,13 @@ type t = {
   mutable reader : reader option;
   mutable eof_seen : bool;
   mutable closed : bool;
+  mutable reconnecting : bool;
   mutable connect_sent : bool;
   mutable tls_active : bool;
   mutable tls_info_received : bool;
   mutable pending_commands : int;
   mutable active_request_setup : (int, Error.t) result Eio.Promise.u option;
+  deferred_commands : command Queue.t;
   mutable handshake_deadline : Mtime.t option;
   mutable timer_generation : int;
   mutable scheduled_deadline : Mtime.t option;
@@ -491,6 +528,11 @@ let write_flow flow value =
 
 let close_flow flow = match flow with Flow flow -> Eio.Flow.close flow
 
+let close_transport (transport : transport) =
+  if not transport.closed then (
+    transport.closed <- true;
+    close_flow transport.flow)
+
 let transport_error t error =
   if t.tls_active then Error (Error.Tls error) else Error (Error.Io error)
 
@@ -527,6 +569,13 @@ let resolve_setup t resolver value =
   t.active_request_setup <- None;
   resolve_unit resolver value
 
+let fail_active_request_setup t error =
+  match t.active_request_setup with
+  | None -> ()
+  | Some resolver ->
+      t.active_request_setup <- None;
+      resolve_unit resolver (Error error)
+
 let event t event =
   if Event_stream.push t.events event then Ok ()
   else Error (Error.Slow_consumer Error.Events)
@@ -544,18 +593,18 @@ let close_subscriptions t error =
 
 let fail_waiter resolver error = resolve_unit resolver (Error error)
 
-let fail_command = function
-  | Publish { resolver; _ } -> fail_waiter resolver Error.Closed
-  | Subscribe { resolver; _ } -> fail_waiter resolver Error.Closed
-  | Auto_unsubscribe { resolver; _ } -> fail_waiter resolver Error.Closed
+let fail_command error = function
+  | Publish { resolver; _ } -> fail_waiter resolver error
+  | Subscribe { resolver; _ } -> fail_waiter resolver error
+  | Auto_unsubscribe { resolver; _ } -> fail_waiter resolver error
   | Drain_subscription { subscription; _ } ->
-      Subscription.fail_pending_drain subscription Error.Closed
+      Subscription.fail_pending_drain subscription error
   | Cancel_subscription_drain _ -> ()
-  | Request { setup; _ } -> resolve_unit setup (Error Error.Closed)
+  | Request { setup; _ } -> resolve_unit setup (Error error)
   | Cancel_request _ -> ()
-  | Unsubscribe { resolver; _ } -> fail_waiter resolver Error.Closed
-  | Flush { resolver; _ } -> fail_waiter resolver Error.Closed
-  | Drain { resolver; _ } -> fail_waiter resolver Error.Closed
+  | Unsubscribe { resolver; _ } -> fail_waiter resolver error
+  | Flush { resolver; _ } -> fail_waiter resolver error
+  | Drain { resolver; _ } -> fail_waiter resolver error
   | Close { resolver } -> resolve_unit resolver (Ok ())
 
 let fail_pending_commands t =
@@ -563,11 +612,14 @@ let fail_pending_commands t =
     match Eio.Stream.take_nonblocking t.work with
     | None -> ()
     | Some (Command command) ->
-        fail_command command;
+        fail_command Error.Closed command;
         loop ()
     | Some (Input_ready | Timer _) -> loop ()
   in
   loop ();
+  while not (Queue.is_empty t.deferred_commands) do
+    fail_command Error.Closed (Queue.take t.deferred_commands)
+  done;
   t.pending_commands <- 0
 
 let fail_requests t error =
@@ -577,26 +629,33 @@ let fail_requests t error =
   Hashtbl.clear t.requests;
   List.iter (fun (_sid, waiter) -> fail_waiter waiter.resolver error) requests
 
+let request_sids t = Hashtbl.fold (fun sid _ acc -> sid :: acc) t.requests []
+
 let fail_subscription_drains t error =
   let waiters =
     Hashtbl.fold (fun _sid waiter acc -> waiter :: acc) t.subscription_drains []
   in
   List.iter
-    (fun waiter -> Subscription.complete_drain_waiter waiter (Error error))
+    (fun waiter ->
+      match Hashtbl.find_opt t.subscriptions waiter.sid with
+      | Some subscription -> Subscription.fail_drain subscription error
+      | None ->
+          Hashtbl.remove t.subscription_drains waiter.sid;
+          Subscription.complete_drain_waiter waiter (Error error))
     waiters
 
 let finish t error =
   if not t.closed then (
+    let suppress_disconnect = t.reconnecting in
     t.closed <- true;
-    (match t.active_request_setup with
-    | None -> ()
-    | Some resolver ->
-        t.active_request_setup <- None;
-        resolve_unit resolver (Error error));
+    t.reconnecting <- false;
+    Event_stream.end_control_sequence t.events;
+    fail_active_request_setup t error;
     (match error with
     | Error.Disconnected | Error.Io _ | Error.Tls _ | Error.Tls_required
     | Error.Tls_unexpected_input | Error.Timeout ->
-        Event_stream.push_terminal t.events Event.Disconnected
+        if not suppress_disconnect then
+          Event_stream.push_terminal t.events Event.Disconnected
     | Error.Slow_consumer kind ->
         Event_stream.push_terminal t.events (Event.Slow_consumer kind)
     | Error.Invalid_capacity _ | Error.Command_queue_full _
@@ -621,7 +680,7 @@ let finish t error =
     | Some _ -> ()
     | None -> resolve_ready t (Error error));
     Event_stream.terminate t.events error;
-    close_flow t.flow.flow)
+    close_transport t.flow)
 
 let remove_finished_subscriptions t =
   let active = Nats.Client.subscriptions t.state in
@@ -644,16 +703,38 @@ let unsubscribe_sid t sid =
   match Nats.Client.outgoing t.state (Nats.Client.Unsubscribe { sid }) with
   | Error (Nats.Error.Unknown_subscription _) -> Ok ()
   | Error error -> Error (command_error error)
-  | Ok transition ->
-      t.state <- transition.state;
-      write_outputs t transition.output
+  | Ok transition -> (
+      match write_outputs t transition.output with
+      | Error error -> Error error
+      | Ok () ->
+          t.state <- transition.state;
+          Ok ())
+
+let unsubscribe_and_forget t sid =
+  match unsubscribe_sid t sid with
+  | Ok () -> Ok ()
+  | Error error ->
+      t.state <- Nats.Client.forget_subscription t.state sid;
+      Error error
+
+let release_deferred_commands t =
+  while not (Queue.is_empty t.deferred_commands) do
+    Eio.Stream.add t.work (Command (Queue.take t.deferred_commands))
+  done
 
 let handle_event t event =
   match event with
   | Nats.Event.Info _ -> Ok ()
   | Nats.Event.Connected ->
       t.handshake_deadline <- None;
-      if not t.connect_sent then Ok ()
+      if t.reconnecting then
+        if Event_stream.push_control t.events Event.Reconnected then (
+          Event_stream.end_control_sequence t.events;
+          t.reconnecting <- false;
+          release_deferred_commands t;
+          Ok ())
+        else Error (Error.Slow_consumer Error.Events)
+      else if not t.connect_sent then Ok ()
       else if Eio.Promise.is_resolved t.ready_promise then Ok ()
       else (
         resolve_ready t (Ok ());
@@ -717,7 +798,7 @@ let handle_deliveries t deliveries =
               | _ -> Ok delivery.message
             in
             resolve_unit waiter.resolver result;
-            match unsubscribe_sid t delivery.sid with
+            match unsubscribe_and_forget t delivery.sid with
             | Ok () -> loop rest
             | Error error -> Error error)
         | None -> (
@@ -743,23 +824,23 @@ let handle_deliveries t deliveries =
                   with
                   | Error error -> Error error
                   | Ok () -> (
-                      match unsubscribe_sid t delivery.sid with
+                      match unsubscribe_and_forget t delivery.sid with
                       | Ok () -> loop rest
                       | Error error -> Error error))))
   in
   loop deliveries
 
 let apply_transition t (transition : Nats.Client.transition) =
-  t.state <- transition.state;
-  if
-    t.tls_active
-    && List.exists
-         (function Nats.Event.Info _ -> true | _ -> false)
-         transition.events
-  then t.tls_info_received <- true;
   match write_outputs t transition.output with
   | Error error -> Error error
   | Ok () -> (
+      t.state <- transition.state;
+      if
+        t.tls_active
+        && List.exists
+             (function Nats.Event.Info _ -> true | _ -> false)
+             transition.events
+      then t.tls_info_received <- true;
       match handle_events t transition.events with
       | Error error -> Error error
       | Ok () -> handle_deliveries t transition.deliveries)
@@ -855,9 +936,19 @@ let consume_pending t length =
     if remaining > 0 then Buffer.add_substring t.pending value length remaining)
 
 let apply_incoming t =
+  let was_established = Eio.Promise.is_resolved t.ready_promise in
+  let was_draining =
+    match Nats.Client.phase t.state with
+    | Nats.Client.Draining -> true
+    | _ -> false
+  in
   match drain_input t with
   | Error error -> Error error
   | Ok () ->
+      let () =
+        if t.eof_seen && was_established && not was_draining then
+          Event_stream.begin_control_sequence t.events
+      in
       let rec loop () =
         let end_of_data = t.eof_seen in
         let value = Buffer.contents t.pending in
@@ -876,9 +967,12 @@ let apply_incoming t =
                 | Error error -> Error error
                 | Ok () -> (
                     consume_pending t consumed;
-                    if Nats.Client.phase t.state = Nats.Client.Closed then (
-                      finish t Error.Disconnected;
-                      Ok ())
+                    if Nats.Client.phase t.state = Nats.Client.Closed then
+                      if was_established && not was_draining then
+                        Error Error.Disconnected
+                      else (
+                        finish t Error.Disconnected;
+                        Ok ())
                     else
                       match connect_after_info t with
                       | Error error -> Error error
@@ -888,6 +982,85 @@ let apply_incoming t =
                           else Ok ()))
       in
       loop ()
+
+let fail_recovery_commands t error =
+  let close_requested = ref false in
+  let rec loop () =
+    match Eio.Stream.take_nonblocking t.work with
+    | None -> ()
+    | Some (Command (Close { resolver })) ->
+        resolve_unit resolver (Ok ());
+        close_requested := true;
+        loop ()
+    | Some (Command command) ->
+        fail_command error command;
+        loop ()
+    | Some (Input_ready | Timer _) -> loop ()
+  in
+  loop ();
+  t.pending_commands <- 0;
+  !close_requested
+
+let fail_barriers t error =
+  Queue.iter
+    (function
+      | Flush_waiter waiter ->
+          if not waiter.completed then (
+            waiter.completed <- true;
+            fail_waiter waiter.resolver error)
+      | Drain_waiter waiter -> fail_waiter waiter.resolver error
+      | Subscription_drain_waiter waiter ->
+          Subscription.complete_drain_waiter waiter (Error error))
+    t.barriers;
+  Queue.clear t.barriers
+
+let discard_input t =
+  let rec loop () =
+    match Eio.Stream.take_nonblocking t.input with
+    | None -> ()
+    | Some _ -> loop ()
+  in
+  loop ()
+
+let recover_transport t =
+  let request_ids = request_sids t in
+  fail_active_request_setup t Error.Disconnected;
+  fail_requests t Error.Disconnected;
+  fail_subscription_drains t Error.Disconnected;
+  fail_barriers t Error.Disconnected;
+  let close_requested = fail_recovery_commands t Error.Disconnected in
+  stop_reader t;
+  discard_input t;
+  Buffer.clear t.pending;
+  t.eof_seen <- false;
+  t.timer_generation <- t.timer_generation + 1;
+  t.scheduled_deadline <- None;
+  close_transport t.flow;
+  if close_requested then Error Error.Closed
+  else (
+    Event_stream.begin_control_sequence t.events;
+    if not (Event_stream.push_control t.events Event.Disconnected) then (
+      Event_stream.end_control_sequence t.events;
+      Error (Error.Slow_consumer Error.Events))
+    else (
+      t.reconnecting <- true;
+      let state = Nats.Client.prepare_reconnect t.state in
+      t.state <-
+        List.fold_left
+          (fun state sid -> Nats.Client.forget_subscription state sid)
+          state request_ids;
+      t.connect_sent <- false;
+      t.tls_active <- false;
+      t.tls_info_received <- false;
+      t.handshake_deadline <-
+        Mtime.add_span (now t) t.config.Config.handshake_timeout;
+      match t.dial () with
+      | Error error -> Error error
+      | Ok flow ->
+          t.flow.flow <- flow;
+          t.flow.closed <- false;
+          start_reader t;
+          Ok ()))
 
 let apply_outgoing t command =
   match command with
@@ -1058,14 +1231,17 @@ let apply_outgoing t command =
                 Nats.Client.outgoing t.state (Nats.Client.Unsubscribe { sid })
               with
               | Error (Nats.Error.Unknown_subscription _) ->
-                  Subscription.terminate subscription Error.Closed;
+                  t.state <- Nats.Client.forget_subscription t.state sid;
+                  close_subscription t sid Error.Closed;
                   Ok ()
               | Error error ->
-                  Subscription.terminate subscription (command_error error);
+                  t.state <- Nats.Client.forget_subscription t.state sid;
+                  close_subscription t sid (command_error error);
                   Ok ()
               | Ok unsubscribe_transition -> (
                   match apply_transition t unsubscribe_transition with
                   | Error error ->
+                      t.state <- Nats.Client.forget_subscription t.state sid;
                       Subscription.complete_drain subscription waiter
                         (Error error);
                       Error error
@@ -1134,14 +1310,14 @@ let apply_outgoing t command =
                       | Error error -> (
                           let error = command_error error in
                           resolve_setup t setup (Error error);
-                          match unsubscribe_sid t sid with
+                          match unsubscribe_and_forget t sid with
                           | Ok () -> Ok ()
                           | Error cleanup_error -> Error cleanup_error)
                       | Ok auto_unsubscribe -> (
                           match apply_transition t auto_unsubscribe with
                           | Error error -> (
                               resolve_setup t setup (Error error);
-                              match unsubscribe_sid t sid with
+                              match unsubscribe_and_forget t sid with
                               | Ok () -> Ok ()
                               | Error cleanup_error -> Error cleanup_error)
                           | Ok () -> (
@@ -1162,13 +1338,16 @@ let apply_outgoing t command =
                                   Hashtbl.remove t.requests sid;
                                   resolve_setup t setup
                                     (Error (command_error error));
-                                  match unsubscribe_sid t sid with
+                                  match unsubscribe_and_forget t sid with
                                   | Ok () -> Ok ()
                                   | Error error -> Error error)
                               | Ok transition -> (
                                   match apply_transition t transition with
                                   | Error error ->
                                       Hashtbl.remove t.requests sid;
+                                      t.state <-
+                                        Nats.Client.forget_subscription t.state
+                                          sid;
                                       resolve_setup t setup (Error error);
                                       Error error
                                   | Ok () ->
@@ -1180,7 +1359,7 @@ let apply_outgoing t command =
       | Some waiter -> (
           Hashtbl.remove t.requests sid;
           fail_waiter waiter.resolver Error.Closed;
-          match unsubscribe_sid t sid with
+          match unsubscribe_and_forget t sid with
           | Error error -> Error error
           | Ok () -> Ok ()))
   | Unsubscribe { sid; resolver } -> (
@@ -1271,7 +1450,7 @@ let expire_requests t current =
         | Some waiter -> (
             Hashtbl.remove t.requests sid;
             fail_waiter waiter.resolver Error.Timeout;
-            match unsubscribe_sid t sid with
+            match unsubscribe_and_forget t sid with
             | Error error -> Error error
             | Ok () -> loop rest))
   in
@@ -1387,6 +1566,23 @@ let schedule_timer t =
     | Some scheduled, Some deadline ->
         if Mtime.is_earlier deadline ~than:scheduled then start deadline
 
+let may_recover t =
+  Eio.Promise.is_resolved t.ready_promise
+  && (not t.closed) && (not t.reconnecting)
+  &&
+  match Nats.Client.phase t.state with
+  | Nats.Client.Draining -> false
+  | _ -> true
+
+let recoverable_transport_error = function
+  | Error.Disconnected | Error.Io _ -> true
+  | Error.Invalid_capacity _ | Error.Command_queue_full _
+  | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
+  | Error.Invalid_timeout _ | Error.Tls_required | Error.Tls_unexpected_input
+  | Error.Tls _ | Error.Timeout | Error.Slow_consumer _ | Error.Protocol _
+  | Error.No_responders | Error.Draining | Error.Closed ->
+      false
+
 let apply_timer t generation =
   if Int.equal generation t.timer_generation then (
     t.scheduled_deadline <- None;
@@ -1421,6 +1617,22 @@ let apply_timer t generation =
                 if Nats.Client.phase t.state = Nats.Client.Closed then
                   finish t Error.Timeout)))
 
+let apply_command t command =
+  if not t.reconnecting then apply_outgoing t command
+  else
+    match command with
+    | Close { resolver } ->
+        resolve_unit resolver (Ok ());
+        finish t Error.Closed;
+        Ok ()
+    | (Unsubscribe _ | Auto_unsubscribe _) as command ->
+        Queue.add command t.deferred_commands;
+        t.pending_commands <- t.pending_commands + 1;
+        Ok ()
+    | _ ->
+        fail_command Error.Disconnected command;
+        Ok ()
+
 let rec owner_loop t =
   try
     if not t.closed then
@@ -1432,20 +1644,33 @@ let rec owner_loop t =
           (match command with
           | Request { setup; _ } -> t.active_request_setup <- Some setup
           | _ -> ());
-          match apply_outgoing t command with
+          match apply_command t command with
           | Ok () ->
               t.active_request_setup <- None;
               schedule_timer t;
               owner_loop t
           | Error error ->
               t.active_request_setup <- None;
-              finish t error)
+              if may_recover t && recoverable_transport_error error then
+                match recover_transport t with
+                | Ok () ->
+                    schedule_timer t;
+                    owner_loop t
+                | Error error -> finish t error
+              else finish t error)
       | Input_ready -> (
           match apply_incoming t with
           | Ok () ->
               schedule_timer t;
               owner_loop t
-          | Error error -> finish t error)
+          | Error error ->
+              if may_recover t && recoverable_transport_error error then
+                match recover_transport t with
+                | Ok () ->
+                    schedule_timer t;
+                    owner_loop t
+                | Error error -> finish t error
+              else finish t error)
       | Timer generation ->
           apply_timer t generation;
           schedule_timer t;
@@ -1463,7 +1688,7 @@ let create ~sw ~clock ~config ~(dial : dial) flow =
       sleep_until = (fun deadline -> Eio.Time.Mono.sleep_until clock deadline);
     }
   in
-  let transport = { flow } in
+  let transport = { flow; closed = false } in
   let input = Eio.Stream.create config.Config.read_capacity in
   let ready, ready_resolver = Eio.Promise.create () in
   let connection =
@@ -1484,11 +1709,13 @@ let create ~sw ~clock ~config ~(dial : dial) flow =
       reader = None;
       eof_seen = false;
       closed = false;
+      reconnecting = false;
       connect_sent = false;
       tls_active = false;
       tls_info_received = false;
       pending_commands = 0;
       active_request_setup = None;
+      deferred_commands = Queue.create ();
       handshake_deadline;
       timer_generation = 0;
       scheduled_deadline = None;
@@ -1509,8 +1736,10 @@ let connect ~sw ~net ~clock ?(config = Config.default) address =
       let flow = Eio.Net.connect ~sw net address in
       Ok (Flow flow)
     with
+    | Eio.Cancel.Cancelled _ as error -> raise error
     | End_of_file -> Error Error.Disconnected
     | Eio.Io (_, _) as error -> Error (io_error error)
+    | error -> Error (Error.Io error)
   in
   match dial () with
   | Error error -> Error error

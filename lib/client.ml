@@ -214,6 +214,9 @@ let remove_subscription (sid : int) (subscriptions : subscription list) =
     (fun (subscription : subscription) -> not (Int.equal subscription.sid sid))
     subscriptions
 
+let forget_subscription state sid =
+  { state with subscriptions = remove_subscription sid state.subscriptions }
+
 let require_connected state =
   match state.phase with
   | Connected -> Ok ()
