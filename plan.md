@@ -37,11 +37,14 @@ it owns a serialized protocol fiber, a non-blocking pending-input buffer,
 direct-style publish/subscribe/request/flush/drain/close operations, bounded
 subscription and event streams, EOF/error shutdown, per-request inboxes,
 structured no-responders results, local request deadlines, and
-cancellation-safe waiter cleanup. Mock-transport coverage exercises
-fragmented/coalesced frames, replies, no responders, timeouts, cancellation,
-and drain ordering. This is an implementation checkpoint, not the G2
-stability gate: dialing policy, TLS, reconnect, subscription-drain helpers,
-and real-server acceptance tests remain ahead.
+cancellation-safe waiter cleanup. Subscription handles also provide a
+server-barrier drain that preserves queued terminal delivery, coalesces
+concurrent callers, and keeps late PONGs associated with their original
+barriers. Mock-transport coverage exercises fragmented/coalesced frames,
+replies, no responders, timeouts, cancellation, sibling delivery during drain,
+and multi-barrier ordering. This is an implementation checkpoint, not the G2
+stability gate: dialing policy, TLS, reconnect, and real-server acceptance
+tests remain ahead.
 
 ## Working principles
 
@@ -269,8 +272,10 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
 - The current connection surface includes `connect`, `publish`, `publish_msg`,
   `subscribe`, `request`, `request_msg`, `flush`, `events`, `drain`, and
   `close`.
-- Add owned `Subscription.next`, `iter`, `unsubscribe`, `drain`, and
-  auto-unsubscribe operations.
+- The owned `Subscription` surface includes `next`, `iter`, `unsubscribe`,
+  server-barrier `drain`, and auto-unsubscribe operations. Drain completion is
+  independent of consumer scheduling; queued messages and the terminal marker
+  remain available to the pull-based receive path.
 - Implement queue groups, headers, structured no-responders, and the
   per-request inbox fallback. Shared inbox multiplexing remains a later
   optimization once reconnect semantics are defined.

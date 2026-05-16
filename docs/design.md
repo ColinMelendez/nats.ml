@@ -521,7 +521,11 @@ publish should use message ids when the caller needs deduplication.
 publishes/subscriptions, lets existing subscription queues and pending output
 finish, flushes, then closes. A connection drain must also drain or cancel
 request waiters deterministically. Subscription drain has the narrower meaning
-of unsubscribe while delivering already-received messages.
+of unsubscribe while delivering already-received messages. In the Eio facade,
+it waits for the server's unsubscribe barrier, enqueues a terminal marker, and
+leaves already queued messages available to `next`/`iter`; it does not wait for
+a consumer fiber to observe those items. A timed-out drain retains its terminal
+result for subsequent calls rather than reporting a later false success.
 
 ### Authentication and transports
 
