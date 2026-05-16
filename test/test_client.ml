@@ -32,7 +32,8 @@ let connected_client () =
   let info_transition = client_at_info () in
   expect_client
     (Nats.Client.outgoing info_transition.state
-       (Nats.Client.Connect (Nats.Client.Connect.v ())))
+       (Nats.Client.Connect
+          { credentials = Nats.Client.Connect.v (); tls_required = false }))
 
 let incoming state wire =
   let reader = Bytesrw.Bytes.Reader.of_string wire in
@@ -58,7 +59,11 @@ let () =
           let connected =
             expect_client
               (Nats.Client.outgoing info.state
-                 (Nats.Client.Connect (Nats.Client.Connect.v ())))
+                 (Nats.Client.Connect
+                    {
+                      credentials = Nats.Client.Connect.v ();
+                      tls_required = false;
+                    }))
           in
           equal bool true
             (match Nats.Client.phase connected.state with
@@ -74,6 +79,30 @@ let () =
               with
               | Ok (Nats.Op.Connect json) ->
                   equal bool true (String.length json > 0)
+              | Ok _ -> fail "expected CONNECT"
+              | Error error -> fail_with Nats.Codec.pp_error error)
+          | _ -> fail "expected one CONNECT output");
+      test "CONNECT advertises explicit TLS intent" (fun () ->
+          let info = client_at_info () in
+          let connected =
+            expect_client
+              (Nats.Client.outgoing info.state
+                 (Nats.Client.Connect
+                    {
+                      credentials = Nats.Client.Connect.v ();
+                      tls_required = true;
+                    }))
+          in
+          match connected.output with
+          | [ wire ] -> (
+              match
+                Nats.Codec.read ~eod:true
+                  (Bytesrw.Bytes.Reader.of_string wire)
+              with
+              | Ok (Nats.Op.Connect json) ->
+                  equal string
+                    "{\"verbose\":false,\"pedantic\":false,\"tls_required\":true,\"lang\":\"ocaml\",\"version\":\"0.1.0\",\"protocol\":1,\"echo\":true,\"headers\":true,\"no_responders\":true}"
+                    json
               | Ok _ -> fail "expected CONNECT"
               | Error error -> fail_with Nats.Codec.pp_error error)
           | _ -> fail "expected one CONNECT output");
@@ -172,7 +201,11 @@ let () =
           let connected =
             expect_client
               (Nats.Client.outgoing received.state
-                 (Nats.Client.Connect (Nats.Client.Connect.v ())))
+                 (Nats.Client.Connect
+                    {
+                      credentials = Nats.Client.Connect.v ();
+                      tls_required = false;
+                    }))
           in
           let headers =
             match Nats.Header.of_list [ ("Status", "200") ] with
@@ -252,7 +285,11 @@ let () =
           let connected =
             expect_client
               (Nats.Client.outgoing info.state
-                 (Nats.Client.Connect (Nats.Client.Connect.v ())))
+                 (Nats.Client.Connect
+                    {
+                      credentials = Nats.Client.Connect.v ();
+                      tls_required = false;
+                    }))
           in
           let deadline =
             match Nats.Client.next_timeout connected.state with

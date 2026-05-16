@@ -111,7 +111,7 @@ type t = {
 }
 
 type command =
-  | Connect of Connect.t
+  | Connect of { credentials : Connect.t; tls_required : bool }
   | Publish of Message.t
   | Subscribe of {
       subject : Subject.Filter.t;
@@ -367,7 +367,7 @@ let incoming ?(eod = false) state ~now reader =
   | Error (Codec.Packet error) -> Error (Error.Packet error)
   | Error error -> Error (Error.Codec error)
 
-let outgoing_connect state (credentials : Connect.t) =
+let outgoing_connect state ~(credentials : Connect.t) ~tls_required =
   match state.phase with
   | Awaiting_info -> Error Error.Info_not_received
   | Awaiting_connect -> (
@@ -378,7 +378,7 @@ let outgoing_connect state (credentials : Connect.t) =
         {
           verbose = false;
           pedantic = false;
-          tls_required = false;
+          tls_required;
           name = Config.name state.config;
           lang = Config.language state.config;
           version = Config.version state.config;
@@ -546,7 +546,8 @@ let outgoing_drain state =
 
 let outgoing state command =
   match command with
-  | Connect credentials -> outgoing_connect state credentials
+  | Connect { credentials; tls_required } ->
+      outgoing_connect state ~credentials ~tls_required
   | Publish message -> outgoing_publish state message
   | Subscribe { subject; queue_group } ->
       outgoing_subscribe state subject queue_group

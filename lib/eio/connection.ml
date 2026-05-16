@@ -704,7 +704,9 @@ let connect_after_info t =
     && not t.connect_sent
   then (
     match
-      Nats.Client.outgoing t.state (Nats.Client.Connect t.config.credentials)
+      Nats.Client.outgoing t.state
+        (Nats.Client.Connect
+           { credentials = t.config.credentials; tls_required = false })
     with
     | Error error -> Error (protocol error)
     | Ok transition ->

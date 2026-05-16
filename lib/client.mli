@@ -18,7 +18,7 @@ module Connect : sig
 end
 
 type command =
-  | Connect of Connect.t
+  | Connect of { credentials : Connect.t; tls_required : bool }
   | Publish of Message.t
   | Subscribe of {
       subject : Subject.Filter.t;
