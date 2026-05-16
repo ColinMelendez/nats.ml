@@ -430,13 +430,24 @@ state mutable or globally shared.
 
 The connection owns:
 
-- configured and discovered server candidates;
+- configured and discovered server candidates and their future selection policy;
 - the current TCP/TLS flow and connection phase;
 - reconnect backoff, attempt limits, jitter, and retry policy;
 - bounded per-subscription delivery queues;
 - request waiters and the shared inbox multiplexer;
 - a bounded lifecycle event stream with an explicit overflow policy;
 - cancellation and final resource cleanup.
+
+The current Eio milestone implements the first recovery bridge behind this
+ownership boundary: one unexpected transport loss fails in-flight requests,
+flushes, and drains; preserves live subscription handles, queues, and replay
+intent; closes the old flow idempotently; redials through the stored connection
+seam; and re-enters the INFO/TLS/CONNECT handshake. It emits non-terminal
+`Disconnected` and `Reconnected` events, defers unsubscribe and
+auto-unsubscribe commands until the replacement session is connected, and
+leaves ordinary publishes and pending requests unreplayed. Retry/backoff,
+multiple configured or server-discovered candidates, and endpoint selection
+policy are later work around this bridge.
 
 The normal user operations should be direct-style and result-returning:
 
@@ -501,14 +512,23 @@ and cancellation races must complete each waiter exactly once.
 
 #### Reconnect, drain, and close
 
-Reconnect is enabled by default. The connection should:
+Reconnect is enabled by default. The current adapter performs one immediate
+recovery attempt after an unexpected transport loss. The connection:
 
 1. preserve subscription intent and local limits;
-2. select a configured or server-discovered candidate;
+2. redial through the configured connection seam;
 3. send `CONNECT`, re-establish active subscriptions, and restore
    auto-unsubscribe state;
 4. expose the transition through `Event.t`;
-5. apply an explicit policy to buffered publishes.
+5. apply the explicit no-replay policy to buffered publishes.
+
+The bridge fails pending requests and flush/drain barriers instead of silently
+replaying them. Unsubscribe and auto-unsubscribe commands received during the
+handshake are deferred until `Reconnected`; `close` wins over recovery. A
+failed redial terminates the event stream with a structured error without
+emitting a second facade disconnect event. Retry/backoff, candidate selection,
+server discovery, and any opt-in retryable request policy remain future
+extensions.
 
 Buffered publish replay is inherently at-least-once at the transport boundary:
 a publish may have reached the server just before a disconnect and then be
@@ -552,8 +572,9 @@ intent; it does not depend on TLS. The adapter rejects bytes left over from the
 plaintext phase, bounds the TLS handshake with the configured handshake
 deadline, and reports TLS failures through structured adapter errors. The
 caller supplies the TLS peer configuration and must install the TLS RNG; host
-name/SNI policy is therefore part of that configuration. TCP dialing policy,
-reconnect, and real-server TLS acceptance remain later Core milestones.
+name/SNI policy is therefore part of that configuration. Multi-endpoint TCP
+dialing policy, retry/backoff, server discovery, and real-server TLS/reconnect
+acceptance remain later Core milestones.
 
 ### JetStream, KV, Object Store, and Services
 

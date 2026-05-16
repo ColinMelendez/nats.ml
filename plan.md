@@ -45,9 +45,15 @@ replies, no responders, timeouts, cancellation, sibling delivery during drain,
 and multi-barrier ordering. The Eio adapter now also negotiates TLS-required
 servers through a replaceable flow and reader lifecycle: it bounds the TLS
 handshake, rejects buffered plaintext, waits for the post-TLS `INFO`, and
-reports structured TLS/timeout/close failures. This is an implementation
-checkpoint, not the G2 stability gate: dialing policy, reconnect, and
-real-server acceptance tests remain ahead.
+reports structured TLS/timeout/close failures. One-attempt transport recovery
+is now implemented, but retry/backoff policy, configured and server-discovered
+candidate selection, and real-server acceptance tests remain ahead of the G2
+stability gate. The recovery bridge preserves live subscription handles,
+queues, and replay intent; fails transport-bound requests, flushes, and
+drains; redials through the stored connection seam; replays INFO/TLS/CONNECT
+and subscriptions; emits non-terminal `Disconnected`/`Reconnected` events;
+and defers unsubscribe commands until the replacement session is ready. It
+does not replay arbitrary publishes or pending requests.
 
 ## Working principles
 
@@ -287,8 +293,14 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
   per-request inbox fallback. Shared inbox multiplexing remains a later
   optimization once reconnect semantics are defined.
 - Generate inbox names in the adapter; make the prefix configurable.
+- Current recovery foundation: after one unexpected transport loss, preserve
+  live subscription queues and replay intent, fail transport-bound waiters,
+  redial through the stored one-seed connection seam, replay the handshake and
+  subscriptions, emit non-terminal `Disconnected`/`Reconnected` events, and
+  defer unsubscribe/auto-unsubscribe commands until reconnection completes.
 - Add configured/discovered server selection, reconnect backoff, retry limits,
-  lifecycle events, and subscription replay.
+  and retry-aware lifecycle policy around that one-attempt bridge. Do not add
+  silent Core publish replay or pending-request replay.
 - Pending requests and flush barriers now fail structurally and exactly once
   on disconnect, cancellation, timeout, and drain; they never silently replay.
 - Enforce bounded subscription and event queues with an explicit overflow
