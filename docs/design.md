@@ -430,7 +430,7 @@ state mutable or globally shared.
 
 The connection owns:
 
-- configured and discovered server candidates and their future selection policy;
+- configured server candidates and the future server-discovery selection policy;
 - the current TCP/TLS flow and connection phase;
 - reconnect backoff, attempt limits, jitter, and retry policy;
 - bounded per-subscription delivery queues;
@@ -438,16 +438,17 @@ The connection owns:
 - a bounded lifecycle event stream with an explicit overflow policy;
 - cancellation and final resource cleanup.
 
-The current Eio milestone implements the first recovery bridge behind this
-ownership boundary: one unexpected transport loss fails in-flight requests,
-flushes, and drains; preserves live subscription handles, queues, and replay
-intent; closes the old flow idempotently; redials through the stored connection
-seam; and re-enters the INFO/TLS/CONNECT handshake. It emits non-terminal
-`Disconnected` and `Reconnected` events, defers unsubscribe and
-auto-unsubscribe commands until the replacement session is connected, and
-leaves ordinary publishes and pending requests unreplayed. Retry/backoff,
-multiple configured or server-discovered candidates, and endpoint selection
-policy are later work around this bridge.
+The current Eio milestone implements a recovery bridge behind this ownership
+boundary: one unexpected transport loss fails in-flight requests, flushes, and
+drains; preserves live subscription handles, queues, and replay intent; closes
+the old flow idempotently; and redials through the stored connection seam. The
+first redial is immediate, later attempts use a configurable capped exponential
+backoff, and the bridge re-enters the INFO/TLS/CONNECT handshake for each
+attempt. It emits non-terminal `Disconnected` and `Reconnected` events,
+defers unsubscribe and auto-unsubscribe commands until the replacement
+session is connected, and leaves ordinary publishes and pending requests
+unreplayed. Multiple configured or server-discovered candidates, endpoint
+selection policy, and retry jitter are later work around this bridge.
 
 The normal user operations should be direct-style and result-returning:
 
@@ -513,7 +514,9 @@ and cancellation races must complete each waiter exactly once.
 #### Reconnect, drain, and close
 
 Reconnect is enabled by default. The current adapter performs one immediate
-recovery attempt after an unexpected transport loss. The connection:
+redial followed by configurable retries after an unexpected transport loss.
+The default allows three redial attempts; `None` permits unlimited attempts,
+and `Some 0` makes the transport loss terminal. The connection:
 
 1. preserve subscription intent and local limits;
 2. redial through the configured connection seam;
@@ -525,9 +528,10 @@ recovery attempt after an unexpected transport loss. The connection:
 The bridge fails pending requests and flush/drain barriers instead of silently
 replaying them. Unsubscribe and auto-unsubscribe commands received during the
 handshake are deferred until `Reconnected`; `close` wins over recovery. A
-failed redial terminates the event stream with a structured error without
-emitting a second facade disconnect event. Retry/backoff, candidate selection,
-server discovery, and any opt-in retryable request policy remain future
+redial or handshake failure is retried when the configured policy permits it;
+exhaustion terminates the event stream with a structured error without
+emitting a second facade disconnect event. Candidate selection, server
+discovery, retry jitter, and any opt-in retryable request policy remain future
 extensions.
 
 Buffered publish replay is inherently at-least-once at the transport boundary:
@@ -573,7 +577,7 @@ plaintext phase, bounds the TLS handshake with the configured handshake
 deadline, and reports TLS failures through structured adapter errors. The
 caller supplies the TLS peer configuration and must install the TLS RNG; host
 name/SNI policy is therefore part of that configuration. Multi-endpoint TCP
-dialing policy, retry/backoff, server discovery, and real-server TLS/reconnect
+dialing policy, server discovery, retry jitter, and real-server TLS/reconnect
 acceptance remain later Core milestones.
 
 ### JetStream, KV, Object Store, and Services
