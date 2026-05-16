@@ -49,10 +49,22 @@ adapter must honor those lifetimes while draining into the Bytesrw writer and
 must not write the stream end marker until the caller's explicit `~eod:bool`
 policy permits it.
 
-Angstrom's zero-copy input path uses `Bigstringaf.t`, while Bytesrw's ordinary
-byte slices are backed by `Bytes.t`. Crossing that boundary may copy. Treat
-zero-copy as a benchmarked property of a particular adapter, not as an
-automatic consequence of choosing Angstrom or Faraday.
+Angstrom's zero-copy input path uses `Bigstringaf.t`, and Faraday's `bigstring`
+operations use the same byte `Bigarray.Array1.t` with C layout. Use
+`Bigstringaf.t`/bigstring as the precise term for this ecosystem path:
+`Bigarray` is the general storage abstraction, while
+[Cstruct](https://ocaml.org/p/cstruct/latest/doc/cstruct/Cstruct/index.html)
+is an optional offset/length view with binary-field accessors. For binary or
+protocol codecs, prefer bigstrings when the surrounding IO already provides
+them; use Cstruct when its typed views improve the implementation. Neither is
+automatically faster for every workload.
+
+Bytesrw's ordinary byte slices are backed by `Bytes.t`, so crossing the
+Bytesrw/bigstring boundary may copy. Treat zero-copy as a benchmarked property
+of a particular adapter, including buffer retention and mutation lifetimes,
+not as an automatic consequence of choosing Angstrom or Faraday. Keep the
+public Bytesrw boundary unless a separate, deliberately documented bigstring
+IO API is justified by the format and workload.
 
 Do not run a full-`Value.t` Angstrom parser and then interpret the tree when a
 typed codec can skip or decode directly. The backend must preserve the same

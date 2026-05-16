@@ -241,6 +241,15 @@ runtimes are correct and expected: `decode : 'a codec -> Value.t -> 'a` walks an
 AST you already hold; `of_string` streams bytes in one pass and is never
 implemented as `decode codec (Value.of_string s)`.
 
+For high-throughput binary or protocol formats, prefer `Bigstringaf.t`
+(`bigstring`) at a private parser/serializer boundary when the surrounding IO
+already uses it. A bigstring is a byte `Bigarray.Array1.t` with C layout;
+`Cstruct.t` is an optional offset/length view with binary-field accessors over
+that kind of storage. This is a backend recommendation, not a universal public
+representation rule: keep `string`/`Bytes` convenience APIs where they fit,
+and benchmark the complete pipeline, including conversions and buffer
+lifetimes.
+
 ### Finally tagged
 
 The combinator style is Bünzli's **finally tagged**, not Kiselyov's *tagless
@@ -610,12 +619,15 @@ Do not split for concerns (`foo.io`, `foo.parse`); that adds ceremony at call
 sites with no portability benefit. Streaming is core via
 `Bytesrw.Bytes.Reader.t` / `Bytesrw.Bytes.Writer.t`: pure OCaml, works
 everywhere. Angstrom and Faraday are implementation choices, not required
-public abstractions. If a library uses them, keep their types and adapters
-private; do not claim zero-copy unless the conversion between Bytesrw byte
-slices and Angstrom/Faraday bigstrings has been measured and preserves the
-relevant buffer lifetimes. Add any selected backend to the package's declared
-dependencies; do not make an unused backend mandatory merely because it is
-available.
+public abstractions. When using them for a binary fast path, use their native
+`Bigstringaf.t`/bigstring representation where the input and output pipeline
+can preserve it; `Cstruct.t` is useful as a typed view, not as a replacement for
+every byte sequence. Keep backend types and adapters private unless a separate,
+deliberately documented binary IO API is part of the design. Do not claim
+zero-copy across a `Bytesrw`/bigstring boundary without measuring the adapter
+and preserving the relevant buffer lifetimes. Add any selected backend to the
+package's declared dependencies; do not make an unused backend mandatory
+merely because it is available.
 
 **Mark internal helper modules `(private_modules ...)`.** Any `.ml` existing
 only to share helpers between the public layers (the canonical case is a
@@ -651,6 +663,9 @@ private; they are the deliberate public API.
   `Angstrom.Unbuffered.state`, `Faraday.t`, `Bigstringaf.t`, or a second
   `Foo.angstrom` / `Foo.faraday` surface merely to reach the parser or writer.
   Drive private backends through the public Bytesrw reader/writer boundary.
+  This does not forbid a separately designed binary fast-path API, but that
+  API must make its bigstring ownership and lifetime contract explicit rather
+  than leaking a parser backend accidentally.
 - **No backwards-compat shims.** Restructure cleanly and bump the major version;
   don't keep `decode'` beside a new `decode`.
 - **No format-buffet knobs.** Specs mandate UTF-8, so no

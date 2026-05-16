@@ -124,9 +124,11 @@ Targets: simdjson (JSON), libyaml (YAML), libcbor (CBOR). When the
 implementation has a backend choice, compare the hand-written scanner with
 Angstrom's buffered driver (and the unbuffered driver only when it is a
 supported production path), and compare direct writer output with Faraday
-where applicable. Vary reader slice sizes and measure throughput, allocations,
-peak memory, skip/filter behavior, and output-buffer lifetimes. Benchmarks
-catch regressions; they are not shootouts.
+where applicable. For binary formats, compare the relevant `Bytes` path with a
+`Bigstringaf.t`/bigstring path, and add Cstruct views only when they are part of
+the proposed implementation. Vary reader slice sizes and measure throughput,
+allocations, peak memory, copy counts, skip/filter behavior, and output-buffer
+lifetimes. Benchmarks catch regressions; they are not shootouts.
 
 ## Browser fast-path (JSON only)
 
