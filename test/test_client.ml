@@ -40,6 +40,11 @@ let incoming state wire =
   expect_client
     (Nats.Client.incoming ~eod:true state ~now:Mtime.min_stamp reader)
 
+let operation wire =
+  match Nats.Codec.read ~eod:true (Bytesrw.Bytes.Reader.of_string wire) with
+  | Ok value -> value
+  | Error error -> fail_with Nats.Codec.pp_error error
+
 let () =
   run "nats-client"
     [
@@ -96,8 +101,7 @@ let () =
           match connected.output with
           | [ wire ] -> (
               match
-                Nats.Codec.read ~eod:true
-                  (Bytesrw.Bytes.Reader.of_string wire)
+                Nats.Codec.read ~eod:true (Bytesrw.Bytes.Reader.of_string wire)
               with
               | Ok (Nats.Op.Connect json) ->
                   equal string
@@ -269,6 +273,55 @@ let () =
           in
           let delivered = incoming limited.state wire in
           equal int 0 (List.length (Nats.Client.subscriptions delivered.state)));
+      test "reconnect preserves subscription ids and replay limits" (fun () ->
+          let connected = connected_client () in
+          let filter =
+            match Nats.Subject.Filter.of_string "orders.*" with
+            | Ok value -> value
+            | Error error -> fail_with Nats.Subject.pp_error error
+          in
+          let subscribed =
+            expect_client
+              (Nats.Client.outgoing connected.state
+                 (Nats.Client.Subscribe { subject = filter; queue_group = None }))
+          in
+          let limited =
+            expect_client
+              (Nats.Client.outgoing subscribed.state
+                 (Nats.Client.Auto_unsubscribe { sid = 1; max_messages = 2 }))
+          in
+          let reconnecting = Nats.Client.prepare_reconnect limited.state in
+          let info = incoming reconnecting info_wire in
+          let connected =
+            expect_client
+              (Nats.Client.outgoing info.state
+                 (Nats.Client.Connect
+                    {
+                      credentials = Nats.Client.Connect.v ();
+                      tls_required = false;
+                    }))
+          in
+          (match Nats.Client.phase connected.state with
+          | Nats.Client.Connected -> ()
+          | _ -> fail "expected a connected replay state");
+          (match connected.output with
+          | [ connect; subscribe; unsubscribe ] -> (
+              (match operation connect with
+              | Nats.Op.Connect _ -> ()
+              | _ -> fail "expected replay CONNECT");
+              (match operation subscribe with
+              | Nats.Op.Sub { subject; queue_group = None; sid } ->
+                  equal int 1 sid;
+                  equal string "orders.*"
+                    (Nats.Subject.Filter.to_string subject)
+              | _ -> fail "expected replay SUB");
+              match operation unsubscribe with
+              | Nats.Op.Unsub { sid; max_messages = Some 2 } -> equal int 1 sid
+              | _ -> fail "expected replay AUTO_UNSUB")
+          | _ -> fail "expected CONNECT, SUB, and UNSUB replay");
+          match Nats.Client.subscriptions connected.state with
+          | [ { sid = 1; remaining = Some 2; _ } ] -> ()
+          | _ -> fail "expected the original subscription intent");
       test "timer emits bounded liveness PINGs and then closes" (fun () ->
           let config =
             expect_config

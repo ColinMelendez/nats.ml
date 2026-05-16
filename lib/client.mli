@@ -51,6 +51,12 @@ val v : Config.t -> t
 val phase : t -> phase
 val info : t -> Info.t option
 val subscriptions : t -> subscription list
+
+val prepare_reconnect : t -> t
+(** [prepare_reconnect state] resets connection negotiation while preserving
+    client-assigned subscription ids and their replay intent. Use it after an
+    unexpected transport loss, before receiving the next server [INFO]. *)
+
 val outgoing : t -> command -> (transition, Error.t) result
 
 val incoming :

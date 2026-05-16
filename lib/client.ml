@@ -149,6 +149,16 @@ let phase value = value.phase
 let info value = value.info
 let subscriptions value = List.rev value.subscriptions
 
+let prepare_reconnect state =
+  {
+    state with
+    phase = Awaiting_info;
+    info = None;
+    pending_flushes = 0;
+    pending_liveness_pings = 0;
+    next_ping = None;
+  }
+
 let empty_transition state =
   { state; output = []; events = []; deliveries = []; subscription_id = None }
 
@@ -400,15 +410,46 @@ let outgoing_connect state ~(credentials : Connect.t) ~tls_required =
       | Ok json -> (
           match encode_with_state state (Op.Connect json) with
           | Error error -> Error error
-          | Ok output ->
-              Ok
-                {
-                  state = { state with phase = Connected };
-                  output = [ output ];
-                  events = [ Event.Connected ];
-                  deliveries = [];
-                  subscription_id = None;
-                }))
+          | Ok output -> (
+              let replay_operations =
+                List.fold_right
+                  (fun (subscription : subscription) operations ->
+                    let replay =
+                      [
+                        Op.Sub
+                          {
+                            subject = subscription.subject;
+                            queue_group = subscription.queue_group;
+                            sid = subscription.sid;
+                          };
+                      ]
+                    in
+                    match subscription.remaining with
+                    | None -> replay @ operations
+                    | Some max_messages ->
+                        (replay
+                        @ [
+                            Op.Unsub
+                              {
+                                sid = subscription.sid;
+                                max_messages = Some max_messages;
+                              };
+                          ])
+                        @ operations)
+                  (List.rev state.subscriptions)
+                  []
+              in
+              match encode_all state replay_operations with
+              | Error error -> Error error
+              | Ok replay ->
+                  Ok
+                    {
+                      state = { state with phase = Connected };
+                      output = output :: replay;
+                      events = [ Event.Connected ];
+                      deliveries = [];
+                      subscription_id = None;
+                    })))
   | Connected -> Error Error.Already_connected
   | Draining -> Error Error.Draining
   | Closed -> Error Error.Closed
