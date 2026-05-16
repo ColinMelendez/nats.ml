@@ -9,6 +9,9 @@ type t =
   | Invalid_chunk_size of int
   | Invalid_inbox_prefix of Nats.Subject.error
   | Invalid_timeout of string
+  | Tls_required
+  | Tls_unexpected_input
+  | Tls of exn
   | Timeout
   | No_responders
   | Io of exn

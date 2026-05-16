@@ -8,6 +8,8 @@ module Config = struct
     read_capacity : int;
     read_chunk_size : int;
     inbox_prefix : Nats.Subject.t;
+    tls : Tls.Config.client option;
+    tls_required : bool;
     handshake_timeout : Mtime.Span.t;
     request_timeout : Mtime.Span.t;
     flush_timeout : Mtime.Span.t;
@@ -27,62 +29,66 @@ module Config = struct
   let v ?(core = Nats.Config.default) ?(credentials = Nats.Client.Connect.v ())
       ?(command_capacity = 128) ?(subscription_capacity = 256)
       ?(event_capacity = 64) ?(read_capacity = 4) ?(read_chunk_size = 65536)
-      ?(inbox_prefix = "_INBOX.ocaml") ?(handshake_timeout = default_span)
-      ?(request_timeout = default_span) ?(flush_timeout = default_span)
-      ?(drain_timeout = default_span) () =
-    match Nats.Subject.of_string inbox_prefix with
-    | Error error -> Error (Error.Invalid_inbox_prefix error)
-    | Ok inbox_prefix -> (
-        match validate_capacity "command" command_capacity with
-        | Error error -> Error error
-        | Ok command_capacity -> (
-            match validate_capacity "subscription" subscription_capacity with
-            | Error error -> Error error
-            | Ok subscription_capacity -> (
-                match validate_capacity "event" event_capacity with
-                | Error error -> Error error
-                | Ok event_capacity -> (
-                    match validate_capacity "read" read_capacity with
-                    | Error error -> Error error
-                    | Ok read_capacity -> (
-                        if read_chunk_size <= 0 then
-                          Error (Error.Invalid_chunk_size read_chunk_size)
-                        else
-                          match
-                            validate_timeout "handshake" handshake_timeout
-                          with
-                          | Error error -> Error error
-                          | Ok handshake_timeout -> (
-                              match
-                                validate_timeout "request" request_timeout
-                              with
-                              | Error error -> Error error
-                              | Ok request_timeout -> (
-                                  match
-                                    validate_timeout "flush" flush_timeout
-                                  with
-                                  | Error error -> Error error
-                                  | Ok flush_timeout -> (
-                                      match
-                                        validate_timeout "drain" drain_timeout
-                                      with
-                                      | Error error -> Error error
-                                      | Ok drain_timeout ->
-                                          Ok
-                                            {
-                                              core;
-                                              credentials;
-                                              command_capacity;
-                                              subscription_capacity;
-                                              event_capacity;
-                                              read_capacity;
-                                              read_chunk_size;
-                                              inbox_prefix;
-                                              handshake_timeout;
-                                              request_timeout;
-                                              flush_timeout;
-                                              drain_timeout;
-                                            }))))))))
+      ?tls ?(tls_required = false) ?(inbox_prefix = "_INBOX.ocaml")
+      ?(handshake_timeout = default_span) ?(request_timeout = default_span)
+      ?(flush_timeout = default_span) ?(drain_timeout = default_span) () =
+    if tls_required && Option.is_none tls then Error Error.Tls_required
+    else
+      match Nats.Subject.of_string inbox_prefix with
+      | Error error -> Error (Error.Invalid_inbox_prefix error)
+      | Ok inbox_prefix -> (
+          match validate_capacity "command" command_capacity with
+          | Error error -> Error error
+          | Ok command_capacity -> (
+              match validate_capacity "subscription" subscription_capacity with
+              | Error error -> Error error
+              | Ok subscription_capacity -> (
+                  match validate_capacity "event" event_capacity with
+                  | Error error -> Error error
+                  | Ok event_capacity -> (
+                      match validate_capacity "read" read_capacity with
+                      | Error error -> Error error
+                      | Ok read_capacity -> (
+                          if read_chunk_size <= 0 then
+                            Error (Error.Invalid_chunk_size read_chunk_size)
+                          else
+                            match
+                              validate_timeout "handshake" handshake_timeout
+                            with
+                            | Error error -> Error error
+                            | Ok handshake_timeout -> (
+                                match
+                                  validate_timeout "request" request_timeout
+                                with
+                                | Error error -> Error error
+                                | Ok request_timeout -> (
+                                    match
+                                      validate_timeout "flush" flush_timeout
+                                    with
+                                    | Error error -> Error error
+                                    | Ok flush_timeout -> (
+                                        match
+                                          validate_timeout "drain" drain_timeout
+                                        with
+                                        | Error error -> Error error
+                                        | Ok drain_timeout ->
+                                            Ok
+                                              {
+                                                core;
+                                                credentials;
+                                                command_capacity;
+                                                subscription_capacity;
+                                                event_capacity;
+                                                read_capacity;
+                                                read_chunk_size;
+                                                inbox_prefix;
+                                                tls;
+                                                tls_required;
+                                                handshake_timeout;
+                                                request_timeout;
+                                                flush_timeout;
+                                                drain_timeout;
+                                              }))))))))
 
   let default =
     match v () with
@@ -165,8 +171,7 @@ module Subscription = struct
     mutable drain_resolver : (unit, Error.t) result Eio.Promise.u option;
     mutable drain_result : (unit, Error.t) result option;
     unsubscribe_request : unit -> (unit, Error.t) result;
-    auto_unsubscribe_request :
-      max_messages:int -> (unit, Error.t) result;
+    auto_unsubscribe_request : max_messages:int -> (unit, Error.t) result;
     drain_request :
       timeout:Mtime.Span.t option ->
       promise:(unit, Error.t) result Eio.Promise.t ->
@@ -274,8 +279,7 @@ module Subscription = struct
   let unsubscribe t = if not t.active then Ok () else t.unsubscribe_request ()
 
   let auto_unsubscribe t ~max_messages =
-    if not t.active then Ok ()
-    else t.auto_unsubscribe_request ~max_messages
+    if not t.active then Ok () else t.auto_unsubscribe_request ~max_messages
 
   let drain ?timeout t =
     match t.drain_promise with
@@ -311,7 +315,7 @@ module Subscription = struct
     loop ()
 end
 
-type input = Data of bytes | Eof | Failure of exn
+type input = Data of bytes | Eof | Io_failure of exn | Failure of exn
 
 type work = Command of command | Input_ready | Timer of int
 
@@ -378,10 +382,18 @@ type barrier =
     }
   | Subscription_drain_waiter of subscription_drain_waiter
 
-type transport = {
-  read : Cstruct.t -> int;
-  write : string -> unit;
-  close : unit -> unit;
+type flow =
+  | Flow :
+      ([> Eio.Flow.two_way_ty | Eio.Resource.close_ty ] as 'a) Eio.Resource.t
+      -> flow
+
+type transport = { mutable flow : flow }
+
+type reader = {
+  cancel : Eio.Cancel.t;
+  done_ : unit Eio.Promise.t;
+  finished : bool ref;
+  stopped : bool ref;
 }
 
 type monotonic_clock = { now : unit -> Mtime.t; sleep_until : Mtime.t -> unit }
@@ -399,9 +411,12 @@ type t = {
   subscriptions : (int, Subscription.t) Hashtbl.t;
   requests : (int, request_waiter) Hashtbl.t;
   subscription_drains : (int, subscription_drain_waiter) Hashtbl.t;
+  mutable reader : reader option;
   mutable eof_seen : bool;
   mutable closed : bool;
   mutable connect_sent : bool;
+  mutable tls_active : bool;
+  mutable tls_info_received : bool;
   mutable pending_commands : int;
   mutable active_request_setup : (int, Error.t) result Eio.Promise.u option;
   mutable handshake_deadline : Mtime.t option;
@@ -424,19 +439,58 @@ let add_input input work value =
   Eio.Stream.add input value;
   Eio.Stream.add work Input_ready
 
-let rec read_loop transport input work chunk_size =
+let rec read_loop (transport : transport) input work chunk_size stopped =
   let buffer = Cstruct.create chunk_size in
   try
-    let length = transport.read buffer in
-    if length <= 0 then add_input input work Eof
-    else (
+    let length =
+      match transport.flow with Flow flow -> Eio.Flow.single_read flow buffer
+    in
+    if length <= 0 then (if not !stopped then add_input input work Eof)
+    else if not !stopped then (
       add_input input work
         (Data (Cstruct.to_bytes (Cstruct.sub buffer 0 length)));
-      read_loop transport input work chunk_size)
+      read_loop transport input work chunk_size stopped)
   with
   | Eio.Cancel.Cancelled _ -> ()
-  | End_of_file -> add_input input work Eof
-  | Eio.Io (_, _) as error -> add_input input work (Failure error)
+  | End_of_file -> if not !stopped then add_input input work Eof
+  | Eio.Io (_, _) as error ->
+      if not !stopped then add_input input work (Io_failure error)
+  | error -> if not !stopped then add_input input work (Failure error)
+
+let start_reader t =
+  let cancel_promise, cancel_resolver = Eio.Promise.create () in
+  let done_promise, done_resolver = Eio.Promise.create () in
+  let finished = ref false in
+  let stopped = ref false in
+  Eio.Fiber.fork ~sw:t.sw (fun () ->
+      Fun.protect
+        ~finally:(fun () ->
+          finished := true;
+          Eio.Promise.resolve done_resolver ())
+        (fun () ->
+          Eio.Cancel.sub (fun cancel ->
+              Eio.Promise.resolve cancel_resolver cancel;
+              read_loop t.flow t.input t.work t.config.Config.read_chunk_size
+                stopped)));
+  let cancel = Eio.Promise.await cancel_promise in
+  t.reader <- Some { cancel; done_ = done_promise; finished; stopped }
+
+let stop_reader t =
+  match t.reader with
+  | None -> ()
+  | Some reader ->
+      t.reader <- None;
+      reader.stopped := true;
+      if not !(reader.finished) then Eio.Cancel.cancel reader.cancel End_of_file;
+      Eio.Promise.await reader.done_
+
+let write_flow flow value =
+  match flow with Flow flow -> Eio.Flow.copy_string value flow
+
+let close_flow flow = match flow with Flow flow -> Eio.Flow.close flow
+
+let transport_error t error =
+  if t.tls_active then Error (Error.Tls error) else Error (Error.Io error)
 
 let now t = t.clock.now ()
 let inbox_counter = Atomic.make 0
@@ -454,16 +508,19 @@ let write_outputs t output =
     | [] -> Ok ()
     | value :: rest -> (
         try
-          t.flow.write value;
+          write_flow t.flow.flow value;
           loop rest
         with
+        | Eio.Cancel.Cancelled _ as error -> raise error
         | End_of_file -> Error Error.Disconnected
-        | Eio.Io (_, _) as error -> Error (io_error error))
+        | Eio.Io (_, _) as error -> Error (io_error error)
+        | error -> transport_error t error)
   in
   loop output
 
 let resolve_unit resolver value = Eio.Promise.resolve resolver value
 let resolve_ready t value = Eio.Promise.resolve t.ready value
+
 let resolve_setup t resolver value =
   t.active_request_setup <- None;
   resolve_unit resolver value
@@ -535,7 +592,8 @@ let finish t error =
         t.active_request_setup <- None;
         resolve_unit resolver (Error error));
     (match error with
-    | Error.Disconnected | Error.Io _ | Error.Timeout ->
+    | Error.Disconnected | Error.Io _ | Error.Tls _ | Error.Tls_required
+    | Error.Tls_unexpected_input | Error.Timeout ->
         Event_stream.push_terminal t.events Event.Disconnected
     | Error.Slow_consumer kind ->
         Event_stream.push_terminal t.events (Event.Slow_consumer kind)
@@ -561,7 +619,7 @@ let finish t error =
     | Some _ -> ()
     | None -> resolve_ready t (Error error));
     Event_stream.terminate t.events error;
-    t.flow.close ())
+    close_flow t.flow.flow)
 
 let remove_finished_subscriptions t =
   let active = Nats.Client.subscriptions t.state in
@@ -691,28 +749,18 @@ let handle_deliveries t deliveries =
 
 let apply_transition t (transition : Nats.Client.transition) =
   t.state <- transition.state;
+  if
+    t.tls_active
+    && List.exists
+         (function Nats.Event.Info _ -> true | _ -> false)
+         transition.events
+  then t.tls_info_received <- true;
   match write_outputs t transition.output with
   | Error error -> Error error
   | Ok () -> (
       match handle_events t transition.events with
       | Error error -> Error error
       | Ok () -> handle_deliveries t transition.deliveries)
-
-let connect_after_info t =
-  if
-    Nats.Client.phase t.state = Nats.Client.Awaiting_connect
-    && not t.connect_sent
-  then (
-    match
-      Nats.Client.outgoing t.state
-        (Nats.Client.Connect
-           { credentials = t.config.credentials; tls_required = false })
-    with
-    | Error error -> Error (protocol error)
-    | Ok transition ->
-        t.connect_sent <- true;
-        apply_transition t transition)
-  else Ok ()
 
 let rec drain_input t =
   match Eio.Stream.take_nonblocking t.input with
@@ -723,7 +771,79 @@ let rec drain_input t =
   | Some Eof ->
       t.eof_seen <- true;
       drain_input t
-  | Some (Failure error) -> Error (io_error error)
+  | Some (Io_failure error) -> Error (io_error error)
+  | Some (Failure error) -> transport_error t error
+
+let tls_required_by_server t =
+  match Nats.Client.info t.state with
+  | None -> false
+  | Some info -> Nats.Info.tls_required info
+
+let tls_handshake t config =
+  let (Flow flow) = t.flow.flow in
+  try
+    Eio.Fiber.first
+      (fun () -> Ok (Tls_eio.client_of_flow config flow))
+      (fun () ->
+        match t.handshake_deadline with
+        | None -> Error Error.Timeout
+        | Some deadline ->
+            t.clock.sleep_until deadline;
+            Error Error.Timeout)
+  with
+  | Eio.Cancel.Cancelled _ as error -> raise error
+  | End_of_file -> (
+      match t.handshake_deadline with
+      | Some deadline when Mtime.compare (now t) deadline >= 0 ->
+          Error Error.Timeout
+      | _ -> Error Error.Disconnected)
+  | error ->
+      (* TLS also reports RNG and provider failures as exceptions. Preserve the
+         cause while keeping them on the connection's result boundary. *)
+      Error (Error.Tls error)
+
+let upgrade_tls t =
+  match t.config.Config.tls with
+  | None -> Error Error.Tls_required
+  | Some config -> (
+      stop_reader t;
+      match drain_input t with
+      | Error error -> Error error
+      | Ok () -> (
+          if t.eof_seen then Error Error.Disconnected
+          else if Buffer.length t.pending > 0 then
+            Error Error.Tls_unexpected_input
+          else
+            match tls_handshake t config with
+            | Error error -> Error error
+            | Ok flow ->
+                t.flow.flow <- Flow flow;
+                t.tls_active <- true;
+                t.tls_info_received <- false;
+                start_reader t;
+                Ok ()))
+
+let connect_after_info t =
+  if
+    Nats.Client.phase t.state = Nats.Client.Awaiting_connect
+    && not t.connect_sent
+  then (
+    if
+      (tls_required_by_server t || t.config.Config.tls_required)
+      && not t.tls_active
+    then upgrade_tls t
+    else if t.tls_active && not t.tls_info_received then Ok ()
+    else
+      match
+        Nats.Client.outgoing t.state
+          (Nats.Client.Connect
+             { credentials = t.config.credentials; tls_required = t.tls_active })
+      with
+      | Error error -> Error (protocol error)
+      | Ok transition ->
+          t.connect_sent <- true;
+          apply_transition t transition)
+  else Ok ()
 
 let consume_pending t length =
   if length > 0 then (
@@ -1341,13 +1461,7 @@ let create ~sw ~clock ~config flow =
       sleep_until = (fun deadline -> Eio.Time.Mono.sleep_until clock deadline);
     }
   in
-  let transport =
-    {
-      read = (fun buffer -> Eio.Flow.single_read flow buffer);
-      write = (fun value -> Eio.Flow.copy_string value flow);
-      close = (fun () -> Eio.Flow.close flow);
-    }
-  in
+  let transport = { flow = Flow flow } in
   let input = Eio.Stream.create config.Config.read_capacity in
   let ready, ready_resolver = Eio.Promise.create () in
   let connection =
@@ -1364,9 +1478,12 @@ let create ~sw ~clock ~config flow =
       subscriptions = Hashtbl.create 16;
       requests = Hashtbl.create 16;
       subscription_drains = Hashtbl.create 16;
+      reader = None;
       eof_seen = false;
       closed = false;
       connect_sent = false;
+      tls_active = false;
+      tls_info_received = false;
       pending_commands = 0;
       active_request_setup = None;
       handshake_deadline;
@@ -1379,8 +1496,7 @@ let create ~sw ~clock ~config flow =
   in
   Eio.Switch.on_release sw (fun () -> finish connection Error.Closed);
   schedule_timer connection;
-  Eio.Fiber.fork ~sw (fun () ->
-      read_loop transport input connection.work config.Config.read_chunk_size);
+  start_reader connection;
   Eio.Fiber.fork ~sw (fun () -> owner_loop connection);
   (connection, ready)
 

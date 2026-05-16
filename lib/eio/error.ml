@@ -7,6 +7,9 @@ type t =
   | Invalid_chunk_size of int
   | Invalid_inbox_prefix of Nats.Subject.error
   | Invalid_timeout of string
+  | Tls_required
+  | Tls_unexpected_input
+  | Tls of exn
   | Timeout
   | No_responders
   | Io of exn
@@ -30,6 +33,12 @@ let pp ppf = function
   | Invalid_inbox_prefix error ->
       Format.fprintf ppf "invalid inbox prefix: %a" Nats.Subject.pp_error error
   | Invalid_timeout name -> Format.fprintf ppf "invalid %s timeout" name
+  | Tls_required ->
+      Format.pp_print_string ppf
+        "TLS is required but no TLS configuration was supplied"
+  | Tls_unexpected_input ->
+      Format.pp_print_string ppf "unexpected plaintext input before TLS"
+  | Tls error -> Format.fprintf ppf "TLS error: %s" (Printexc.to_string error)
   | Timeout -> Format.pp_print_string ppf "operation timed out"
   | No_responders -> Format.pp_print_string ppf "no responders"
   | Io error -> Format.fprintf ppf "I/O error: %s" (Printexc.to_string error)

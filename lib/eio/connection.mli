@@ -3,6 +3,10 @@
 module Config : sig
   type t
 
+  (** [tls] supplies the client TLS configuration used when the server's
+      initial [INFO] requires TLS. Set [tls_required] to force the same upgrade
+      when the server does not advertise it. The caller must install a
+      [Mirage_crypto_rng] generator before connecting with TLS. *)
   val v :
     ?core:Nats.Config.t ->
     ?credentials:Nats.Client.Connect.t ->
@@ -11,6 +15,8 @@ module Config : sig
     ?event_capacity:int ->
     ?read_capacity:int ->
     ?read_chunk_size:int ->
+    ?tls:Tls.Config.client ->
+    ?tls_required:bool ->
     ?inbox_prefix:string ->
     ?handshake_timeout:Mtime.Span.t ->
     ?request_timeout:Mtime.Span.t ->

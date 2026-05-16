@@ -5,6 +5,11 @@ let info_wire =
   ^ "\"proto\":1,\"max_payload\":1048576,\"headers\":true,"
   ^ "\"no_responders\":true,\"connect_urls\":[]}" ^ "\r\n"
 
+let tls_required_info_wire =
+  "INFO {\"server_id\":\"srv\",\"version\":\"2.10.0\","
+  ^ "\"proto\":1,\"max_payload\":1048576,\"headers\":true,"
+  ^ "\"no_responders\":true,\"tls_required\":true,\"connect_urls\":[]}" ^ "\r\n"
+
 let expect_ok = function
   | Ok value -> value
   | Error error -> fail (Format.asprintf "%a" Nats_eio.Error.pp error)
@@ -38,6 +43,16 @@ let filter =
   | Error error -> fail (Format.asprintf "%a" Nats.Subject.pp_error error)
 
 let subject = Nats.Subject.literal "orders.created"
+
+let tls_config () =
+  let authenticator =
+    match X509.Authenticator.of_string "none" with
+    | Error (`Msg message) -> fail message
+    | Ok make -> make (fun () -> None)
+  in
+  match Tls.Config.client ~authenticator () with
+  | Error (`Msg message) -> fail message
+  | Ok config -> config
 
 let rec yield_n count =
   if count <= 0 then ()
@@ -249,8 +264,12 @@ let () =
           let hold, hold_u = Eio.Promise.create () in
           with_connection
             ~reads:
-              [ `Return info_wire; `Await messages_one; `Await messages_two;
-                `Await hold ]
+              [
+                `Return info_wire;
+                `Await messages_one;
+                `Await messages_two;
+                `Await hold;
+              ]
             (fun ~sw connection ->
               let subscription =
                 expect_ok (Nats_eio.Connection.subscribe connection filter)
@@ -261,8 +280,8 @@ let () =
               Eio.Promise.resolve messages_one_u
                 (Ok
                    ("MSG orders.created 1 1\r\na\r\n"
-                   ^ "MSG orders.created 1 1\r\nb\r\n"
-                   ^ "MSG orders.created 1 1\r\nc\r\n"));
+                  ^ "MSG orders.created 1 1\r\nb\r\n"
+                  ^ "MSG orders.created 1 1\r\nc\r\n"));
               let first = expect_ok (Nats_eio.Subscription.next subscription) in
               let second =
                 expect_ok (Nats_eio.Subscription.next subscription)
@@ -271,7 +290,8 @@ let () =
               equal string "b" (Nats.Message.payload second.message);
               (match Nats_eio.Subscription.next subscription with
               | Error Nats_eio.Error.Closed -> ()
-              | Ok _ -> fail "expected the auto-unsubscribed subscription to end"
+              | Ok _ ->
+                  fail "expected the auto-unsubscribed subscription to end"
               | Error error ->
                   fail
                     (Format.asprintf "expected subscription close, got %a"
@@ -702,6 +722,86 @@ let () =
                   fail
                     (Format.asprintf "expected disconnect event, got %a"
                        Nats_eio.Error.pp error)));
+      test "rejects a TLS-required server without TLS configuration" (fun () ->
+          Eio_mock.Backend.run_full @@ fun env ->
+          let hold, hold_u = Eio.Promise.create () in
+          let flow = Eio_mock.Flow.make "tls-nats-server" in
+          Eio_mock.Flow.on_read flow
+            [ `Return tls_required_info_wire; `Await hold ];
+          let net = Eio_mock.Net.make "tls-nats-network" in
+          Eio_mock.Net.on_connect net [ `Return flow ];
+          Eio.Switch.run @@ fun sw ->
+          let result =
+            Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock address
+          in
+          Eio.Promise.resolve hold_u (Error End_of_file);
+          match result with
+          | Error Nats_eio.Error.Tls_required -> ()
+          | Error error ->
+              fail
+                (Format.asprintf "expected TLS-required error, got %a"
+                   Nats_eio.Error.pp error)
+          | Ok _ -> fail "expected TLS negotiation to be required");
+      test "forced TLS requires a client configuration" (fun () ->
+          match Nats_eio.Connection.Config.v ~tls_required:true () with
+          | Error Nats_eio.Error.Tls_required -> ()
+          | Error error ->
+              fail
+                (Format.asprintf "expected TLS configuration error, got %a"
+                   Nats_eio.Error.pp error)
+          | Ok _ -> fail "expected forced TLS configuration to be rejected");
+      test "rejects buffered plaintext before TLS" (fun () ->
+          Eio_mock.Backend.run_full @@ fun env ->
+          let hold, hold_u = Eio.Promise.create () in
+          let flow = Eio_mock.Flow.make "buffered-tls-nats-server" in
+          Eio_mock.Flow.on_read flow
+            [ `Return (tls_required_info_wire ^ "PING\r\n"); `Await hold ];
+          let net = Eio_mock.Net.make "buffered-tls-nats-network" in
+          Eio_mock.Net.on_connect net [ `Return flow ];
+          let config =
+            expect_ok (Nats_eio.Connection.Config.v ~tls:(tls_config ()) ())
+          in
+          Eio.Switch.run @@ fun sw ->
+          let result =
+            Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock ~config
+              address
+          in
+          Eio.Promise.resolve hold_u (Error End_of_file);
+          match result with
+          | Error Nats_eio.Error.Tls_unexpected_input -> ()
+          | Error error ->
+              fail
+                (Format.asprintf "expected buffered-input error, got %a"
+                   Nats_eio.Error.pp error)
+          | Ok _ -> fail "expected buffered plaintext to be rejected");
+      test "times out the TLS handshake" (fun () ->
+          Mirage_crypto_rng_unix.use_default ();
+          Eio_mock.Backend.run_full @@ fun env ->
+          let hold, hold_u = Eio.Promise.create () in
+          let flow = Eio_mock.Flow.make "slow-tls-nats-server" in
+          Eio_mock.Flow.on_read flow
+            [ `Return tls_required_info_wire; `Await hold; `Await hold ];
+          let net = Eio_mock.Net.make "slow-tls-nats-network" in
+          Eio_mock.Net.on_connect net [ `Return flow ];
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v ~tls:(tls_config ())
+                 ~handshake_timeout:Mtime.Span.(1 * ms)
+                 ())
+          in
+          Eio.Switch.run @@ fun sw ->
+          let result =
+            Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock ~config
+              address
+          in
+          Eio.Promise.resolve hold_u (Error End_of_file);
+          match result with
+          | Error Nats_eio.Error.Timeout -> ()
+          | Error error ->
+              fail
+                (Format.asprintf "expected TLS timeout, got %a"
+                   Nats_eio.Error.pp error)
+          | Ok _ -> fail "expected TLS handshake to time out");
       test "times out a silent handshake" (fun () ->
           Eio_mock.Backend.run_full @@ fun env ->
           let hold, hold_u = Eio.Promise.create () in
