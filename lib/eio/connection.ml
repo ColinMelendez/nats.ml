@@ -387,6 +387,7 @@ type flow =
       ([> Eio.Flow.two_way_ty | Eio.Resource.close_ty ] as 'a) Eio.Resource.t
       -> flow
 
+type dial = unit -> (flow, Error.t) result
 type transport = { mutable flow : flow }
 
 type reader = {
@@ -400,6 +401,7 @@ type monotonic_clock = { now : unit -> Mtime.t; sleep_until : Mtime.t -> unit }
 
 type t = {
   sw : Eio.Switch.t;
+  dial : dial;
   flow : transport;
   clock : monotonic_clock;
   config : Config.t;
@@ -1451,7 +1453,7 @@ let rec owner_loop t =
   with Eio.Cancel.Cancelled _ ->
     Eio.Cancel.protect (fun () -> finish t Error.Closed)
 
-let create ~sw ~clock ~config flow =
+let create ~sw ~clock ~config ~(dial : dial) flow =
   let handshake_deadline =
     Mtime.add_span (Eio.Time.Mono.now clock) config.Config.handshake_timeout
   in
@@ -1461,12 +1463,13 @@ let create ~sw ~clock ~config flow =
       sleep_until = (fun deadline -> Eio.Time.Mono.sleep_until clock deadline);
     }
   in
-  let transport = { flow = Flow flow } in
+  let transport = { flow } in
   let input = Eio.Stream.create config.Config.read_capacity in
   let ready, ready_resolver = Eio.Promise.create () in
   let connection =
     {
       sw;
+      dial;
       flow = transport;
       clock;
       config;
@@ -1501,15 +1504,21 @@ let create ~sw ~clock ~config flow =
   (connection, ready)
 
 let connect ~sw ~net ~clock ?(config = Config.default) address =
-  try
-    let flow = Eio.Net.connect ~sw net address in
-    let connection, ready = create ~sw ~clock ~config flow in
-    match Eio.Promise.await ready with
-    | Ok () -> Ok connection
-    | Error error -> Error error
-  with
-  | End_of_file -> Error Error.Disconnected
-  | Eio.Io (_, _) as error -> Error (io_error error)
+  let dial () =
+    try
+      let flow = Eio.Net.connect ~sw net address in
+      Ok (Flow flow)
+    with
+    | End_of_file -> Error Error.Disconnected
+    | Eio.Io (_, _) as error -> Error (io_error error)
+  in
+  match dial () with
+  | Error error -> Error error
+  | Ok flow -> (
+      let connection, ready = create ~sw ~clock ~config ~dial flow in
+      match Eio.Promise.await ready with
+      | Ok () -> Ok connection
+      | Error error -> Error error)
 
 let send t command promise =
   if t.closed then Error Error.Closed
