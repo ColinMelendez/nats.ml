@@ -3,10 +3,15 @@
 module Config : sig
   type t
 
-  (** [tls] supplies the client TLS configuration used when the server's
-      initial [INFO] requires TLS. Set [tls_required] to force the same upgrade
-      when the server does not advertise it. The caller must install a
-      [Mirage_crypto_rng] generator before connecting with TLS. *)
+  (** [v] validates connection capacities, timeouts, and reconnect policy.
+      [max_reconnect_attempts] counts redial attempts after a transport loss;
+      [None] permits unlimited attempts. The default is [Some 3]. The first
+      redial is immediate; later attempts wait [reconnect_delay] (default one
+      second) and double up to [reconnect_max_delay] (default 30 seconds).
+      [tls] supplies the client TLS configuration used when the server's
+      initial [INFO] requires TLS. Set [tls_required] to force the same
+      upgrade when the server does not advertise it. The caller must install
+      a [Mirage_crypto_rng] generator before connecting with TLS. *)
   val v :
     ?core:Nats.Config.t ->
     ?credentials:Nats.Client.Connect.t ->
@@ -15,6 +20,9 @@ module Config : sig
     ?event_capacity:int ->
     ?read_capacity:int ->
     ?read_chunk_size:int ->
+    ?max_reconnect_attempts:int option ->
+    ?reconnect_delay:Mtime.Span.t ->
+    ?reconnect_max_delay:Mtime.Span.t ->
     ?tls:Tls.Config.client ->
     ?tls_required:bool ->
     ?inbox_prefix:string ->

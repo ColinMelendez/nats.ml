@@ -8,6 +8,11 @@ type t =
   | Command_queue_full of { capacity : int }
   | Invalid_chunk_size of int
   | Invalid_inbox_prefix of Nats.Subject.error
+  | Invalid_reconnect_attempts of int
+  | Invalid_reconnect_delay of {
+      initial : Mtime.Span.t;
+      maximum : Mtime.Span.t;
+    }
   | Invalid_timeout of string
   | Tls_required
   | Tls_unexpected_input

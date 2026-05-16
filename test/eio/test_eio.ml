@@ -716,7 +716,11 @@ let () =
                     (Format.asprintf "expected slow consumer, got %a"
                        Nats_eio.Error.pp error)));
       test "reports EOF after processing complete input" (fun () ->
-          with_connection
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 0) ())
+          in
+          with_connection ~config
             ~reads:[ `Return info_wire ]
             (fun ~sw:_ connection ->
               let events = Nats_eio.Connection.events connection in
@@ -823,6 +827,73 @@ let () =
               equal string "after" (Nats.Message.payload later_delivery.message);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "retries a failed redial before restoring subscriptions" (fun () ->
+          Eio_mock.Backend.run_full @@ fun env ->
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let deliver, deliver_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let first = Eio_mock.Flow.make "retry-first" in
+          Eio_mock.Flow.on_read first [ `Return info_wire; `Await disconnect ];
+          let third = Eio_mock.Flow.make "retry-third" in
+          Eio_mock.Flow.on_read third
+            [ `Return info_wire; `Await deliver; `Await hold ];
+          let net = Eio_mock.Net.make "retry-network" in
+          Eio_mock.Net.on_connect net
+            [ `Return first; `Raise End_of_file; `Return third ];
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 3)
+                 ~reconnect_delay:Mtime.Span.(1 * ns)
+                 ~reconnect_max_delay:Mtime.Span.(1 * ns)
+                 ())
+          in
+          Eio.Switch.run @@ fun sw ->
+          let connection =
+            expect_ok
+              (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
+                 ~config address)
+          in
+          let events = Nats_eio.Connection.events connection in
+          let subscription =
+            expect_ok (Nats_eio.Connection.subscribe connection filter)
+          in
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          Eio.Promise.resolve disconnect_u (Error End_of_file);
+          (match expect_core_event (Nats_eio.Event_stream.next events) with
+          | Nats.Event.Closed -> ()
+          | event ->
+              fail
+                (Format.asprintf "expected retry CLOSED, got %a" Nats.Event.pp
+                   event));
+          (match Nats_eio.Event_stream.next events with
+          | Ok Nats_eio.Event.Disconnected -> ()
+          | Ok event ->
+              fail
+                (Format.asprintf "expected one retry disconnect, got %a"
+                   Nats_eio.Event.pp event)
+          | Error error ->
+              fail
+                (Format.asprintf "expected retry lifecycle, got %a"
+                   Nats_eio.Error.pp error));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          (match Nats_eio.Event_stream.next events with
+          | Ok Nats_eio.Event.Reconnected -> ()
+          | Ok event ->
+              fail
+                (Format.asprintf "expected reconnected event, got %a"
+                   Nats_eio.Event.pp event)
+          | Error error ->
+              fail
+                (Format.asprintf "expected retry success, got %a"
+                   Nats_eio.Error.pp error));
+          Eio.Promise.resolve deliver_u
+            (Ok "MSG orders.created 1 5\r\nafter\r\n");
+          let delivery = expect_ok (Nats_eio.Subscription.next subscription) in
+          equal string "after" (Nats.Message.payload delivery.message);
+          expect_ok (Nats_eio.Connection.close connection);
+          Eio.Promise.resolve hold_u (Error End_of_file));
       test "defers unsubscribe until the reconnect handshake completes"
         (fun () ->
           let disconnect, disconnect_u = Eio.Promise.create () in
@@ -892,11 +963,15 @@ let () =
           Eio_mock.Flow.on_read first [ `Return info_wire; `Await disconnect ];
           let net = Eio_mock.Net.make "failed-redial-network" in
           Eio_mock.Net.on_connect net [ `Return first; `Raise End_of_file ];
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 1) ())
+          in
           Eio.Switch.run @@ fun sw ->
           let connection =
             expect_ok
               (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
-                 address)
+                 ~config address)
           in
           let events = Nats_eio.Connection.events connection in
           ignore (expect_core_event (Nats_eio.Event_stream.next events));
@@ -940,11 +1015,15 @@ let () =
           let net = Eio_mock.Net.make "exceptional-redial-network" in
           Eio_mock.Net.on_connect net
             [ `Return first; `Raise (Failure "redial failed") ];
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 1) ())
+          in
           Eio.Switch.run @@ fun sw ->
           let connection =
             expect_ok
               (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
-                 address)
+                 ~config address)
           in
           let events = Nats_eio.Connection.events connection in
           ignore (expect_core_event (Nats_eio.Event_stream.next events));
@@ -974,6 +1053,45 @@ let () =
               fail
                 (Format.asprintf "expected terminal redial error, got %a"
                    Nats_eio.Event.pp event));
+      test "validates reconnect policy" (fun () ->
+          (match
+             Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some (-1)) ()
+           with
+          | Error (Nats_eio.Error.Invalid_reconnect_attempts -1) -> ()
+          | Error error ->
+              fail
+                (Format.asprintf "expected attempt validation, got %a"
+                   Nats_eio.Error.pp error)
+          | Ok _ -> fail "negative reconnect attempts were accepted");
+          (match
+             Nats_eio.Connection.Config.v ~max_reconnect_attempts:None ()
+           with
+          | Ok _ -> ()
+          | Error error ->
+              fail
+                (Format.asprintf "unlimited reconnect attempts failed: %a"
+                   Nats_eio.Error.pp error));
+          (match
+             Nats_eio.Connection.Config.v
+               ~reconnect_delay:Mtime.Span.(2 * s)
+               ~reconnect_max_delay:Mtime.Span.(1 * s)
+               ()
+           with
+          | Error (Nats_eio.Error.Invalid_reconnect_delay _) -> ()
+          | Error error ->
+              fail
+                (Format.asprintf "expected delay validation, got %a"
+                   Nats_eio.Error.pp error)
+          | Ok _ -> fail "a short maximum reconnect delay was accepted");
+          match
+            Nats_eio.Connection.Config.v ~reconnect_delay:Mtime.Span.zero ()
+          with
+          | Error (Nats_eio.Error.Invalid_timeout "reconnect delay") -> ()
+          | Error error ->
+              fail
+                (Format.asprintf "expected timeout validation, got %a"
+                   Nats_eio.Error.pp error)
+          | Ok _ -> fail "a zero reconnect delay was accepted");
       test "rejects a TLS-required server without TLS configuration" (fun () ->
           Eio_mock.Backend.run_full @@ fun env ->
           let hold, hold_u = Eio.Promise.create () in
@@ -1080,4 +1198,100 @@ let () =
                 (Format.asprintf "expected handshake timeout, got %a"
                    Nats_eio.Error.pp error)
           | Ok _ -> fail "expected the silent handshake to time out");
+      test "close bypasses a full reconnect command budget" (fun () ->
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let reconnect_info, reconnect_info_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v ~command_capacity:1
+                 ~max_reconnect_attempts:(Some 1) ())
+          in
+          with_reconnecting_connection ~config
+            ~first_reads:[ `Return info_wire; `Await disconnect ]
+            ~second_reads:[ `Await reconnect_info; `Await hold ]
+            (fun ~sw connection ->
+              let events = Nats_eio.Connection.events connection in
+              ignore (expect_core_event (Nats_eio.Event_stream.next events));
+              ignore (expect_core_event (Nats_eio.Event_stream.next events));
+              let subscription =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              Eio.Promise.resolve disconnect_u (Error End_of_file);
+              yield_n 5;
+              let unsubscribe_result, unsubscribe_result_u =
+                Eio.Promise.create ()
+              in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve unsubscribe_result_u
+                    (Nats_eio.Subscription.unsubscribe subscription));
+              yield_n 5;
+              expect_ok (Nats_eio.Connection.close connection);
+              (match Eio.Promise.await unsubscribe_result with
+              | Error Nats_eio.Error.Closed -> ()
+              | Ok () -> fail "unsubscribe unexpectedly succeeded after close"
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected closed unsubscribe, got %a"
+                       Nats_eio.Error.pp error));
+              Eio.Promise.resolve reconnect_info_u (Ok info_wire);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "retries a timed-out reconnect handshake" (fun () ->
+          Eio_mock.Backend.run_full @@ fun env ->
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let silent_hold, silent_hold_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let first = Eio_mock.Flow.make "timeout-first" in
+          Eio_mock.Flow.on_read first [ `Return info_wire; `Await disconnect ];
+          let silent = Eio_mock.Flow.make "timeout-silent" in
+          Eio_mock.Flow.on_read silent [ `Await silent_hold ];
+          let third = Eio_mock.Flow.make "timeout-third" in
+          Eio_mock.Flow.on_read third [ `Return info_wire; `Await hold ];
+          let net = Eio_mock.Net.make "timeout-retry-network" in
+          Eio_mock.Net.on_connect net
+            [ `Return first; `Return silent; `Return third ];
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 3)
+                 ~reconnect_delay:Mtime.Span.(1 * ns)
+                 ~reconnect_max_delay:Mtime.Span.(1 * ns)
+                 ~handshake_timeout:Mtime.Span.(1 * ms)
+                 ())
+          in
+          Eio.Switch.run @@ fun sw ->
+          let connection =
+            expect_ok
+              (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
+                 ~config address)
+          in
+          let events = Nats_eio.Connection.events connection in
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          Eio.Promise.resolve disconnect_u (Error End_of_file);
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          (match Nats_eio.Event_stream.next events with
+          | Ok Nats_eio.Event.Disconnected -> ()
+          | Ok event ->
+              fail
+                (Format.asprintf "expected timeout disconnect, got %a"
+                   Nats_eio.Event.pp event)
+          | Error error ->
+              fail
+                (Format.asprintf "expected timeout retry, got %a"
+                   Nats_eio.Error.pp error));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          (match Nats_eio.Event_stream.next events with
+          | Ok Nats_eio.Event.Reconnected -> ()
+          | Ok event ->
+              fail
+                (Format.asprintf "expected timeout reconnection, got %a"
+                   Nats_eio.Event.pp event)
+          | Error error ->
+              fail
+                (Format.asprintf "expected timeout retry success, got %a"
+                   Nats_eio.Error.pp error));
+          expect_ok (Nats_eio.Connection.close connection);
+          Eio.Promise.resolve silent_hold_u (Error End_of_file);
+          Eio.Promise.resolve hold_u (Error End_of_file));
     ]

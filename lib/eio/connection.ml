@@ -8,6 +8,9 @@ module Config = struct
     read_capacity : int;
     read_chunk_size : int;
     inbox_prefix : Nats.Subject.t;
+    max_reconnect_attempts : int option;
+    reconnect_delay : Mtime.Span.t;
+    reconnect_max_delay : Mtime.Span.t;
     tls : Tls.Config.client option;
     tls_required : bool;
     handshake_timeout : Mtime.Span.t;
@@ -17,6 +20,8 @@ module Config = struct
   }
 
   let default_span = Mtime.Span.(5 * s)
+  let default_reconnect_delay = Mtime.Span.(1 * s)
+  let default_reconnect_max_delay = Mtime.Span.(30 * s)
 
   let validate_capacity name value =
     if value > 0 then Ok value
@@ -26,69 +31,84 @@ module Config = struct
     if Mtime.Span.compare value Mtime.Span.zero > 0 then Ok value
     else Error (Error.Invalid_timeout name)
 
+  let validate_reconnect_attempts = function
+    | None -> Ok None
+    | Some value when value >= 0 -> Ok (Some value)
+    | Some value -> Error (Error.Invalid_reconnect_attempts value)
+
+  let validate_reconnect_delays initial maximum =
+    match validate_timeout "reconnect delay" initial with
+    | Error error -> Error error
+    | Ok initial -> (
+        match validate_timeout "reconnect maximum delay" maximum with
+        | Error error -> Error error
+        | Ok maximum ->
+            if Mtime.Span.compare maximum initial < 0 then
+              Error (Error.Invalid_reconnect_delay { initial; maximum })
+            else Ok (initial, maximum))
+
   let v ?(core = Nats.Config.default) ?(credentials = Nats.Client.Connect.v ())
       ?(command_capacity = 128) ?(subscription_capacity = 256)
       ?(event_capacity = 64) ?(read_capacity = 4) ?(read_chunk_size = 65536)
-      ?tls ?(tls_required = false) ?(inbox_prefix = "_INBOX.ocaml")
+      ?(max_reconnect_attempts = Some 3)
+      ?(reconnect_delay = default_reconnect_delay)
+      ?(reconnect_max_delay = default_reconnect_max_delay) ?tls
+      ?(tls_required = false) ?(inbox_prefix = "_INBOX.ocaml")
       ?(handshake_timeout = default_span) ?(request_timeout = default_span)
       ?(flush_timeout = default_span) ?(drain_timeout = default_span) () =
     if tls_required && Option.is_none tls then Error Error.Tls_required
     else
       match Nats.Subject.of_string inbox_prefix with
       | Error error -> Error (Error.Invalid_inbox_prefix error)
-      | Ok inbox_prefix -> (
-          match validate_capacity "command" command_capacity with
-          | Error error -> Error error
-          | Ok command_capacity -> (
-              match validate_capacity "subscription" subscription_capacity with
-              | Error error -> Error error
-              | Ok subscription_capacity -> (
-                  match validate_capacity "event" event_capacity with
-                  | Error error -> Error error
-                  | Ok event_capacity -> (
-                      match validate_capacity "read" read_capacity with
-                      | Error error -> Error error
-                      | Ok read_capacity -> (
-                          if read_chunk_size <= 0 then
-                            Error (Error.Invalid_chunk_size read_chunk_size)
-                          else
-                            match
-                              validate_timeout "handshake" handshake_timeout
-                            with
-                            | Error error -> Error error
-                            | Ok handshake_timeout -> (
-                                match
-                                  validate_timeout "request" request_timeout
-                                with
-                                | Error error -> Error error
-                                | Ok request_timeout -> (
-                                    match
-                                      validate_timeout "flush" flush_timeout
-                                    with
-                                    | Error error -> Error error
-                                    | Ok flush_timeout -> (
-                                        match
-                                          validate_timeout "drain" drain_timeout
-                                        with
-                                        | Error error -> Error error
-                                        | Ok drain_timeout ->
-                                            Ok
-                                              {
-                                                core;
-                                                credentials;
-                                                command_capacity;
-                                                subscription_capacity;
-                                                event_capacity;
-                                                read_capacity;
-                                                read_chunk_size;
-                                                inbox_prefix;
-                                                tls;
-                                                tls_required;
-                                                handshake_timeout;
-                                                request_timeout;
-                                                flush_timeout;
-                                                drain_timeout;
-                                              }))))))))
+      | Ok inbox_prefix ->
+          let ( let* ) value f =
+            match value with Error error -> Error error | Ok value -> f value
+          in
+          let* command_capacity =
+            validate_capacity "command" command_capacity
+          in
+          let* subscription_capacity =
+            validate_capacity "subscription" subscription_capacity
+          in
+          let* event_capacity = validate_capacity "event" event_capacity in
+          let* read_capacity = validate_capacity "read" read_capacity in
+          let* () =
+            if read_chunk_size <= 0 then
+              Error (Error.Invalid_chunk_size read_chunk_size)
+            else Ok ()
+          in
+          let* handshake_timeout =
+            validate_timeout "handshake" handshake_timeout
+          in
+          let* request_timeout = validate_timeout "request" request_timeout in
+          let* flush_timeout = validate_timeout "flush" flush_timeout in
+          let* drain_timeout = validate_timeout "drain" drain_timeout in
+          let* max_reconnect_attempts =
+            validate_reconnect_attempts max_reconnect_attempts
+          in
+          let* reconnect_delay, reconnect_max_delay =
+            validate_reconnect_delays reconnect_delay reconnect_max_delay
+          in
+          Ok
+            {
+              core;
+              credentials;
+              command_capacity;
+              subscription_capacity;
+              event_capacity;
+              read_capacity;
+              read_chunk_size;
+              inbox_prefix;
+              max_reconnect_attempts;
+              reconnect_delay;
+              reconnect_max_delay;
+              tls;
+              tls_required;
+              handshake_timeout;
+              request_timeout;
+              flush_timeout;
+              drain_timeout;
+            }
 
   let default =
     match v () with
@@ -452,6 +472,9 @@ type t = {
   mutable eof_seen : bool;
   mutable closed : bool;
   mutable reconnecting : bool;
+  mutable reconnect_attempts : int;
+  mutable reconnect_wait : Mtime.Span.t;
+  mutable reconnect_deadline : Mtime.t option;
   mutable connect_sent : bool;
   mutable tls_active : bool;
   mutable tls_info_received : bool;
@@ -577,8 +600,11 @@ let fail_active_request_setup t error =
       resolve_unit resolver (Error error)
 
 let event t event =
-  if Event_stream.push t.events event then Ok ()
-  else Error (Error.Slow_consumer Error.Events)
+  match event with
+  | Event.Core _ when t.reconnecting -> Ok ()
+  | _ ->
+      if Event_stream.push t.events event then Ok ()
+      else Error (Error.Slow_consumer Error.Events)
 
 let close_subscription t sid error =
   match Hashtbl.find_opt t.subscriptions sid with
@@ -660,6 +686,7 @@ let finish t error =
         Event_stream.push_terminal t.events (Event.Slow_consumer kind)
     | Error.Invalid_capacity _ | Error.Command_queue_full _
     | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
+    | Error.Invalid_reconnect_attempts _ | Error.Invalid_reconnect_delay _
     | Error.Invalid_timeout _ | Error.No_responders ->
         ()
     | Error.Protocol _ | Error.Draining | Error.Closed -> ());
@@ -722,18 +749,43 @@ let release_deferred_commands t =
     Eio.Stream.add t.work (Command (Queue.take t.deferred_commands))
   done
 
+let push_reconnect_core_events t =
+  let events =
+    match Nats.Client.info t.state with
+    | None -> [ Nats.Event.Connected ]
+    | Some info ->
+        if Nats.Info.lame_duck_mode info then
+          [
+            Nats.Event.Info info;
+            Nats.Event.Lame_duck_mode;
+            Nats.Event.Connected;
+          ]
+        else [ Nats.Event.Info info; Nats.Event.Connected ]
+  in
+  let rec loop = function
+    | [] -> Ok ()
+    | event_value :: rest ->
+        if Event_stream.push_control t.events (Event.Core event_value) then
+          loop rest
+        else Error (Error.Slow_consumer Error.Events)
+  in
+  loop events
+
 let handle_event t event =
   match event with
   | Nats.Event.Info _ -> Ok ()
   | Nats.Event.Connected ->
       t.handshake_deadline <- None;
       if t.reconnecting then
-        if Event_stream.push_control t.events Event.Reconnected then (
-          Event_stream.end_control_sequence t.events;
-          t.reconnecting <- false;
-          release_deferred_commands t;
-          Ok ())
-        else Error (Error.Slow_consumer Error.Events)
+        match push_reconnect_core_events t with
+        | Error error -> Error error
+        | Ok () ->
+            if Event_stream.push_control t.events Event.Reconnected then (
+              Event_stream.end_control_sequence t.events;
+              t.reconnecting <- false;
+              release_deferred_commands t;
+              Ok ())
+            else Error (Error.Slow_consumer Error.Events)
       else if not t.connect_sent then Ok ()
       else if Eio.Promise.is_resolved t.ready_promise then Ok ()
       else (
@@ -1022,21 +1074,80 @@ let discard_input t =
   in
   loop ()
 
-let recover_transport t =
+let invalidate_timer t =
+  t.timer_generation <- t.timer_generation + 1;
+  t.scheduled_deadline <- None
+
+let reset_reconnect_attempt t =
+  stop_reader t;
+  discard_input t;
+  Buffer.clear t.pending;
+  t.eof_seen <- false;
+  t.handshake_deadline <- None;
+  t.connect_sent <- false;
+  t.tls_active <- false;
+  t.tls_info_received <- false;
+  t.reconnect_deadline <- None;
+  invalidate_timer t;
+  close_transport t.flow;
+  t.state <- Nats.Client.prepare_reconnect t.state
+
+let reconnect_limit_reached t =
+  match t.config.Config.max_reconnect_attempts with
+  | None -> false
+  | Some limit -> t.reconnect_attempts >= limit
+
+let next_reconnect_wait t =
+  let doubled = Mtime.Span.add t.reconnect_wait t.reconnect_wait in
+  let doubled =
+    if Mtime.Span.compare doubled t.reconnect_wait < 0 then Mtime.Span.max_span
+    else doubled
+  in
+  if Mtime.Span.compare doubled t.config.Config.reconnect_max_delay > 0 then
+    t.config.Config.reconnect_max_delay
+  else doubled
+
+let schedule_reconnect t error =
+  if reconnect_limit_reached t then Error error
+  else
+    let wait = t.reconnect_wait in
+    t.reconnect_wait <- next_reconnect_wait t;
+    match Mtime.add_span (now t) wait with
+    | None -> Error error
+    | Some deadline ->
+        t.reconnect_deadline <- Some deadline;
+        Ok ()
+
+let start_reconnect_attempt t =
+  t.reconnect_attempts <- t.reconnect_attempts + 1;
+  match t.dial () with
+  | Error error -> schedule_reconnect t error
+  | Ok flow ->
+      t.flow.flow <- flow;
+      t.flow.closed <- false;
+      t.handshake_deadline <-
+        Mtime.add_span (now t) t.config.Config.handshake_timeout;
+      start_reader t;
+      Ok ()
+
+let retry_reconnect t error =
+  reset_reconnect_attempt t;
+  schedule_reconnect t error
+
+let recover_transport t initial_error =
   let request_ids = request_sids t in
   fail_active_request_setup t Error.Disconnected;
   fail_requests t Error.Disconnected;
   fail_subscription_drains t Error.Disconnected;
   fail_barriers t Error.Disconnected;
   let close_requested = fail_recovery_commands t Error.Disconnected in
-  stop_reader t;
-  discard_input t;
-  Buffer.clear t.pending;
-  t.eof_seen <- false;
-  t.timer_generation <- t.timer_generation + 1;
-  t.scheduled_deadline <- None;
-  close_transport t.flow;
+  reset_reconnect_attempt t;
+  t.reconnect_attempts <- 0;
+  t.reconnect_wait <- t.config.Config.reconnect_delay;
+  t.reconnect_deadline <- None;
+  t.handshake_deadline <- None;
   if close_requested then Error Error.Closed
+  else if reconnect_limit_reached t then Error initial_error
   else (
     Event_stream.begin_control_sequence t.events;
     if not (Event_stream.push_control t.events Event.Disconnected) then (
@@ -1049,18 +1160,7 @@ let recover_transport t =
         List.fold_left
           (fun state sid -> Nats.Client.forget_subscription state sid)
           state request_ids;
-      t.connect_sent <- false;
-      t.tls_active <- false;
-      t.tls_info_received <- false;
-      t.handshake_deadline <-
-        Mtime.add_span (now t) t.config.Config.handshake_timeout;
-      match t.dial () with
-      | Error error -> Error error
-      | Ok flow ->
-          t.flow.flow <- flow;
-          t.flow.closed <- false;
-          start_reader t;
-          Ok ()))
+      start_reconnect_attempt t))
 
 let apply_outgoing t command =
   match command with
@@ -1517,6 +1617,11 @@ let timer_deadline t =
   in
   let deadline = t.handshake_deadline in
   let deadline =
+    match t.reconnect_deadline with
+    | None -> deadline
+    | Some candidate -> earliest deadline candidate
+  in
+  let deadline =
     match Nats.Client.next_timeout t.state with
     | None -> deadline
     | Some candidate -> earliest deadline candidate
@@ -1569,6 +1674,9 @@ let schedule_timer t =
 let may_recover t =
   Eio.Promise.is_resolved t.ready_promise
   && (not t.closed) && (not t.reconnecting)
+  && (match t.config.Config.max_reconnect_attempts with
+    | None -> true
+    | Some attempts -> attempts > 0)
   &&
   match Nats.Client.phase t.state with
   | Nats.Client.Draining -> false
@@ -1578,9 +1686,20 @@ let recoverable_transport_error = function
   | Error.Disconnected | Error.Io _ -> true
   | Error.Invalid_capacity _ | Error.Command_queue_full _
   | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
+  | Error.Invalid_reconnect_attempts _ | Error.Invalid_reconnect_delay _
   | Error.Invalid_timeout _ | Error.Tls_required | Error.Tls_unexpected_input
   | Error.Tls _ | Error.Timeout | Error.Slow_consumer _ | Error.Protocol _
   | Error.No_responders | Error.Draining | Error.Closed ->
+      false
+
+let reconnectable_attempt_error = function
+  | Error.Disconnected | Error.Io _ | Error.Tls _ | Error.Timeout -> true
+  | Error.Invalid_capacity _ | Error.Command_queue_full _
+  | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
+  | Error.Invalid_reconnect_attempts _ | Error.Invalid_reconnect_delay _
+  | Error.Invalid_timeout _ | Error.Tls_required | Error.Tls_unexpected_input
+  | Error.Slow_consumer _ | Error.Protocol _ | Error.No_responders
+  | Error.Draining | Error.Closed ->
       false
 
 let apply_timer t generation =
@@ -1602,7 +1721,23 @@ let apply_timer t generation =
       | Some (Drain_waiter waiter) -> Mtime.compare current waiter.deadline >= 0
       | Some (Subscription_drain_waiter _) -> false
     in
-    if handshake_due || barrier_due then finish t Error.Timeout
+    let reconnect_due =
+      match t.reconnect_deadline with
+      | Some deadline -> Mtime.compare current deadline >= 0
+      | None -> false
+    in
+    if reconnect_due then (
+      t.reconnect_deadline <- None;
+      match start_reconnect_attempt t with
+      | Ok () -> ()
+      | Error error -> finish t error)
+    else if handshake_due then
+      if t.reconnecting then
+        match retry_reconnect t Error.Timeout with
+        | Ok () -> ()
+        | Error error -> finish t error
+      else finish t Error.Timeout
+    else if barrier_due then finish t Error.Timeout
     else (
       expire_subscription_drains t current;
       if expire_barriers t current then finish t Error.Timeout
@@ -1633,6 +1768,13 @@ let apply_command t command =
         fail_command Error.Disconnected command;
         Ok ()
 
+let handle_transport_error t error =
+  if t.reconnecting && reconnectable_attempt_error error then
+    retry_reconnect t error
+  else if may_recover t && recoverable_transport_error error then
+    recover_transport t error
+  else Error error
+
 let rec owner_loop t =
   try
     if not t.closed then
@@ -1649,28 +1791,24 @@ let rec owner_loop t =
               t.active_request_setup <- None;
               schedule_timer t;
               owner_loop t
-          | Error error ->
+          | Error error -> (
               t.active_request_setup <- None;
-              if may_recover t && recoverable_transport_error error then
-                match recover_transport t with
-                | Ok () ->
-                    schedule_timer t;
-                    owner_loop t
-                | Error error -> finish t error
-              else finish t error)
+              match handle_transport_error t error with
+              | Ok () ->
+                  schedule_timer t;
+                  owner_loop t
+              | Error error -> finish t error))
       | Input_ready -> (
           match apply_incoming t with
           | Ok () ->
               schedule_timer t;
               owner_loop t
-          | Error error ->
-              if may_recover t && recoverable_transport_error error then
-                match recover_transport t with
-                | Ok () ->
-                    schedule_timer t;
-                    owner_loop t
-                | Error error -> finish t error
-              else finish t error)
+          | Error error -> (
+              match handle_transport_error t error with
+              | Ok () ->
+                  schedule_timer t;
+                  owner_loop t
+              | Error error -> finish t error))
       | Timer generation ->
           apply_timer t generation;
           schedule_timer t;
@@ -1710,6 +1848,9 @@ let create ~sw ~clock ~config ~(dial : dial) flow =
       eof_seen = false;
       closed = false;
       reconnecting = false;
+      reconnect_attempts = 0;
+      reconnect_wait = config.Config.reconnect_delay;
+      reconnect_deadline = None;
       connect_sent = false;
       tls_active = false;
       tls_info_received = false;
@@ -1751,7 +1892,11 @@ let connect ~sw ~net ~clock ?(config = Config.default) address =
 
 let send t command promise =
   if t.closed then Error Error.Closed
-  else if t.pending_commands >= t.config.Config.command_capacity then
+  else if
+    match command with
+    | Close _ -> false
+    | _ -> t.pending_commands >= t.config.Config.command_capacity
+  then
     Error
       (Error.Command_queue_full { capacity = t.config.Config.command_capacity })
   else (
