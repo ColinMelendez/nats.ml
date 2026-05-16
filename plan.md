@@ -42,9 +42,12 @@ server-barrier drain that preserves queued terminal delivery, coalesces
 concurrent callers, and keeps late PONGs associated with their original
 barriers. Mock-transport coverage exercises fragmented/coalesced frames,
 replies, no responders, timeouts, cancellation, sibling delivery during drain,
-and multi-barrier ordering. This is an implementation checkpoint, not the G2
-stability gate: dialing policy, TLS, reconnect, and real-server acceptance
-tests remain ahead.
+and multi-barrier ordering. The Eio adapter now also negotiates TLS-required
+servers through a replaceable flow and reader lifecycle: it bounds the TLS
+handshake, rejects buffered plaintext, waits for the post-TLS `INFO`, and
+reports structured TLS/timeout/close failures. This is an implementation
+checkpoint, not the G2 stability gate: dialing policy, reconnect, and
+real-server acceptance tests remain ahead.
 
 ## Working principles
 
@@ -266,7 +269,11 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
   direct-style Core publish/subscribe/request/flush/drain/close operations,
   bounded delivery and event streams, structured adapter errors, and
   non-blocking fragmented input handling.
-- Dial configured servers through Eio, with TLS support in the adapter.
+- Dial the initial TCP server through Eio; the adapter now supports
+  INFO-driven or explicitly forced TLS with a caller-owned `Tls.Config.client`,
+  a replaceable reader, a bounded handshake, and a required post-TLS `INFO`
+  before `CONNECT`. Callers must install the TLS RNG and configure peer
+  identity in the TLS client configuration.
 - Start one protocol-owner fiber per connection and serialize all commands
   through it.
 - The current connection surface includes `connect`, `publish`, `publish_msg`,

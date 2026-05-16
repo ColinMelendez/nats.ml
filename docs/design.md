@@ -544,10 +544,16 @@ Auth.jwt       : jwt:string -> sign:(nonce:string -> result) -> t
 Private key parsing/storage belongs in an optional authentication module. Do
 not store a signing closure or PRNG state in `Client.t`; the Eio adapter keeps
 the credential capability and supplies the signature when constructing a
-CONNECT operation. The connection should support TLS configuration through the
-Eio adapter and set the protocol's TLS-required flag where appropriate. TCP is
-the first transport; WebSocket can later implement the same connection-facing
-transport seam.
+CONNECT operation. The Eio adapter now owns the TCP-to-TLS transition: it reads
+the initial plaintext `INFO`, pauses and joins its reader, wraps the flow with
+the configured TLS client, waits for the post-TLS `INFO`, and only then sends
+`CONNECT` with `tls_required=true`. The pure core sees only that final protocol
+intent; it does not depend on TLS. The adapter rejects bytes left over from the
+plaintext phase, bounds the TLS handshake with the configured handshake
+deadline, and reports TLS failures through structured adapter errors. The
+caller supplies the TLS peer configuration and must install the TLS RNG; host
+name/SNI policy is therefore part of that configuration. TCP dialing policy,
+reconnect, and real-server TLS acceptance remain later Core milestones.
 
 ### JetStream, KV, Object Store, and Services
 
@@ -595,6 +601,8 @@ through individual helper functions:
   reconnect replay;
 - exercise request multiplexing, no responders, auto-unsubscribe, slow
   consumers, drain, and server errors;
+- exercise TLS-required negotiation failure, forced-TLS validation, buffered
+  pre-TLS input rejection, and handshake timeout in the Eio adapter;
 - fuzz framing and control-line decoding for crash safety and bounded memory;
 - run in-memory client/server transition tests to verify the state machine
   without a network;
