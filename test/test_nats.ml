@@ -124,6 +124,72 @@ let () =
             (function
             | Nats.Endpoint.Invalid_suffix -> true
             | _ -> false));
+      test "keeps configured seeds and replaces discovered endpoints" (fun () ->
+          let endpoint value =
+            match Nats.Endpoint.of_string value with
+            | Ok value -> value
+            | Error error ->
+                fail (Format.asprintf "%a" Nats.Endpoint.pp_error error)
+          in
+          let seed_a = endpoint "nats://seed-a.example" in
+          let seed_b = endpoint "nats://seed-b.example:4223" in
+          let discovered_a = endpoint "nats://cluster-a.example" in
+          let discovered_b = endpoint "nats://cluster-b.example" in
+          let pool =
+            Nats.Endpoint.Pool.v [ seed_a; seed_b; seed_a ] |> fun pool ->
+            Nats.Endpoint.Pool.update_discovered pool
+              [ discovered_a; seed_b; discovered_b; discovered_a ]
+          in
+          match Nats.Endpoint.Pool.candidates pool with
+          | [ a; b; c; d ] -> (
+              equal bool true (Nats.Endpoint.equal seed_a a);
+              equal bool true (Nats.Endpoint.equal seed_b b);
+              equal bool true (Nats.Endpoint.equal discovered_a c);
+              equal bool true (Nats.Endpoint.equal discovered_b d);
+              let replacement = endpoint "nats://cluster-new.example" in
+              let pool =
+                Nats.Endpoint.Pool.update_discovered pool [ replacement ]
+              in
+              match Nats.Endpoint.Pool.candidates pool with
+              | [ first; second; third ] ->
+                  equal bool true (Nats.Endpoint.equal seed_a first);
+                  equal bool true (Nats.Endpoint.equal seed_b second);
+                  equal bool true (Nats.Endpoint.equal replacement third)
+              | _ -> fail "discovered endpoint replacement changed seed order")
+          | _ -> fail "pool did not deduplicate endpoint sources");
+      test "rotates failed candidates and prefers the last success" (fun () ->
+          let endpoint value =
+            match Nats.Endpoint.of_string value with
+            | Ok value -> value
+            | Error error ->
+                fail (Format.asprintf "%a" Nats.Endpoint.pp_error error)
+          in
+          let first = endpoint "nats://first.example" in
+          let second = endpoint "nats://second.example" in
+          let third = endpoint "nats://third.example" in
+          let pool =
+            Nats.Endpoint.Pool.v [ first ] |> fun pool ->
+            Nats.Endpoint.Pool.update_discovered pool [ second; third ]
+            |> fun pool -> Nats.Endpoint.Pool.connected pool second
+          in
+          equal bool true
+            (match Nats.Endpoint.Pool.candidates pool with
+            | head :: _ -> Nats.Endpoint.equal head second
+            | [] -> false);
+          let pool = Nats.Endpoint.Pool.failed pool second in
+          equal bool true
+            (match Nats.Endpoint.Pool.candidates pool with
+            | [ a; b; c ] ->
+                Nats.Endpoint.equal a first
+                && Nats.Endpoint.equal b third
+                && Nats.Endpoint.equal c second
+            | _ -> false);
+          let pool = Nats.Endpoint.Pool.update_discovered pool [ third ] in
+          match Nats.Endpoint.Pool.candidates pool with
+          | [ a; b ] ->
+              equal bool true (Nats.Endpoint.equal a first);
+              equal bool true (Nats.Endpoint.equal b third)
+          | _ -> fail "removed discovered endpoint remained in the pool");
       test "headers preserve order, duplicates, and original spelling"
         (fun () ->
           let headers =

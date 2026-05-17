@@ -212,3 +212,96 @@ let compare left right =
     let result = String.compare left.host right.host in
     if not (Int.equal result 0) then result
     else Int.compare left.port right.port
+
+module Pool = struct
+  type endpoint = t
+
+  type t = {
+    seeds : endpoint list;
+    discovered : endpoint list;
+    order : endpoint list;
+    preferred : endpoint option;
+  }
+
+  let contains endpoint endpoints =
+    List.exists (fun value -> equal endpoint value) endpoints
+
+  let deduplicate endpoints =
+    let seen = ref [] in
+    let result = ref [] in
+    List.iter
+      (fun endpoint ->
+        if not (contains endpoint !seen) then (
+          seen := endpoint :: !seen;
+          result := endpoint :: !result))
+      endpoints;
+    List.rev !result
+
+  let base t = deduplicate (t.seeds @ t.discovered)
+
+  let keep_preferred preferred endpoints =
+    match preferred with
+    | None -> endpoints
+    | Some preferred ->
+        preferred
+        :: List.filter
+             (fun endpoint -> not (equal endpoint preferred))
+             endpoints
+
+  let rebuild_order t ~discovered ~preferred =
+    let base = deduplicate (t.seeds @ discovered) in
+    let existing =
+      List.filter (fun endpoint -> contains endpoint base) t.order
+    in
+    let additions =
+      List.filter (fun endpoint -> not (contains endpoint existing)) base
+    in
+    let order = existing @ additions in
+    {
+      seeds = t.seeds;
+      discovered;
+      order = keep_preferred preferred order;
+      preferred;
+    }
+
+  let v seeds =
+    let seeds = deduplicate seeds in
+    { seeds; discovered = []; order = seeds; preferred = None }
+
+  let seeds t = t.seeds
+  let discovered t = t.discovered
+  let candidates t = t.order
+  let preferred t = t.preferred
+
+  let update_discovered t discovered =
+    rebuild_order t ~discovered:(deduplicate discovered) ~preferred:t.preferred
+
+  let connected t endpoint =
+    let t = update_discovered t t.discovered in
+    {
+      t with
+      order = keep_preferred (Some endpoint) t.order;
+      preferred = Some endpoint;
+    }
+
+  let move_to_end endpoint endpoints =
+    let present = contains endpoint endpoints in
+    let remaining =
+      List.filter (fun value -> not (equal endpoint value)) endpoints
+    in
+    if present then remaining @ [ endpoint ] else remaining
+
+  let failed t endpoint =
+    let t = update_discovered t t.discovered in
+    let sticky = contains endpoint (base t) in
+    let order =
+      if sticky then move_to_end endpoint t.order
+      else List.filter (fun value -> not (equal endpoint value)) t.order
+    in
+    let preferred =
+      match t.preferred with
+      | Some value when equal endpoint value -> None
+      | value -> value
+    in
+    { t with order; preferred }
+end

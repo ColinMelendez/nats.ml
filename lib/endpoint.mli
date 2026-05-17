@@ -40,3 +40,35 @@ val to_string : t -> string
 val pp : Format.formatter -> t -> unit
 val equal : t -> t -> bool
 val compare : t -> t -> int
+
+module Pool : sig
+  type endpoint = t
+  type t
+
+  val v : endpoint list -> t
+  (** [v seeds] creates a pool in configured-seed order. Duplicate endpoints are
+      removed while preserving first occurrence. *)
+
+  val seeds : t -> endpoint list
+  val discovered : t -> endpoint list
+
+  val candidates : t -> endpoint list
+  (** [candidates pool] is the current deterministic dial order. *)
+
+  val preferred : t -> endpoint option
+  (** [preferred pool] is the most recently connected endpoint, when known. *)
+
+  val update_discovered : t -> endpoint list -> t
+  (** [update_discovered pool endpoints] replaces the discovered set. Configured
+      seeds remain sticky; removed discovered endpoints disappear after the
+      current preferred endpoint has failed. *)
+
+  val connected : t -> endpoint -> t
+  (** [connected pool endpoint] makes [endpoint] the first candidate on the next
+      dial pass. *)
+
+  val failed : t -> endpoint -> t
+  (** [failed pool endpoint] moves a configured or current discovered endpoint
+      to the end of the dial order. A preferred endpoint that is no longer in
+      either set is removed after it fails. *)
+end
