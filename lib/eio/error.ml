@@ -12,6 +12,7 @@ type t =
       initial : Mtime.Span.t;
       maximum : Mtime.Span.t;
     }
+  | Invalid_reconnect_jitter of Mtime.Span.t
   | Invalid_timeout of string
   | Tls_required
   | Tls_unexpected_input
@@ -45,6 +46,8 @@ let pp ppf = function
   | Invalid_reconnect_delay { initial; maximum } ->
       Format.fprintf ppf "reconnect delay %a exceeds maximum %a" Mtime.Span.pp
         initial Mtime.Span.pp maximum
+  | Invalid_reconnect_jitter value ->
+      Format.fprintf ppf "invalid reconnect jitter %a" Mtime.Span.pp value
   | Invalid_timeout name -> Format.fprintf ppf "invalid %s timeout" name
   | Tls_required ->
       Format.pp_print_string ppf

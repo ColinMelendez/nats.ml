@@ -1133,6 +1133,8 @@ let () =
               (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 3)
                  ~reconnect_delay:Mtime.Span.(1 * ns)
                  ~reconnect_max_delay:Mtime.Span.(1 * ns)
+                 ~reconnect_jitter:Mtime.Span.(1 * ns)
+                 ~random:(Random.State.make [| 7 |])
                  ())
           in
           Eio.Switch.run @@ fun sw ->

@@ -11,6 +11,8 @@ module Config = struct
     max_reconnect_attempts : int option;
     reconnect_delay : Mtime.Span.t;
     reconnect_max_delay : Mtime.Span.t;
+    reconnect_jitter : Mtime.Span.t;
+    random : Random.State.t;
     tls : Tls.Config.client option;
     tls_required : bool;
     handshake_timeout : Mtime.Span.t;
@@ -52,10 +54,11 @@ module Config = struct
       ?(event_capacity = 64) ?(read_capacity = 4) ?(read_chunk_size = 65536)
       ?(max_reconnect_attempts = Some 3)
       ?(reconnect_delay = default_reconnect_delay)
-      ?(reconnect_max_delay = default_reconnect_max_delay) ?tls
-      ?(tls_required = false) ?(inbox_prefix = "_INBOX.ocaml")
-      ?(handshake_timeout = default_span) ?(request_timeout = default_span)
-      ?(flush_timeout = default_span) ?(drain_timeout = default_span) () =
+      ?(reconnect_max_delay = default_reconnect_max_delay)
+      ?(reconnect_jitter = Mtime.Span.zero) ?random ?tls ?(tls_required = false)
+      ?(inbox_prefix = "_INBOX.ocaml") ?(handshake_timeout = default_span)
+      ?(request_timeout = default_span) ?(flush_timeout = default_span)
+      ?(drain_timeout = default_span) () =
     if tls_required && Option.is_none tls then Error Error.Tls_required
     else
       match Nats.Subject.of_string inbox_prefix with
@@ -89,6 +92,16 @@ module Config = struct
           let* reconnect_delay, reconnect_max_delay =
             validate_reconnect_delays reconnect_delay reconnect_max_delay
           in
+          let* () =
+            if Mtime.Span.compare reconnect_jitter Mtime.Span.zero < 0 then
+              Error (Error.Invalid_reconnect_jitter reconnect_jitter)
+            else Ok ()
+          in
+          let random =
+            match random with
+            | Some random -> random
+            | None -> Random.State.make_self_init ()
+          in
           Ok
             {
               core;
@@ -102,6 +115,8 @@ module Config = struct
               max_reconnect_attempts;
               reconnect_delay;
               reconnect_max_delay;
+              reconnect_jitter;
+              random;
               tls;
               tls_required;
               handshake_timeout;
@@ -463,6 +478,7 @@ type t = {
   flow : transport;
   clock : monotonic_clock;
   config : Config.t;
+  random : Random.State.t;
   work : work Eio.Stream.t;
   input : input Eio.Stream.t;
   pending : Buffer.t;
@@ -690,8 +706,8 @@ let finish t error =
     | Error.Invalid_endpoints | Error.Invalid_capacity _
     | Error.Command_queue_full _ | Error.Invalid_chunk_size _
     | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
-    | Error.Invalid_reconnect_delay _ | Error.Invalid_timeout _
-    | Error.No_responders ->
+    | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
+    | Error.Invalid_timeout _ | Error.No_responders ->
         ()
     | Error.Protocol _ | Error.Draining | Error.Closed -> ());
     close_subscriptions t error;
@@ -1131,10 +1147,27 @@ let next_reconnect_wait t =
     t.config.Config.reconnect_max_delay
   else doubled
 
+let clamp_float ~minimum ~maximum value =
+  if Float.compare value minimum < 0 then minimum
+  else if Float.compare value maximum > 0 then maximum
+  else value
+
+let reconnect_wait_with_jitter t wait =
+  let jitter = t.config.Config.reconnect_jitter in
+  if Mtime.Span.compare jitter Mtime.Span.zero = 0 then wait
+  else
+    let sample = Random.State.float t.random 1. in
+    let offset = ((2. *. sample) -. 1.) *. Mtime.Span.to_float_ns jitter in
+    let wait = Mtime.Span.to_float_ns wait +. offset in
+    let maximum = Mtime.Span.to_float_ns t.config.Config.reconnect_max_delay in
+    match Mtime.Span.of_float_ns (clamp_float ~minimum:0. ~maximum wait) with
+    | Some value -> value
+    | None -> Mtime.Span.max_span
+
 let schedule_reconnect t error =
   if reconnect_limit_reached t then Error error
   else
-    let wait = t.reconnect_wait in
+    let wait = reconnect_wait_with_jitter t t.reconnect_wait in
     t.reconnect_wait <- next_reconnect_wait t;
     match Mtime.add_span (now t) wait with
     | None -> Error error
@@ -1718,9 +1751,9 @@ let recoverable_transport_error = function
   | Error.Invalid_endpoints | Error.Invalid_capacity _
   | Error.Command_queue_full _ | Error.Invalid_chunk_size _
   | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
-  | Error.Invalid_reconnect_delay _ | Error.Invalid_timeout _
-  | Error.Tls_required | Error.Tls_unexpected_input | Error.Tls _
-  | Error.Timeout | Error.Slow_consumer _ | Error.Protocol _
+  | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
+  | Error.Invalid_timeout _ | Error.Tls_required | Error.Tls_unexpected_input
+  | Error.Tls _ | Error.Timeout | Error.Slow_consumer _ | Error.Protocol _
   | Error.No_responders | Error.Draining | Error.Closed ->
       false
 
@@ -1729,9 +1762,10 @@ let reconnectable_attempt_error = function
   | Error.Invalid_endpoints | Error.Invalid_capacity _
   | Error.Command_queue_full _ | Error.Invalid_chunk_size _
   | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
-  | Error.Invalid_reconnect_delay _ | Error.Invalid_timeout _
-  | Error.Tls_required | Error.Tls_unexpected_input | Error.Slow_consumer _
-  | Error.Protocol _ | Error.No_responders | Error.Draining | Error.Closed ->
+  | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
+  | Error.Invalid_timeout _ | Error.Tls_required | Error.Tls_unexpected_input
+  | Error.Slow_consumer _ | Error.Protocol _ | Error.No_responders
+  | Error.Draining | Error.Closed ->
       false
 
 let apply_timer t generation =
@@ -1877,6 +1911,7 @@ let create ~sw ~clock ~config ~(dial : dial) ~pool ~current_endpoint ~tls_active
       flow = transport;
       clock;
       config;
+      random = Random.State.copy config.Config.random;
       work = Eio.Stream.create max_int;
       input;
       pending = Buffer.create 4096;
@@ -2043,9 +2078,9 @@ let initial_connect_retryable = function
   | Error.Invalid_endpoints | Error.Invalid_capacity _
   | Error.Command_queue_full _ | Error.Invalid_chunk_size _
   | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
-  | Error.Invalid_reconnect_delay _ | Error.Invalid_timeout _
-  | Error.Slow_consumer _ | Error.Protocol _ | Error.No_responders
-  | Error.Draining | Error.Closed ->
+  | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
+  | Error.Invalid_timeout _ | Error.Slow_consumer _ | Error.Protocol _
+  | Error.No_responders | Error.Draining | Error.Closed ->
       false
 
 let connect ~sw ~net ~clock ?(config = Config.default) endpoints =

@@ -14,6 +14,7 @@ type t =
       initial : Mtime.Span.t;
       maximum : Mtime.Span.t;
     }
+  | Invalid_reconnect_jitter of Mtime.Span.t
   | Invalid_timeout of string
   | Tls_required
   | Tls_unexpected_input

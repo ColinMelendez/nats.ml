@@ -14,6 +14,8 @@ module Config : sig
     ?max_reconnect_attempts:int option ->
     ?reconnect_delay:Mtime.Span.t ->
     ?reconnect_max_delay:Mtime.Span.t ->
+    ?reconnect_jitter:Mtime.Span.t ->
+    ?random:Random.State.t ->
     ?tls:Tls.Config.client ->
     ?tls_required:bool ->
     ?inbox_prefix:string ->
@@ -28,10 +30,13 @@ module Config : sig
       loss; [None] permits unlimited attempts. The default is [Some 3]. The
       first redial is immediate; later attempts wait [reconnect_delay] (default
       one second) and double up to [reconnect_max_delay] (default 30 seconds).
-      [tls] supplies the client TLS configuration used when the server's initial
-      [INFO] requires TLS. Set [tls_required] to force the same upgrade when the
-      server does not advertise it. The caller must install a
-      [Mirage_crypto_rng] generator before connecting with TLS. *)
+      [reconnect_jitter] adds a bounded random offset to delayed reconnect
+      waits; it defaults to zero. [random] supplies the state used for that
+      sampling and defaults to a fresh self-initialized state. [tls] supplies
+      the client TLS configuration used when the server's initial [INFO]
+      requires TLS. Set [tls_required] to force the same upgrade when the server
+      does not advertise it. The caller must install a [Mirage_crypto_rng]
+      generator before connecting with TLS. *)
 
   val default : t
 end
