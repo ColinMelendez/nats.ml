@@ -55,9 +55,11 @@ stream addresses, prefers the endpoint that connected, and rotates failed
 endpoints. Each `INFO.connect_urls` replaces the discovered set while
 configured seeds remain sticky; both full endpoint URLs and bare `host[:port]`
 advertisements are accepted. Initial handshake failures fail over across the
-remaining configured seeds. Explicit `tls://` endpoint dialing is still
-reported as unsupported, while the existing server-required TLS upgrade path
-remains available through the TLS configuration. Retry jitter and real-server
+remaining configured seeds. Explicit `tls://` endpoint dialing now performs a
+bounded TLS handshake before the NATS handshake, and bare advertisements
+inherit the active session scheme. The caller-owned TLS configuration supplies
+peer identity and SNI; the existing server-required TLS upgrade path remains
+available through the same configuration. Retry jitter and real-server
 acceptance tests remain ahead of the G2 stability gate. The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
@@ -292,9 +294,10 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
   rotation. `INFO.connect_urls` replaces the discovered set without removing
   configured seeds, and bare `host[:port]` advertisements are accepted.
   Initial handshake failures are bounded and fail over across remaining
-  configured seeds. Explicit `tls://` endpoint dialing remains a planned
-  per-endpoint TLS/SNI slice; server-required TLS still works through the
-  caller-owned `Tls.Config.client`.
+  configured seeds. Explicit `tls://` candidates perform bounded TLS before
+  the NATS handshake; peer identity and SNI remain caller-owned through
+  `Tls.Config.client`, and server-required TLS still works through that
+  configuration.
 - The TLS upgrade path supports INFO-driven or explicitly forced TLS with a
   caller-owned `Tls.Config.client`,
   a replaceable reader, a bounded handshake, and a required post-TLS `INFO`
