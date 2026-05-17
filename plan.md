@@ -49,14 +49,22 @@ reports structured TLS/timeout/close failures. Transport recovery with
 configurable retry/backoff is now implemented: the first redial is immediate,
 later attempts use capped exponential waits, `Some 3` is the default attempt
 limit, `None` permits unlimited attempts, and `Some 0` disables recovery.
-Configured and server-discovered candidate selection, retry jitter, and
-real-server acceptance tests remain ahead of the G2 stability gate. The
-recovery bridge preserves live subscription handles, queues, and replay
-intent; fails transport-bound requests, flushes, and drains; redials through
-the stored connection seam; replays INFO/TLS/CONNECT and subscriptions;
-emits non-terminal `Disconnected`/`Reconnected` events; and defers
-unsubscribe commands until the replacement session is ready. It does not
-replay arbitrary publishes or pending requests.
+Validated endpoint seeds and candidate selection are now part of that Eio
+surface: each dial pass resolves every candidate again, tries all returned
+stream addresses, prefers the endpoint that connected, and rotates failed
+endpoints. Each `INFO.connect_urls` replaces the discovered set while
+configured seeds remain sticky; both full endpoint URLs and bare `host[:port]`
+advertisements are accepted. Initial handshake failures fail over across the
+remaining configured seeds. Explicit `tls://` endpoint dialing is still
+reported as unsupported, while the existing server-required TLS upgrade path
+remains available through the TLS configuration. Retry jitter and real-server
+acceptance tests remain ahead of the G2 stability gate. The recovery bridge
+preserves live subscription handles, queues, and replay intent; fails
+transport-bound requests, flushes, and drains; redials through the stored
+connection seam; replays INFO/TLS/CONNECT and subscriptions; emits
+non-terminal `Disconnected`/`Reconnected` events; and defers unsubscribe
+commands until the replacement session is ready. It does not replay
+arbitrary publishes or pending requests.
 
 ## Working principles
 
@@ -278,8 +286,17 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
   direct-style Core publish/subscribe/request/flush/drain/close operations,
   bounded delivery and event streams, structured adapter errors, and
   non-blocking fragmented input handling.
-- Dial the initial TCP server through Eio; the adapter now supports
-  INFO-driven or explicitly forced TLS with a caller-owned `Tls.Config.client`,
+- Dial an endpoint seed list through Eio; the adapter now supports
+  deterministic configured/discovered candidate selection, per-pass DNS
+  resolution, address fallback, preferred-endpoint ordering, and failure
+  rotation. `INFO.connect_urls` replaces the discovered set without removing
+  configured seeds, and bare `host[:port]` advertisements are accepted.
+  Initial handshake failures are bounded and fail over across remaining
+  configured seeds. Explicit `tls://` endpoint dialing remains a planned
+  per-endpoint TLS/SNI slice; server-required TLS still works through the
+  caller-owned `Tls.Config.client`.
+- The TLS upgrade path supports INFO-driven or explicitly forced TLS with a
+  caller-owned `Tls.Config.client`,
   a replaceable reader, a bounded handshake, and a required post-TLS `INFO`
   before `CONNECT`. Callers must install the TLS RNG and configure peer
   identity in the TLS client configuration.
@@ -302,9 +319,9 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
   retries, replay the handshake and subscriptions, emit non-terminal
   `Disconnected`/`Reconnected` events, and defer unsubscribe/auto-unsubscribe
   commands until reconnection completes.
-- Add configured and server-discovered candidate selection, candidate
-  rotation, and retry jitter around the recovery bridge. Do not add silent
-  Core publish replay or pending-request replay.
+- Add retry jitter around the recovery bridge and exercise candidate selection
+  and discovery against a real server. Do not add silent Core publish replay
+  or pending-request replay.
 - Pending requests and flush barriers now fail structurally and exactly once
   on disconnect, cancellation, timeout, and drain; they never silently replay.
 - Enforce bounded subscription and event queues with an explicit overflow
@@ -320,7 +337,8 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
 - Request success, timeout, no responders, cancellation, and disconnect race.
 - `flush` confirms server processing rather than local write completion.
 - Reconnect restores subscriptions and remaining auto-unsubscribe counts.
-- Dynamic `INFO` updates and server discovery are observable.
+- Dynamic `INFO` updates replace the discovered candidate set while retaining
+  configured seeds; server discovery and endpoint rotation are observable.
 - No arbitrary Core publish is replayed after reconnect by default.
 - Subscription drain delivers already queued messages before termination.
 - Connection drain rejects new work, flushes, closes, and resolves all

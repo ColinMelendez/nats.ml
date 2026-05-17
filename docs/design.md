@@ -430,7 +430,8 @@ state mutable or globally shared.
 
 The connection owns:
 
-- configured server candidates and the future server-discovery selection policy;
+- configured endpoint seeds, the current discovered endpoint set, and
+  deterministic candidate selection/rotation;
 - the current TCP/TLS flow and connection phase;
 - reconnect backoff, attempt limits, jitter, and retry policy;
 - bounded per-subscription delivery queues;
@@ -442,13 +443,18 @@ The current Eio milestone implements a recovery bridge behind this ownership
 boundary: one unexpected transport loss fails in-flight requests, flushes, and
 drains; preserves live subscription handles, queues, and replay intent; closes
 the old flow idempotently; and redials through the stored connection seam. The
-first redial is immediate, later attempts use a configurable capped exponential
-backoff, and the bridge re-enters the INFO/TLS/CONNECT handshake for each
-attempt. It emits non-terminal `Disconnected` and `Reconnected` events,
-defers unsubscribe and auto-unsubscribe commands until the replacement
-session is connected, and leaves ordinary publishes and pending requests
-unreplayed. Multiple configured or server-discovered candidates, endpoint
-selection policy, and retry jitter are later work around this bridge.
+connection accepts validated endpoint seeds, resolves each candidate again for
+every dial pass, tries every returned stream address, prefers the successful
+endpoint, and rotates failures. An `INFO` replaces the discovered candidate
+set while configured seeds remain sticky; both full endpoint URLs and bare
+`host[:port]` advertisements are accepted. Initial handshake failures fail
+over across remaining configured seeds. The first redial is immediate, later
+attempts use a configurable capped exponential backoff, and the bridge
+re-enters the INFO/TLS/CONNECT handshake for each attempt. It emits
+non-terminal `Disconnected` and `Reconnected` events, defers unsubscribe and
+auto-unsubscribe commands until the replacement session is connected, and
+leaves ordinary publishes and pending requests unreplayed. Retry jitter,
+per-endpoint TLS/SNI behavior, and real-server acceptance remain later work.
 
 The normal user operations should be direct-style and result-returning:
 
@@ -530,9 +536,8 @@ replaying them. Unsubscribe and auto-unsubscribe commands received during the
 handshake are deferred until `Reconnected`; `close` wins over recovery. A
 redial or handshake failure is retried when the configured policy permits it;
 exhaustion terminates the event stream with a structured error without
-emitting a second facade disconnect event. Candidate selection, server
-discovery, retry jitter, and any opt-in retryable request policy remain future
-extensions.
+emitting a second facade disconnect event. Retry jitter, per-endpoint TLS/SNI
+behavior, and any opt-in retryable request policy remain future extensions.
 
 Buffered publish replay is inherently at-least-once at the transport boundary:
 a publish may have reached the server just before a disconnect and then be
@@ -577,7 +582,8 @@ plaintext phase, bounds the TLS handshake with the configured handshake
 deadline, and reports TLS failures through structured adapter errors. The
 caller supplies the TLS peer configuration and must install the TLS RNG; host
 name/SNI policy is therefore part of that configuration. Multi-endpoint TCP
-dialing policy, server discovery, retry jitter, and real-server TLS/reconnect
+dialing policy and server discovery are implemented in the Eio endpoint planner;
+retry jitter, per-endpoint TLS/SNI behavior, and real-server TLS/reconnect
 acceptance remain later Core milestones.
 
 ### JetStream, KV, Object Store, and Services
