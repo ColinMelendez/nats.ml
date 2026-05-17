@@ -12,7 +12,6 @@ type t =
       initial : Mtime.Span.t;
       maximum : Mtime.Span.t;
     }
-  | Tls_endpoint_unsupported
   | Invalid_timeout of string
   | Tls_required
   | Tls_unexpected_input
@@ -46,9 +45,6 @@ let pp ppf = function
   | Invalid_reconnect_delay { initial; maximum } ->
       Format.fprintf ppf "reconnect delay %a exceeds maximum %a" Mtime.Span.pp
         initial Mtime.Span.pp maximum
-  | Tls_endpoint_unsupported ->
-      Format.pp_print_string ppf
-        "tls endpoint dialing is not supported by this connection"
   | Invalid_timeout name -> Format.fprintf ppf "invalid %s timeout" name
   | Tls_required ->
       Format.pp_print_string ppf

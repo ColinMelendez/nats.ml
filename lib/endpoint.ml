@@ -181,7 +181,7 @@ let of_string value =
             let* host, port = parse_authority authority in
             Ok { scheme; host; port }
 
-let of_connect_url value =
+let of_connect_url ?(default_scheme = Nats) value =
   let length = String.length value in
   if Int.equal length 0 then Error Empty
   else
@@ -196,7 +196,7 @@ let of_connect_url value =
         if not (Int.equal stop length) then Error Invalid_suffix
         else
           let* host, port = parse_authority value in
-          Ok { scheme = Nats; host; port }
+          Ok { scheme = default_scheme; host; port }
 
 let scheme (value : t) = value.scheme
 let host (value : t) = value.host

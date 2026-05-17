@@ -67,8 +67,8 @@ val connect :
     order. A successful endpoint is preferred on later reconnect passes; DNS is
     resolved again for every pass. Each [INFO] replaces the discovered candidate
     set while retaining configured seeds; malformed advertisements are ignored.
-    The list must be non-empty. An endpoint with the [tls] scheme currently
-    returns {!Error.Tls_endpoint_unsupported}. *)
+    The list must be non-empty. A [tls] endpoint requires [Config.tls] and
+    performs TLS before the NATS handshake. *)
 
 val publish_msg : t -> Nats.Message.t -> (unit, Error.t) result
 

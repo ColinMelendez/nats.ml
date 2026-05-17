@@ -14,7 +14,6 @@ type t =
       initial : Mtime.Span.t;
       maximum : Mtime.Span.t;
     }
-  | Tls_endpoint_unsupported
   | Invalid_timeout of string
   | Tls_required
   | Tls_unexpected_input

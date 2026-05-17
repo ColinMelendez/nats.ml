@@ -116,6 +116,21 @@ let () =
             | Nats.Endpoint.Tls -> false);
           equal string "discovered.example" (Nats.Endpoint.host endpoint);
           equal int 4223 (Nats.Endpoint.port endpoint));
+      test "inherits TLS for bare server advertisements when requested"
+        (fun () ->
+          let endpoint =
+            match
+              Nats.Endpoint.of_connect_url ~default_scheme:Nats.Endpoint.Tls
+                "discovered.example:4223"
+            with
+            | Ok value -> value
+            | Error error ->
+                fail (Format.asprintf "%a" Nats.Endpoint.pp_error error)
+          in
+          equal bool true
+            (match Nats.Endpoint.scheme endpoint with
+            | Nats.Endpoint.Nats -> false
+            | Nats.Endpoint.Tls -> true));
       test
         "rejects endpoint credentials, unsupported schemes, and malformed ports"
         (fun () ->

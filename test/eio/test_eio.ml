@@ -817,7 +817,7 @@ let () =
           expect_ok (Nats_eio.Connection.close connection);
           Eio.Promise.resolve silent_hold_u (Error End_of_file);
           Eio.Promise.resolve good_hold_u (Error End_of_file));
-      test "does not let an unsupported TLS seed mask transport failure"
+      test "does not let a TLS configuration error mask transport failure"
         (fun () ->
           Eio_mock.Backend.run_full @@ fun env ->
           let net = Eio_mock.Net.make "mixed-seed-network" in
@@ -834,7 +834,22 @@ let () =
               fail
                 (Format.asprintf "transport error was masked by %a"
                    Nats_eio.Error.pp error)
-          | Ok _ -> fail "unsupported mixed seeds unexpectedly connected");
+          | Ok _ -> fail "mixed seeds unexpectedly connected");
+      test "requires TLS configuration for an explicit TLS seed" (fun () ->
+          Eio_mock.Backend.run_full @@ fun env ->
+          let net = Eio_mock.Net.make "explicit-tls-config-network" in
+          let tls_endpoint = endpoint_of_string "tls://tls.example" in
+          Eio.Switch.run @@ fun sw ->
+          match
+            Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
+              [ tls_endpoint ]
+          with
+          | Error Nats_eio.Error.Tls_required -> ()
+          | Error error ->
+              fail
+                (Format.asprintf "expected TLS configuration error, got %a"
+                   Nats_eio.Error.pp error)
+          | Ok _ -> fail "explicit TLS seed connected without TLS config");
       test "uses bare INFO connect URLs for the next dial pass" (fun () ->
           Eio_mock.Backend.run_full @@ fun env ->
           let disconnect, disconnect_u = Eio.Promise.create () in
@@ -1446,6 +1461,34 @@ let () =
                 (Format.asprintf "expected TLS timeout, got %a"
                    Nats_eio.Error.pp error)
           | Ok _ -> fail "expected TLS handshake to time out");
+      test "times out an explicit TLS endpoint handshake" (fun () ->
+          Mirage_crypto_rng_unix.use_default ();
+          Eio_mock.Backend.run_full @@ fun env ->
+          let hold, hold_u = Eio.Promise.create () in
+          let flow = Eio_mock.Flow.make "explicit-slow-tls-server" in
+          Eio_mock.Flow.on_read flow [ `Await hold ];
+          let net = make_net "explicit-slow-tls-network" in
+          Eio_mock.Net.on_connect net [ `Return flow ];
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v ~tls:(tls_config ())
+                 ~handshake_timeout:Mtime.Span.(1 * ms)
+                 ())
+          in
+          let tls_endpoint = endpoint_of_string "tls://explicit-slow-tls" in
+          Eio.Switch.run @@ fun sw ->
+          let result =
+            Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock ~config
+              [ tls_endpoint ]
+          in
+          Eio.Promise.resolve hold_u (Error End_of_file);
+          match result with
+          | Error Nats_eio.Error.Timeout -> ()
+          | Error error ->
+              fail
+                (Format.asprintf "expected explicit TLS timeout, got %a"
+                   Nats_eio.Error.pp error)
+          | Ok _ -> fail "expected explicit TLS endpoint to time out");
       test "times out a silent handshake" (fun () ->
           Eio_mock.Backend.run_full @@ fun env ->
           let hold, hold_u = Eio.Promise.create () in

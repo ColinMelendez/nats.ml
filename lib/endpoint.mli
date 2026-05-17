@@ -33,10 +33,11 @@ val of_string : string -> (t, error) result
     IPv6 hosts must use brackets. Userinfo, paths, queries, fragments, and
     WebSocket schemes are rejected. Scheme and host casing are canonicalized. *)
 
-val of_connect_url : string -> (t, error) result
-(** [of_connect_url value] parses a configured endpoint URL or a server
-    advertisement in [host:port] form. Bare advertisements use the [nats] scheme
-    and default to port [4222] when no port is present. *)
+val of_connect_url : ?default_scheme:scheme -> string -> (t, error) result
+(** [of_connect_url ?default_scheme value] parses a configured endpoint URL or a
+    server advertisement in [host:port] form. Bare advertisements use
+    [default_scheme] (the [nats] scheme by default) and default to port [4222]
+    when no port is present. An explicit URL scheme always takes precedence. *)
 
 val scheme : t -> scheme
 val host : t -> string
