@@ -73,6 +73,57 @@ let () =
           expect_error (Nats.Queue_group.of_string "workers.*") (function
             | Nats.Subject.Wildcard_not_allowed _ -> true
             | _ -> false));
+      test "parses and canonicalizes NATS endpoint URLs" (fun () ->
+          let endpoint =
+            match Nats.Endpoint.of_string "NATS://Example.COM" with
+            | Ok value -> value
+            | Error error ->
+                fail (Format.asprintf "%a" Nats.Endpoint.pp_error error)
+          in
+          equal bool true
+            (match Nats.Endpoint.scheme endpoint with
+            | Nats.Endpoint.Nats -> true
+            | Nats.Endpoint.Tls -> false);
+          equal string "example.com" (Nats.Endpoint.host endpoint);
+          equal int 4222 (Nats.Endpoint.port endpoint);
+          equal string "nats://example.com:4222"
+            (Nats.Endpoint.to_string endpoint));
+      test "parses TLS and bracketed IPv6 endpoints" (fun () ->
+          let endpoint =
+            match Nats.Endpoint.of_string "tls://[2001:DB8::1]:4443" with
+            | Ok value -> value
+            | Error error ->
+                fail (Format.asprintf "%a" Nats.Endpoint.pp_error error)
+          in
+          equal bool true
+            (match Nats.Endpoint.scheme endpoint with
+            | Nats.Endpoint.Tls -> true
+            | Nats.Endpoint.Nats -> false);
+          equal string "2001:db8::1" (Nats.Endpoint.host endpoint);
+          equal int 4443 (Nats.Endpoint.port endpoint);
+          equal string "tls://[2001:db8::1]:4443"
+            (Nats.Endpoint.to_string endpoint));
+      test
+        "rejects endpoint credentials, unsupported schemes, and malformed ports"
+        (fun () ->
+          expect_error (Nats.Endpoint.of_string "nats://user:pass@example.com")
+            (function
+            | Nats.Endpoint.Userinfo_not_supported -> true
+            | _ -> false);
+          expect_error (Nats.Endpoint.of_string "ws://example.com:80") (function
+            | Nats.Endpoint.Unsupported_scheme "ws" -> true
+            | _ -> false);
+          expect_error (Nats.Endpoint.of_string "nats://2001:db8::1") (function
+            | Nats.Endpoint.Unbracketed_ipv6 -> true
+            | _ -> false);
+          expect_error (Nats.Endpoint.of_string "nats://example.com:65536")
+            (function
+            | Nats.Endpoint.Port_out_of_range "65536" -> true
+            | _ -> false);
+          expect_error (Nats.Endpoint.of_string "nats://example.com/path")
+            (function
+            | Nats.Endpoint.Invalid_suffix -> true
+            | _ -> false));
       test "headers preserve order, duplicates, and original spelling"
         (fun () ->
           let headers =

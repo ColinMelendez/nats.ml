@@ -1,5 +1,6 @@
 module Subject = Subject
 module Queue_group = Queue_group
+module Endpoint = Endpoint
 module Header = Header
 module Message = Message
 module Op = Op

@@ -6,6 +6,9 @@ module Subject = Subject
 module Queue_group = Queue_group
 (** Valid queue group names. *)
 
+module Endpoint = Endpoint
+(** Validated Core NATS server endpoints. *)
+
 module Header = Header
 (** Immutable, multi-valued message headers. *)
 
