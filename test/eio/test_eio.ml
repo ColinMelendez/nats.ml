@@ -5,6 +5,12 @@ let info_wire =
   ^ "\"proto\":1,\"max_payload\":1048576,\"headers\":true,"
   ^ "\"no_responders\":true,\"connect_urls\":[]}" ^ "\r\n"
 
+let discovered_info_wire =
+  "INFO {\"server_id\":\"srv\",\"version\":\"2.10.0\","
+  ^ "\"proto\":1,\"max_payload\":1048576,\"headers\":true,"
+  ^ "\"no_responders\":true,\"connect_urls\":[\"discovered.example:4223\"]}"
+  ^ "\r\n"
+
 let tls_required_info_wire =
   "INFO {\"server_id\":\"srv\",\"version\":\"2.10.0\","
   ^ "\"proto\":1,\"max_payload\":1048576,\"headers\":true,"
@@ -23,17 +29,32 @@ let expect_core_event = function
 
 let address = `Tcp (Eio.Net.Ipaddr.V4.loopback, 4222)
 
+let endpoint_of_string value =
+  match Nats.Endpoint.of_string value with
+  | Ok value -> value
+  | Error error -> fail (Format.asprintf "%a" Nats.Endpoint.pp_error error)
+
+let endpoint = endpoint_of_string "nats://127.0.0.1:4222"
+
+let configure_net net =
+  Eio_mock.Net.on_getaddrinfo net (List.init 64 (fun _ -> `Return [ address ]))
+
+let make_net label =
+  let net = Eio_mock.Net.make label in
+  configure_net net;
+  net
+
 let with_connection ?config ~reads f =
   Eio_mock.Backend.run_full @@ fun env ->
   let flow = Eio_mock.Flow.make "nats-server" in
   Eio_mock.Flow.on_read flow reads;
-  let net = Eio_mock.Net.make "nats-network" in
+  let net = make_net "nats-network" in
   Eio_mock.Net.on_connect net [ `Return flow ];
   Eio.Switch.run @@ fun sw ->
   let connection =
     expect_ok
       (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock ?config
-         address)
+         [ endpoint ])
   in
   f ~sw connection
 
@@ -43,13 +64,13 @@ let with_reconnecting_connection ?config ~first_reads ~second_reads f =
   Eio_mock.Flow.on_read first first_reads;
   let second = Eio_mock.Flow.make "nats-server-second" in
   Eio_mock.Flow.on_read second second_reads;
-  let net = Eio_mock.Net.make "nats-reconnect-network" in
+  let net = make_net "nats-reconnect-network" in
   Eio_mock.Net.on_connect net [ `Return first; `Return second ];
   Eio.Switch.run @@ fun sw ->
   let connection =
     expect_ok
       (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock ?config
-         address)
+         [ endpoint ])
   in
   f ~sw connection
 
@@ -742,6 +763,258 @@ let () =
                   fail
                     (Format.asprintf "expected disconnect event, got %a"
                        Nats_eio.Error.pp error)));
+      test "tries configured endpoints during initial connect" (fun () ->
+          Eio_mock.Backend.run_full @@ fun env ->
+          let hold, hold_u = Eio.Promise.create () in
+          let flow = Eio_mock.Flow.make "second-seed" in
+          Eio_mock.Flow.on_read flow [ `Return info_wire; `Await hold ];
+          let net = Eio_mock.Net.make "seed-network" in
+          Eio_mock.Net.on_getaddrinfo net
+            [ `Raise (Failure "first seed DNS"); `Return [ address; address ] ];
+          Eio_mock.Net.on_connect net [ `Raise End_of_file; `Return flow ];
+          let first = endpoint_of_string "nats://first-seed.example" in
+          let second = endpoint_of_string "nats://second-seed.example" in
+          Eio.Switch.run @@ fun sw ->
+          let connection =
+            expect_ok
+              (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
+                 [ first; second ])
+          in
+          let events = Nats_eio.Connection.events connection in
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          expect_ok (Nats_eio.Connection.close connection);
+          Eio.Promise.resolve hold_u (Error End_of_file));
+      test "fails over after an initial handshake timeout" (fun () ->
+          Eio_mock.Backend.run_full @@ fun env ->
+          let silent_hold, silent_hold_u = Eio.Promise.create () in
+          let good_hold, good_hold_u = Eio.Promise.create () in
+          let silent = Eio_mock.Flow.make "initial-silent" in
+          Eio_mock.Flow.on_read silent [ `Await silent_hold ];
+          let good = Eio_mock.Flow.make "initial-good" in
+          Eio_mock.Flow.on_read good [ `Return info_wire; `Await good_hold ];
+          let net = Eio_mock.Net.make "initial-handshake-network" in
+          Eio_mock.Net.on_getaddrinfo net
+            [ `Return [ address ]; `Return [ address ] ];
+          Eio_mock.Net.on_connect net [ `Return silent; `Return good ];
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v
+                 ~handshake_timeout:Mtime.Span.(1 * ms)
+                 ())
+          in
+          let first = endpoint_of_string "nats://initial-silent" in
+          let second = endpoint_of_string "nats://initial-good" in
+          Eio.Switch.run @@ fun sw ->
+          let connection =
+            expect_ok
+              (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
+                 ~config [ first; second ])
+          in
+          let events = Nats_eio.Connection.events connection in
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          expect_ok (Nats_eio.Connection.close connection);
+          Eio.Promise.resolve silent_hold_u (Error End_of_file);
+          Eio.Promise.resolve good_hold_u (Error End_of_file));
+      test "does not let an unsupported TLS seed mask transport failure"
+        (fun () ->
+          Eio_mock.Backend.run_full @@ fun env ->
+          let net = Eio_mock.Net.make "mixed-seed-network" in
+          Eio_mock.Net.on_getaddrinfo net [ `Raise (Failure "seed transport") ];
+          let nats_endpoint = endpoint_of_string "nats://transport.example" in
+          let tls_endpoint = endpoint_of_string "tls://unsupported.example" in
+          Eio.Switch.run @@ fun sw ->
+          match
+            Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
+              [ nats_endpoint; tls_endpoint ]
+          with
+          | Error (Nats_eio.Error.Io _) -> ()
+          | Error error ->
+              fail
+                (Format.asprintf "transport error was masked by %a"
+                   Nats_eio.Error.pp error)
+          | Ok _ -> fail "unsupported mixed seeds unexpectedly connected");
+      test "uses bare INFO connect URLs for the next dial pass" (fun () ->
+          Eio_mock.Backend.run_full @@ fun env ->
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let first = Eio_mock.Flow.make "discovery-first" in
+          Eio_mock.Flow.on_read first
+            [ `Return discovered_info_wire; `Await disconnect ];
+          let second = Eio_mock.Flow.make "discovery-second" in
+          Eio_mock.Flow.on_read second [ `Return info_wire; `Await hold ];
+          let net = Eio_mock.Net.make "discovery-network" in
+          Eio_mock.Net.on_getaddrinfo net
+            [
+              `Return [ address ];
+              `Raise (Failure "discovered candidate");
+              `Return [ address ];
+            ];
+          Eio_mock.Net.on_connect net [ `Return first; `Return second ];
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 1) ())
+          in
+          Eio.Switch.run @@ fun sw ->
+          let connection =
+            expect_ok
+              (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
+                 ~config [ endpoint ])
+          in
+          let events = Nats_eio.Connection.events connection in
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          Eio.Promise.resolve disconnect_u (Error End_of_file);
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          (match Nats_eio.Event_stream.next events with
+          | Ok Nats_eio.Event.Disconnected -> ()
+          | Ok event ->
+              fail
+                (Format.asprintf "expected discovery disconnect, got %a"
+                   Nats_eio.Event.pp event)
+          | Error error ->
+              fail
+                (Format.asprintf "expected discovery lifecycle, got %a"
+                   Nats_eio.Error.pp error));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          (match Nats_eio.Event_stream.next events with
+          | Ok Nats_eio.Event.Reconnected -> ()
+          | Ok event ->
+              fail
+                (Format.asprintf "expected discovered reconnection, got %a"
+                   Nats_eio.Event.pp event)
+          | Error error ->
+              fail
+                (Format.asprintf "expected discovered success, got %a"
+                   Nats_eio.Error.pp error));
+          expect_ok (Nats_eio.Connection.close connection);
+          Eio.Promise.resolve hold_u (Error End_of_file));
+      test "tries every endpoint before consuming a reconnect attempt"
+        (fun () ->
+          Eio_mock.Backend.run_full @@ fun env ->
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let first = Eio_mock.Flow.make "pass-first" in
+          Eio_mock.Flow.on_read first [ `Return info_wire; `Await disconnect ];
+          let second = Eio_mock.Flow.make "pass-second" in
+          Eio_mock.Flow.on_read second [ `Return info_wire; `Await hold ];
+          let net = Eio_mock.Net.make "pass-network" in
+          Eio_mock.Net.on_getaddrinfo net
+            [ `Return [ address ]; `Return [ address ]; `Return [ address ] ];
+          Eio_mock.Net.on_connect net
+            [ `Return first; `Raise End_of_file; `Return second ];
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 1)
+                 ~reconnect_delay:Mtime.Span.(1 * ns)
+                 ~reconnect_max_delay:Mtime.Span.(1 * ns)
+                 ())
+          in
+          let first_endpoint = endpoint_of_string "nats://pass-first.example" in
+          let second_endpoint =
+            endpoint_of_string "nats://pass-second.example"
+          in
+          Eio.Switch.run @@ fun sw ->
+          let connection =
+            expect_ok
+              (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
+                 ~config
+                 [ first_endpoint; second_endpoint ])
+          in
+          let events = Nats_eio.Connection.events connection in
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          Eio.Promise.resolve disconnect_u (Error End_of_file);
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          (match Nats_eio.Event_stream.next events with
+          | Ok Nats_eio.Event.Disconnected -> ()
+          | Ok event ->
+              fail
+                (Format.asprintf "expected pass disconnect, got %a"
+                   Nats_eio.Event.pp event)
+          | Error error ->
+              fail
+                (Format.asprintf "expected pass lifecycle, got %a"
+                   Nats_eio.Error.pp error));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          (match Nats_eio.Event_stream.next events with
+          | Ok Nats_eio.Event.Reconnected -> ()
+          | Ok event ->
+              fail
+                (Format.asprintf "expected pass reconnection, got %a"
+                   Nats_eio.Event.pp event)
+          | Error error ->
+              fail
+                (Format.asprintf "expected pass success, got %a"
+                   Nats_eio.Error.pp error));
+          expect_ok (Nats_eio.Connection.close connection);
+          Eio.Promise.resolve hold_u (Error End_of_file));
+      test "rotates an endpoint whose handshake times out" (fun () ->
+          Eio_mock.Backend.run_full @@ fun env ->
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let silent_hold, silent_hold_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let first = Eio_mock.Flow.make "handshake-first" in
+          Eio_mock.Flow.on_read first [ `Return info_wire; `Await disconnect ];
+          let silent = Eio_mock.Flow.make "handshake-silent" in
+          Eio_mock.Flow.on_read silent [ `Await silent_hold ];
+          let recovered = Eio_mock.Flow.make "handshake-recovered" in
+          Eio_mock.Flow.on_read recovered [ `Return info_wire; `Await hold ];
+          let net = Eio_mock.Net.make "handshake-rotation-network" in
+          Eio_mock.Net.on_getaddrinfo net
+            [ `Return [ address ]; `Return [ address ]; `Return [ address ] ];
+          Eio_mock.Net.on_connect net
+            [ `Return first; `Return silent; `Return recovered ];
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 2)
+                 ~handshake_timeout:Mtime.Span.(1 * ms)
+                 ~reconnect_delay:Mtime.Span.(1 * ns)
+                 ~reconnect_max_delay:Mtime.Span.(1 * ns)
+                 ())
+          in
+          Eio.Switch.run @@ fun sw ->
+          let first_endpoint = endpoint_of_string "nats://handshake-first" in
+          let second_endpoint = endpoint_of_string "nats://handshake-second" in
+          let connection =
+            expect_ok
+              (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
+                 ~config
+                 [ first_endpoint; second_endpoint ])
+          in
+          let events = Nats_eio.Connection.events connection in
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          Eio.Promise.resolve disconnect_u (Error End_of_file);
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          (match Nats_eio.Event_stream.next events with
+          | Ok Nats_eio.Event.Disconnected -> ()
+          | Ok event ->
+              fail
+                (Format.asprintf "expected handshake disconnect, got %a"
+                   Nats_eio.Event.pp event)
+          | Error error ->
+              fail
+                (Format.asprintf "expected handshake lifecycle, got %a"
+                   Nats_eio.Error.pp error));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          ignore (expect_core_event (Nats_eio.Event_stream.next events));
+          (match Nats_eio.Event_stream.next events with
+          | Ok Nats_eio.Event.Reconnected -> ()
+          | Ok event ->
+              fail
+                (Format.asprintf "expected rotated reconnection, got %a"
+                   Nats_eio.Event.pp event)
+          | Error error ->
+              fail
+                (Format.asprintf "expected rotated success, got %a"
+                   Nats_eio.Error.pp error));
+          expect_ok (Nats_eio.Connection.close connection);
+          Eio.Promise.resolve silent_hold_u (Error End_of_file);
+          Eio.Promise.resolve hold_u (Error End_of_file));
       test "reconnects a live subscription without losing queued delivery"
         (fun () ->
           let queued, queued_u = Eio.Promise.create () in
@@ -837,7 +1110,7 @@ let () =
           let third = Eio_mock.Flow.make "retry-third" in
           Eio_mock.Flow.on_read third
             [ `Return info_wire; `Await deliver; `Await hold ];
-          let net = Eio_mock.Net.make "retry-network" in
+          let net = make_net "retry-network" in
           Eio_mock.Net.on_connect net
             [ `Return first; `Raise End_of_file; `Return third ];
           let config =
@@ -851,7 +1124,7 @@ let () =
           let connection =
             expect_ok
               (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
-                 ~config address)
+                 ~config [ endpoint ])
           in
           let events = Nats_eio.Connection.events connection in
           let subscription =
@@ -961,7 +1234,7 @@ let () =
           let disconnect, disconnect_u = Eio.Promise.create () in
           let first = Eio_mock.Flow.make "failed-redial-first" in
           Eio_mock.Flow.on_read first [ `Return info_wire; `Await disconnect ];
-          let net = Eio_mock.Net.make "failed-redial-network" in
+          let net = make_net "failed-redial-network" in
           Eio_mock.Net.on_connect net [ `Return first; `Raise End_of_file ];
           let config =
             expect_ok
@@ -971,7 +1244,7 @@ let () =
           let connection =
             expect_ok
               (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
-                 ~config address)
+                 ~config [ endpoint ])
           in
           let events = Nats_eio.Connection.events connection in
           ignore (expect_core_event (Nats_eio.Event_stream.next events));
@@ -1012,7 +1285,7 @@ let () =
           let disconnect, disconnect_u = Eio.Promise.create () in
           let first = Eio_mock.Flow.make "exceptional-redial-first" in
           Eio_mock.Flow.on_read first [ `Return info_wire; `Await disconnect ];
-          let net = Eio_mock.Net.make "exceptional-redial-network" in
+          let net = make_net "exceptional-redial-network" in
           Eio_mock.Net.on_connect net
             [ `Return first; `Raise (Failure "redial failed") ];
           let config =
@@ -1023,7 +1296,7 @@ let () =
           let connection =
             expect_ok
               (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
-                 ~config address)
+                 ~config [ endpoint ])
           in
           let events = Nats_eio.Connection.events connection in
           ignore (expect_core_event (Nats_eio.Event_stream.next events));
@@ -1098,11 +1371,12 @@ let () =
           let flow = Eio_mock.Flow.make "tls-nats-server" in
           Eio_mock.Flow.on_read flow
             [ `Return tls_required_info_wire; `Await hold ];
-          let net = Eio_mock.Net.make "tls-nats-network" in
+          let net = make_net "tls-nats-network" in
           Eio_mock.Net.on_connect net [ `Return flow ];
           Eio.Switch.run @@ fun sw ->
           let result =
-            Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock address
+            Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
+              [ endpoint ]
           in
           Eio.Promise.resolve hold_u (Error End_of_file);
           match result with
@@ -1126,7 +1400,7 @@ let () =
           let flow = Eio_mock.Flow.make "buffered-tls-nats-server" in
           Eio_mock.Flow.on_read flow
             [ `Return (tls_required_info_wire ^ "PING\r\n"); `Await hold ];
-          let net = Eio_mock.Net.make "buffered-tls-nats-network" in
+          let net = make_net "buffered-tls-nats-network" in
           Eio_mock.Net.on_connect net [ `Return flow ];
           let config =
             expect_ok (Nats_eio.Connection.Config.v ~tls:(tls_config ()) ())
@@ -1134,7 +1408,7 @@ let () =
           Eio.Switch.run @@ fun sw ->
           let result =
             Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock ~config
-              address
+              [ endpoint ]
           in
           Eio.Promise.resolve hold_u (Error End_of_file);
           match result with
@@ -1151,7 +1425,7 @@ let () =
           let flow = Eio_mock.Flow.make "slow-tls-nats-server" in
           Eio_mock.Flow.on_read flow
             [ `Return tls_required_info_wire; `Await hold; `Await hold ];
-          let net = Eio_mock.Net.make "slow-tls-nats-network" in
+          let net = make_net "slow-tls-nats-network" in
           Eio_mock.Net.on_connect net [ `Return flow ];
           let config =
             expect_ok
@@ -1162,7 +1436,7 @@ let () =
           Eio.Switch.run @@ fun sw ->
           let result =
             Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock ~config
-              address
+              [ endpoint ]
           in
           Eio.Promise.resolve hold_u (Error End_of_file);
           match result with
@@ -1177,7 +1451,7 @@ let () =
           let hold, hold_u = Eio.Promise.create () in
           let flow = Eio_mock.Flow.make "silent-nats-server" in
           Eio_mock.Flow.on_read flow [ `Await hold ];
-          let net = Eio_mock.Net.make "silent-nats-network" in
+          let net = make_net "silent-nats-network" in
           Eio_mock.Net.on_connect net [ `Return flow ];
           let config =
             expect_ok
@@ -1188,7 +1462,7 @@ let () =
           Eio.Switch.run @@ fun sw ->
           let result =
             Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock ~config
-              address
+              [ endpoint ]
           in
           Eio.Promise.resolve hold_u (Error End_of_file);
           match result with
@@ -1247,7 +1521,7 @@ let () =
           Eio_mock.Flow.on_read silent [ `Await silent_hold ];
           let third = Eio_mock.Flow.make "timeout-third" in
           Eio_mock.Flow.on_read third [ `Return info_wire; `Await hold ];
-          let net = Eio_mock.Net.make "timeout-retry-network" in
+          let net = make_net "timeout-retry-network" in
           Eio_mock.Net.on_connect net
             [ `Return first; `Return silent; `Return third ];
           let config =
@@ -1262,7 +1536,7 @@ let () =
           let connection =
             expect_ok
               (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
-                 ~config address)
+                 ~config [ endpoint ])
           in
           let events = Nats_eio.Connection.events connection in
           ignore (expect_core_event (Nats_eio.Event_stream.next events));

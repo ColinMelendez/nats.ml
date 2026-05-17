@@ -4,6 +4,7 @@ type slow_consumer = Events | Subscription of { sid : int }
 
 type t =
   | Protocol of Nats.Error.t
+  | Invalid_endpoints
   | Invalid_capacity of { name : string; value : int }
   | Command_queue_full of { capacity : int }
   | Invalid_chunk_size of int
@@ -13,6 +14,7 @@ type t =
       initial : Mtime.Span.t;
       maximum : Mtime.Span.t;
     }
+  | Tls_endpoint_unsupported
   | Invalid_timeout of string
   | Tls_required
   | Tls_unexpected_input

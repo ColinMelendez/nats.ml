@@ -3,15 +3,6 @@
 module Config : sig
   type t
 
-  (** [v] validates connection capacities, timeouts, and reconnect policy.
-      [max_reconnect_attempts] counts redial attempts after a transport loss;
-      [None] permits unlimited attempts. The default is [Some 3]. The first
-      redial is immediate; later attempts wait [reconnect_delay] (default one
-      second) and double up to [reconnect_max_delay] (default 30 seconds).
-      [tls] supplies the client TLS configuration used when the server's
-      initial [INFO] requires TLS. Set [tls_required] to force the same
-      upgrade when the server does not advertise it. The caller must install
-      a [Mirage_crypto_rng] generator before connecting with TLS. *)
   val v :
     ?core:Nats.Config.t ->
     ?credentials:Nats.Client.Connect.t ->
@@ -32,6 +23,15 @@ module Config : sig
     ?drain_timeout:Mtime.Span.t ->
     unit ->
     (t, Error.t) result
+  (** [v] validates connection capacities, timeouts, and reconnect policy.
+      [max_reconnect_attempts] counts full candidate passes after a transport
+      loss; [None] permits unlimited attempts. The default is [Some 3]. The
+      first redial is immediate; later attempts wait [reconnect_delay] (default
+      one second) and double up to [reconnect_max_delay] (default 30 seconds).
+      [tls] supplies the client TLS configuration used when the server's initial
+      [INFO] requires TLS. Set [tls_required] to force the same upgrade when the
+      server does not advertise it. The caller must install a
+      [Mirage_crypto_rng] generator before connecting with TLS. *)
 
   val default : t
 end
@@ -61,8 +61,14 @@ val connect :
   net:_ Eio.Net.t ->
   clock:_ Eio.Time.Mono.t ->
   ?config:Config.t ->
-  Eio.Net.Sockaddr.stream ->
+  Nats.Endpoint.t list ->
   (t, Error.t) result
+(** [connect endpoints] resolves and tries the configured endpoint list in
+    order. A successful endpoint is preferred on later reconnect passes; DNS is
+    resolved again for every pass. Each [INFO] replaces the discovered candidate
+    set while retaining configured seeds; malformed advertisements are ignored.
+    The list must be non-empty. An endpoint with the [tls] scheme currently
+    returns {!Error.Tls_endpoint_unsupported}. *)
 
 val publish_msg : t -> Nats.Message.t -> (unit, Error.t) result
 

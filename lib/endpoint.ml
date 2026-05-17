@@ -181,6 +181,23 @@ let of_string value =
             let* host, port = parse_authority authority in
             Ok { scheme; host; port }
 
+let of_connect_url value =
+  let length = String.length value in
+  if Int.equal length 0 then Error Empty
+  else
+    match String.index_opt value ':' with
+    | Some separator
+      when separator + 2 < length
+           && Char.equal (String.get value (separator + 1)) '/'
+           && Char.equal (String.get value (separator + 2)) '/' ->
+        of_string value
+    | _ ->
+        let stop = authority_end value 0 in
+        if not (Int.equal stop length) then Error Invalid_suffix
+        else
+          let* host, port = parse_authority value in
+          Ok { scheme = Nats; host; port }
+
 let scheme (value : t) = value.scheme
 let host (value : t) = value.host
 let port (value : t) = value.port
@@ -277,12 +294,7 @@ module Pool = struct
     rebuild_order t ~discovered:(deduplicate discovered) ~preferred:t.preferred
 
   let connected t endpoint =
-    let t = update_discovered t t.discovered in
-    {
-      t with
-      order = keep_preferred (Some endpoint) t.order;
-      preferred = Some endpoint;
-    }
+    rebuild_order t ~discovered:t.discovered ~preferred:(Some endpoint)
 
   let move_to_end endpoint endpoints =
     let present = contains endpoint endpoints in

@@ -442,7 +442,8 @@ type flow =
       ([> Eio.Flow.two_way_ty | Eio.Resource.close_ty ] as 'a) Eio.Resource.t
       -> flow
 
-type dial = unit -> (flow, Error.t) result
+type endpoint = Nats.Endpoint.t
+type dial = unit -> (flow * endpoint, Error.t) result
 type transport = { mutable flow : flow; mutable closed : bool }
 
 type reader = {
@@ -457,6 +458,8 @@ type monotonic_clock = { now : unit -> Mtime.t; sleep_until : Mtime.t -> unit }
 type t = {
   sw : Eio.Switch.t;
   dial : dial;
+  pool : Nats.Endpoint.Pool.t ref;
+  mutable current_endpoint : endpoint option;
   flow : transport;
   clock : monotonic_clock;
   config : Config.t;
@@ -684,9 +687,10 @@ let finish t error =
           Event_stream.push_terminal t.events Event.Disconnected
     | Error.Slow_consumer kind ->
         Event_stream.push_terminal t.events (Event.Slow_consumer kind)
-    | Error.Invalid_capacity _ | Error.Command_queue_full _
-    | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
-    | Error.Invalid_reconnect_attempts _ | Error.Invalid_reconnect_delay _
+    | Error.Invalid_endpoints | Error.Invalid_capacity _
+    | Error.Command_queue_full _ | Error.Invalid_chunk_size _
+    | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
+    | Error.Invalid_reconnect_delay _ | Error.Tls_endpoint_unsupported
     | Error.Invalid_timeout _ | Error.No_responders ->
         ()
     | Error.Protocol _ | Error.Draining | Error.Closed -> ());
@@ -773,7 +777,17 @@ let push_reconnect_core_events t =
 
 let handle_event t event =
   match event with
-  | Nats.Event.Info _ -> Ok ()
+  | Nats.Event.Info info ->
+      let endpoints =
+        List.filter_map
+          (fun value ->
+            match Nats.Endpoint.of_connect_url value with
+            | Ok endpoint -> Some endpoint
+            | Error _ -> None)
+          (Nats.Info.connect_urls info)
+      in
+      t.pool := Nats.Endpoint.Pool.update_discovered !(t.pool) endpoints;
+      Ok ()
   | Nats.Event.Connected ->
       t.handshake_deadline <- None;
       if t.reconnecting then
@@ -1079,6 +1093,10 @@ let invalidate_timer t =
   t.scheduled_deadline <- None
 
 let reset_reconnect_attempt t =
+  (match t.current_endpoint with
+  | None -> ()
+  | Some endpoint -> t.pool := Nats.Endpoint.Pool.failed !(t.pool) endpoint);
+  t.current_endpoint <- None;
   stop_reader t;
   discard_input t;
   Buffer.clear t.pending;
@@ -1122,7 +1140,9 @@ let start_reconnect_attempt t =
   t.reconnect_attempts <- t.reconnect_attempts + 1;
   match t.dial () with
   | Error error -> schedule_reconnect t error
-  | Ok flow ->
+  | Ok (flow, endpoint) ->
+      t.pool := Nats.Endpoint.Pool.connected !(t.pool) endpoint;
+      t.current_endpoint <- Some endpoint;
       t.flow.flow <- flow;
       t.flow.closed <- false;
       t.handshake_deadline <-
@@ -1684,9 +1704,10 @@ let may_recover t =
 
 let recoverable_transport_error = function
   | Error.Disconnected | Error.Io _ -> true
-  | Error.Invalid_capacity _ | Error.Command_queue_full _
-  | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
-  | Error.Invalid_reconnect_attempts _ | Error.Invalid_reconnect_delay _
+  | Error.Invalid_endpoints | Error.Invalid_capacity _
+  | Error.Command_queue_full _ | Error.Invalid_chunk_size _
+  | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
+  | Error.Invalid_reconnect_delay _ | Error.Tls_endpoint_unsupported
   | Error.Invalid_timeout _ | Error.Tls_required | Error.Tls_unexpected_input
   | Error.Tls _ | Error.Timeout | Error.Slow_consumer _ | Error.Protocol _
   | Error.No_responders | Error.Draining | Error.Closed ->
@@ -1694,9 +1715,10 @@ let recoverable_transport_error = function
 
 let reconnectable_attempt_error = function
   | Error.Disconnected | Error.Io _ | Error.Tls _ | Error.Timeout -> true
-  | Error.Invalid_capacity _ | Error.Command_queue_full _
-  | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
-  | Error.Invalid_reconnect_attempts _ | Error.Invalid_reconnect_delay _
+  | Error.Invalid_endpoints | Error.Invalid_capacity _
+  | Error.Command_queue_full _ | Error.Invalid_chunk_size _
+  | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
+  | Error.Invalid_reconnect_delay _ | Error.Tls_endpoint_unsupported
   | Error.Invalid_timeout _ | Error.Tls_required | Error.Tls_unexpected_input
   | Error.Slow_consumer _ | Error.Protocol _ | Error.No_responders
   | Error.Draining | Error.Closed ->
@@ -1816,7 +1838,7 @@ let rec owner_loop t =
   with Eio.Cancel.Cancelled _ ->
     Eio.Cancel.protect (fun () -> finish t Error.Closed)
 
-let create ~sw ~clock ~config ~(dial : dial) flow =
+let create ~sw ~clock ~config ~(dial : dial) ~pool ~current_endpoint flow =
   let handshake_deadline =
     Mtime.add_span (Eio.Time.Mono.now clock) config.Config.handshake_timeout
   in
@@ -1833,6 +1855,8 @@ let create ~sw ~clock ~config ~(dial : dial) flow =
     {
       sw;
       dial;
+      pool;
+      current_endpoint;
       flow = transport;
       clock;
       config;
@@ -1871,24 +1895,148 @@ let create ~sw ~clock ~config ~(dial : dial) flow =
   Eio.Fiber.fork ~sw (fun () -> owner_loop connection);
   (connection, ready)
 
-let connect ~sw ~net ~clock ?(config = Config.default) address =
-  let dial () =
-    try
-      let flow = Eio.Net.connect ~sw net address in
-      Ok (Flow flow)
-    with
-    | Eio.Cancel.Cancelled _ as error -> raise error
-    | End_of_file -> Error Error.Disconnected
-    | Eio.Io (_, _) as error -> Error (io_error error)
-    | error -> Error (Error.Io error)
+let endpoint_error endpoint =
+  match Nats.Endpoint.scheme endpoint with
+  | Nats.Endpoint.Nats -> None
+  | Nats.Endpoint.Tls -> Some Error.Tls_endpoint_unsupported
+
+let resolve_endpoint ~net endpoint =
+  try
+    Ok
+      (Eio.Net.getaddrinfo_stream net
+         ~service:(Int.to_string (Nats.Endpoint.port endpoint))
+         (Nats.Endpoint.host endpoint))
+  with
+  | Eio.Cancel.Cancelled _ as error -> raise error
+  | End_of_file -> Error Error.Disconnected
+  | Eio.Io (_, _) as error -> Error (io_error error)
+  | error -> Error (Error.Io error)
+
+let connect_address ~sw ~net address =
+  try Ok (Flow (Eio.Net.connect ~sw net address)) with
+  | Eio.Cancel.Cancelled _ as error -> raise error
+  | End_of_file -> Error Error.Disconnected
+  | Eio.Io (_, _) as error -> Error (io_error error)
+  | error -> Error (Error.Io error)
+
+let connect_endpoint ~sw ~net endpoint =
+  match endpoint_error endpoint with
+  | Some error -> Error error
+  | None -> (
+      match resolve_endpoint ~net endpoint with
+      | Error error -> Error error
+      | Ok addresses -> (
+          let result = ref None in
+          let last_error = ref None in
+          List.iter
+            (fun address ->
+              match !result with
+              | Some _ -> ()
+              | None -> (
+                  match connect_address ~sw ~net address with
+                  | Ok flow -> result := Some flow
+                  | Error error -> last_error := Some error))
+            addresses;
+          match !result with
+          | Some flow -> Ok flow
+          | None -> (
+              match !last_error with
+              | Some error -> Error error
+              | None -> Error Error.Disconnected)))
+
+let remove_endpoint endpoint endpoints =
+  List.filter (fun value -> not (Nats.Endpoint.equal endpoint value)) endpoints
+
+let dial_candidates ~sw ~net ~on_failure candidates =
+  let result = ref None in
+  let last_error = ref None in
+  let remember_error error =
+    match error with
+    | Error.Tls_endpoint_unsupported ->
+        if Option.is_none !last_error then last_error := Some error
+    | _ -> last_error := Some error
   in
-  match dial () with
-  | Error error -> Error error
-  | Ok flow -> (
-      let connection, ready = create ~sw ~clock ~config ~dial flow in
-      match Eio.Promise.await ready with
-      | Ok () -> Ok connection
-      | Error error -> Error error)
+  List.iter
+    (fun endpoint ->
+      match !result with
+      | Some _ -> ()
+      | None -> (
+          match connect_endpoint ~sw ~net endpoint with
+          | Ok flow -> result := Some (flow, endpoint)
+          | Error error ->
+              on_failure endpoint error;
+              remember_error error))
+    candidates;
+  match !result with
+  | Some value -> Ok value
+  | None -> (
+      match !last_error with
+      | Some error -> Error error
+      | None -> Error Error.Invalid_endpoints)
+
+let make_dial ~sw ~net pool =
+ fun () ->
+  let on_failure endpoint _error =
+    pool := Nats.Endpoint.Pool.failed !pool endpoint
+  in
+  dial_candidates ~sw ~net ~on_failure (Nats.Endpoint.Pool.candidates !pool)
+
+let make_initial_dial ~sw ~net pool candidates =
+  let remaining = ref candidates in
+  let dial () =
+    let on_failure endpoint _error =
+      remaining := remove_endpoint endpoint !remaining;
+      pool := Nats.Endpoint.Pool.failed !pool endpoint
+    in
+    match dial_candidates ~sw ~net ~on_failure !remaining with
+    | Error error -> Error error
+    | Ok (flow, endpoint) ->
+        remaining := remove_endpoint endpoint !remaining;
+        Ok (flow, endpoint)
+  in
+  (dial, remaining)
+
+let initial_connect_retryable = function
+  | Error.Disconnected | Error.Io _ | Error.Tls _ | Error.Timeout
+  | Error.Tls_required | Error.Tls_unexpected_input ->
+      true
+  | Error.Invalid_endpoints | Error.Invalid_capacity _
+  | Error.Command_queue_full _ | Error.Invalid_chunk_size _
+  | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
+  | Error.Invalid_reconnect_delay _ | Error.Tls_endpoint_unsupported
+  | Error.Invalid_timeout _ | Error.Slow_consumer _ | Error.Protocol _
+  | Error.No_responders | Error.Draining | Error.Closed ->
+      false
+
+let connect ~sw ~net ~clock ?(config = Config.default) endpoints =
+  if Int.equal (List.length endpoints) 0 then Error Error.Invalid_endpoints
+  else
+    let pool = ref (Nats.Endpoint.Pool.v endpoints) in
+    let dial = make_dial ~sw ~net pool in
+    let initial_dial, remaining =
+      make_initial_dial ~sw ~net pool (Nats.Endpoint.Pool.candidates !pool)
+    in
+    let rec establish () =
+      match initial_dial () with
+      | Error error -> Error error
+      | Ok (flow, endpoint) -> (
+          pool := Nats.Endpoint.Pool.connected !pool endpoint;
+          let connection, ready =
+            create ~sw ~clock ~config ~dial ~pool
+              ~current_endpoint:(Some endpoint) flow
+          in
+          match Eio.Promise.await ready with
+          | Ok () -> Ok connection
+          | Error error
+            when initial_connect_retryable error
+                 && not (Int.equal (List.length !remaining) 0) ->
+              pool := Nats.Endpoint.Pool.failed !pool endpoint;
+              establish ()
+          | Error error ->
+              pool := Nats.Endpoint.Pool.failed !pool endpoint;
+              Error error)
+    in
+    establish ()
 
 let send t command promise =
   if t.closed then Error Error.Closed

@@ -2,6 +2,7 @@ type slow_consumer = Events | Subscription of { sid : int }
 
 type t =
   | Protocol of Nats.Error.t
+  | Invalid_endpoints
   | Invalid_capacity of { name : string; value : int }
   | Command_queue_full of { capacity : int }
   | Invalid_chunk_size of int
@@ -11,6 +12,7 @@ type t =
       initial : Mtime.Span.t;
       maximum : Mtime.Span.t;
     }
+  | Tls_endpoint_unsupported
   | Invalid_timeout of string
   | Tls_required
   | Tls_unexpected_input
@@ -29,6 +31,8 @@ let pp_slow_consumer ppf = function
 
 let pp ppf = function
   | Protocol error -> Format.fprintf ppf "protocol: %a" Nats.Error.pp error
+  | Invalid_endpoints ->
+      Format.pp_print_string ppf "at least one endpoint is required"
   | Invalid_capacity { name; value } ->
       Format.fprintf ppf "invalid %s capacity %d" name value
   | Command_queue_full { capacity } ->
@@ -42,6 +46,9 @@ let pp ppf = function
   | Invalid_reconnect_delay { initial; maximum } ->
       Format.fprintf ppf "reconnect delay %a exceeds maximum %a" Mtime.Span.pp
         initial Mtime.Span.pp maximum
+  | Tls_endpoint_unsupported ->
+      Format.pp_print_string ppf
+        "tls endpoint dialing is not supported by this connection"
   | Invalid_timeout name -> Format.fprintf ppf "invalid %s timeout" name
   | Tls_required ->
       Format.pp_print_string ppf

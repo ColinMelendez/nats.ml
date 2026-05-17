@@ -103,6 +103,19 @@ let () =
           equal int 4443 (Nats.Endpoint.port endpoint);
           equal string "tls://[2001:db8::1]:4443"
             (Nats.Endpoint.to_string endpoint));
+      test "parses bare server advertisements as NATS endpoints" (fun () ->
+          let endpoint =
+            match Nats.Endpoint.of_connect_url "Discovered.EXAMPLE:4223" with
+            | Ok value -> value
+            | Error error ->
+                fail (Format.asprintf "%a" Nats.Endpoint.pp_error error)
+          in
+          equal bool true
+            (match Nats.Endpoint.scheme endpoint with
+            | Nats.Endpoint.Nats -> true
+            | Nats.Endpoint.Tls -> false);
+          equal string "discovered.example" (Nats.Endpoint.host endpoint);
+          equal int 4223 (Nats.Endpoint.port endpoint));
       test
         "rejects endpoint credentials, unsupported schemes, and malformed ports"
         (fun () ->
@@ -190,6 +203,28 @@ let () =
               equal bool true (Nats.Endpoint.equal a first);
               equal bool true (Nats.Endpoint.equal b third)
           | _ -> fail "removed discovered endpoint remained in the pool");
+      test "drops a removed preferred endpoint after a later success" (fun () ->
+          let endpoint value =
+            match Nats.Endpoint.of_string value with
+            | Ok value -> value
+            | Error error ->
+                fail (Format.asprintf "%a" Nats.Endpoint.pp_error error)
+          in
+          let seed = endpoint "nats://seed.example" in
+          let old = endpoint "nats://old.example" in
+          let replacement = endpoint "nats://replacement.example" in
+          let pool =
+            Nats.Endpoint.Pool.v [ seed ] |> fun pool ->
+            Nats.Endpoint.Pool.update_discovered pool [ old ] |> fun pool ->
+            Nats.Endpoint.Pool.connected pool old |> fun pool ->
+            Nats.Endpoint.Pool.update_discovered pool [ replacement ]
+            |> fun pool -> Nats.Endpoint.Pool.connected pool seed
+          in
+          match Nats.Endpoint.Pool.candidates pool with
+          | [ first; second ] ->
+              equal bool true (Nats.Endpoint.equal first seed);
+              equal bool true (Nats.Endpoint.equal second replacement)
+          | _ -> fail "removed preferred endpoint remained after a new success");
       test "headers preserve order, duplicates, and original spelling"
         (fun () ->
           let headers =
