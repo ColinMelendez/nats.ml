@@ -16,6 +16,16 @@ let tls_required_info_wire =
   ^ "\"proto\":1,\"max_payload\":1048576,\"headers\":true,"
   ^ "\"no_responders\":true,\"tls_required\":true,\"connect_urls\":[]}" ^ "\r\n"
 
+let auth_info_wire =
+  "INFO {\"server_id\":\"srv\",\"version\":\"2.10.0\","
+  ^ "\"proto\":1,\"max_payload\":1048576,\"headers\":true,"
+  ^ "\"no_responders\":true,\"nonce\":\"nonce\",\"connect_urls\":[]}" ^ "\r\n"
+
+let auth_required_info_wire =
+  "INFO {\"server_id\":\"srv\",\"version\":\"2.10.0\","
+  ^ "\"proto\":1,\"max_payload\":1048576,\"headers\":true,"
+  ^ "\"no_responders\":true,\"auth_required\":true,\"connect_urls\":[]}" ^ "\r\n"
+
 let expect_ok = function
   | Ok value -> value
   | Error error -> fail (Format.asprintf "%a" Nats_eio.Error.pp error)
@@ -142,6 +152,44 @@ let () =
               expect_ok (Eio.Promise.await flush_result);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "derives nonce credentials before the Eio handshake completes"
+        (fun () ->
+          let signed, signed_u = Eio.Promise.create () in
+          let auth =
+            Nats.Auth.nkey ~nkey:"PUB"
+              ~sign:(fun ~nonce ->
+                Eio.Promise.resolve signed_u nonce;
+                Ok "signature")
+          in
+          let config =
+            expect_ok (Nats_eio.Connection.Config.v ~auth ())
+          in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection ~config
+            ~reads:[ `Return auth_info_wire; `Await hold ]
+            (fun ~sw:_ connection ->
+              equal string "nonce" (Eio.Promise.await signed);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "reports required authentication before sending CONNECT" (fun () ->
+          Eio_mock.Backend.run_full @@ fun env ->
+          let flow = Eio_mock.Flow.make "auth-required-nats-server" in
+          Eio_mock.Flow.on_read flow [ `Return auth_required_info_wire ];
+          let net = make_net "auth-required-network" in
+          Eio_mock.Net.on_connect net [ `Return flow ];
+          Eio.Switch.run @@ fun sw ->
+          match
+            Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock
+              [ endpoint ]
+          with
+          | Error (Nats_eio.Error.Auth Nats.Auth.Auth_required) -> ()
+          | Ok connection ->
+              expect_ok (Nats_eio.Connection.close connection);
+              fail "anonymous auth unexpectedly connected"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected auth error: %a"
+                   Nats_eio.Error.pp error));
       test "keeps the owner available after fragmented INFO" (fun () ->
           let hold, hold_u = Eio.Promise.create () in
           let split = String.length info_wire / 2 in

@@ -5,7 +5,7 @@ module Config : sig
 
   val v :
     ?core:Nats.Config.t ->
-    ?credentials:Nats.Client.Connect.t ->
+    ?auth:Nats.Auth.t ->
     ?command_capacity:int ->
     ?subscription_capacity:int ->
     ?event_capacity:int ->
@@ -35,8 +35,10 @@ module Config : sig
       sampling and defaults to a fresh self-initialized state. [tls] supplies
       the client TLS configuration used when the server's initial [INFO]
       requires TLS. Set [tls_required] to force the same upgrade when the server
-      does not advertise it. The caller must install a [Mirage_crypto_rng]
-      generator before connecting with TLS. *)
+      does not advertise it. [auth] derives fresh CONNECT credentials from each
+      server [INFO], so nonce signers are called again after reconnect. The
+      caller must install a [Mirage_crypto_rng] generator before connecting with
+      TLS. *)
 
   val default : t
 end

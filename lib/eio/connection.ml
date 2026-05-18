@@ -1,7 +1,7 @@
 module Config = struct
   type t = {
     core : Nats.Config.t;
-    credentials : Nats.Client.Connect.t;
+    auth : Nats.Auth.t;
     command_capacity : int;
     subscription_capacity : int;
     event_capacity : int;
@@ -49,7 +49,7 @@ module Config = struct
               Error (Error.Invalid_reconnect_delay { initial; maximum })
             else Ok (initial, maximum))
 
-  let v ?(core = Nats.Config.default) ?(credentials = Nats.Client.Connect.v ())
+  let v ?(core = Nats.Config.default) ?(auth = Nats.Auth.none)
       ?(command_capacity = 128) ?(subscription_capacity = 256)
       ?(event_capacity = 64) ?(read_capacity = 4) ?(read_chunk_size = 65536)
       ?(max_reconnect_attempts = Some 3)
@@ -105,7 +105,7 @@ module Config = struct
           Ok
             {
               core;
-              credentials;
+              auth;
               command_capacity;
               subscription_capacity;
               event_capacity;
@@ -707,7 +707,7 @@ let finish t error =
     | Error.Command_queue_full _ | Error.Invalid_chunk_size _
     | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
     | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
-    | Error.Invalid_timeout _ | Error.No_responders ->
+    | Error.Invalid_timeout _ | Error.No_responders | Error.Auth _ ->
         ()
     | Error.Protocol _ | Error.Draining | Error.Closed -> ());
     close_subscriptions t error;
@@ -998,22 +998,28 @@ let connect_after_info t =
   if
     Nats.Client.phase t.state = Nats.Client.Awaiting_connect
     && not t.connect_sent
-  then (
+  then
     if
       (tls_required_by_server t || t.config.Config.tls_required)
       && not t.tls_active
     then upgrade_tls t
     else if t.tls_active && not t.tls_info_received then Ok ()
     else
-      match
-        Nats.Client.outgoing t.state
-          (Nats.Client.Connect
-             { credentials = t.config.credentials; tls_required = t.tls_active })
-      with
-      | Error error -> Error (protocol error)
-      | Ok transition ->
-          t.connect_sent <- true;
-          apply_transition t transition)
+      match Nats.Client.info t.state with
+      | None -> Error (protocol Nats.Error.Info_not_received)
+      | Some info -> (
+          match Nats.Auth.connect t.config.Config.auth info with
+          | Error error -> Error (Error.Auth error)
+          | Ok credentials -> (
+              match
+                Nats.Client.outgoing t.state
+                  (Nats.Client.Connect
+                     { credentials; tls_required = t.tls_active })
+              with
+              | Error error -> Error (protocol error)
+              | Ok transition ->
+                  t.connect_sent <- true;
+                  apply_transition t transition))
   else Ok ()
 
 let consume_pending t length =
@@ -1753,12 +1759,14 @@ let recoverable_transport_error = function
   | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
   | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
   | Error.Invalid_timeout _ | Error.Tls_required | Error.Tls_unexpected_input
-  | Error.Tls _ | Error.Timeout | Error.Slow_consumer _ | Error.Protocol _
-  | Error.No_responders | Error.Draining | Error.Closed ->
+  | Error.Tls _ | Error.Timeout | Error.Slow_consumer _ | Error.Auth _
+  | Error.Protocol _ | Error.No_responders | Error.Draining | Error.Closed ->
       false
 
 let reconnectable_attempt_error = function
-  | Error.Disconnected | Error.Io _ | Error.Tls _ | Error.Timeout -> true
+  | Error.Disconnected | Error.Io _ | Error.Tls _ | Error.Timeout | Error.Auth _
+    ->
+      true
   | Error.Invalid_endpoints | Error.Invalid_capacity _
   | Error.Command_queue_full _ | Error.Invalid_chunk_size _
   | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
@@ -2073,7 +2081,7 @@ let make_initial_dial ~sw ~net ~clock ~config pool candidates =
 
 let initial_connect_retryable = function
   | Error.Disconnected | Error.Io _ | Error.Tls _ | Error.Timeout
-  | Error.Tls_required | Error.Tls_unexpected_input ->
+  | Error.Tls_required | Error.Tls_unexpected_input | Error.Auth _ ->
       true
   | Error.Invalid_endpoints | Error.Invalid_capacity _
   | Error.Command_queue_full _ | Error.Invalid_chunk_size _

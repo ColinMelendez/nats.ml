@@ -4,6 +4,7 @@ type slow_consumer = Events | Subscription of { sid : int }
 
 type t =
   | Protocol of Nats.Error.t
+  | Auth of Nats.Auth.error
   | Invalid_endpoints
   | Invalid_capacity of { name : string; value : int }
   | Command_queue_full of { capacity : int }

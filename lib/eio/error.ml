@@ -2,6 +2,7 @@ type slow_consumer = Events | Subscription of { sid : int }
 
 type t =
   | Protocol of Nats.Error.t
+  | Auth of Nats.Auth.error
   | Invalid_endpoints
   | Invalid_capacity of { name : string; value : int }
   | Command_queue_full of { capacity : int }
@@ -31,6 +32,8 @@ let pp_slow_consumer ppf = function
 
 let pp ppf = function
   | Protocol error -> Format.fprintf ppf "protocol: %a" Nats.Error.pp error
+  | Auth error ->
+      Format.fprintf ppf "authentication: %a" Nats.Auth.pp_error error
   | Invalid_endpoints ->
       Format.pp_print_string ppf "at least one endpoint is required"
   | Invalid_capacity { name; value } ->
