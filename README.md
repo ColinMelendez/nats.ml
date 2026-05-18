@@ -21,8 +21,16 @@ dune build
 dune runtest
 ```
 
-The current pure-core tests are portable. Linux-backed integration testing
-will be added with the Core NATS server harness.
+The current pure-core tests are portable. An opt-in Core NATS acceptance run
+against a pinned `nats-server` Docker image is available with:
+
+```sh
+./scripts/runtest-server.sh
+```
+
+The script requires Docker and is intentionally outside `dune runtest`; set
+`NATS_SERVER_IMAGE` to try another server image. Cluster, TLS, and reconnect
+scenarios will be added as the corresponding implementation phases land.
 
 The project uses Dune package management. No compatibility layer for NATS
 Streaming is planned.

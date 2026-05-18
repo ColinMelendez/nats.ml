@@ -60,8 +60,10 @@ bounded TLS handshake before the NATS handshake, and bare advertisements
 inherit the active session scheme. The caller-owned TLS configuration supplies
 peer identity and SNI; the existing server-required TLS upgrade path remains
 available through the same configuration. Reconnect jitter is configurable,
-zero by default, and applied only to delayed retries; real-server acceptance
-tests remain ahead of the G2 stability gate. The recovery bridge
+zero by default, and applied only to delayed retries. An opt-in Docker-backed
+real-server acceptance harness now covers single-server pub/sub, request/reply,
+flush, and close behavior; cluster, TLS, and reconnect acceptance remain ahead
+of the G2 stability gate. The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
 connection seam; replays INFO/TLS/CONNECT and subscriptions; emits
@@ -323,8 +325,9 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
   retries, replay the handshake and subscriptions, emit non-terminal
   `Disconnected`/`Reconnected` events, and defer unsubscribe/auto-unsubscribe
   commands until reconnection completes.
-- Exercise candidate selection and discovery against a real server. Do not add
-  silent Core publish replay or pending-request replay.
+- Exercise candidate selection and discovery against a cluster/failure
+  injection harness once the single-server acceptance path is established. Do
+  not add silent Core publish replay or pending-request replay.
 - Pending requests and flush barriers now fail structurally and exactly once
   on disconnect, cancellation, timeout, and drain; they never silently replay.
 - Enforce bounded subscription and event queues with an explicit overflow
@@ -335,6 +338,12 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
   best-effort-drain policy, and make that policy testable.
 
 ### Acceptance tests against `nats-server`
+
+The opt-in `scripts/runtest-server.sh` harness currently covers the basic
+single-server publish/subscribe, request/reply, flush, and close contract. It
+uses a private executable and is not part of the default Dune test alias. The
+remaining scenarios below require server configuration, a cluster, or
+failure-injection control that a lone `nats-server` process cannot provide.
 
 - Core publish/subscribe, queue-group load balancing, headers, and replies.
 - Request success, timeout, no responders, cancellation, and disconnect race.
