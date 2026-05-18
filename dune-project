@@ -32,4 +32,5 @@
   cstruct
   tls-eio
   mtime
+  (eio_main :with-test)
   (windtrap :with-test)))

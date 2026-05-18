@@ -1,0 +1,3 @@
+(executable
+ (name server_acceptance)
+ (libraries nats nats-eio eio eio_main))
