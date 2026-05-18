@@ -62,11 +62,11 @@ peer identity and SNI; the existing server-required TLS upgrade path remains
 available through the same configuration. Reconnect jitter is configurable,
 zero by default, and applied only to delayed retries. An opt-in Docker-backed
 real-server acceptance harness now covers single-server pub/sub, request/reply,
-flush, and close behavior; cluster, TLS, and reconnect acceptance remain ahead
-of the G2 stability gate. Authentication capabilities now cover anonymous,
-token, username/password, NKey, and JWT credentials; nonce signing is repeated
-for every INFO, while private-key parsing and real-server auth acceptance remain
-later work. The recovery bridge
+flush, close, and optional username/password authentication; cluster, TLS, and
+reconnect acceptance remain ahead of the G2 stability gate. Authentication
+capabilities now cover anonymous, token, username/password, NKey, and JWT
+credentials; nonce signing is repeated for every INFO, while private-key
+parsing and NKey/JWT server acceptance remain later work. The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
 connection seam; replays INFO/TLS/CONNECT and subscriptions; emits
