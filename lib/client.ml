@@ -398,8 +398,7 @@ let outgoing_connect state ~(credentials : Connect.t) ~tls_required =
           protocol = Config.protocol state.config;
           echo = not (Config.no_echo state.config);
           headers = Config.headers state.config;
-          no_responders =
-            Config.no_responders state.config && Info.no_responders info;
+          no_responders = Config.no_responders state.config && Info.headers info;
           auth_token = credentials.auth_token;
           user = credentials.user;
           pass = credentials.pass;

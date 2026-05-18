@@ -22,6 +22,12 @@ let info_wire =
   ^ "\"proto\":1,\"max_payload\":100,\"headers\":true,"
   ^ "\"no_responders\":true,\"connect_urls\":[]}" ^ "\r\n"
 
+let headers_only_info_wire =
+  "INFO {\"max_payload\":100,\"headers\":true,\"connect_urls\":[]}" ^ "\r\n"
+
+let no_headers_info_wire =
+  "INFO {\"max_payload\":100,\"headers\":false,\"connect_urls\":[]}" ^ "\r\n"
+
 let client_at_info () =
   let client = Nats.Client.v Nats.Config.default in
   let reader = Bytesrw.Bytes.Reader.of_string info_wire in
@@ -106,6 +112,64 @@ let () =
               | Ok (Nats.Op.Connect json) ->
                   equal string
                     "{\"verbose\":false,\"pedantic\":false,\"tls_required\":true,\"lang\":\"ocaml\",\"version\":\"0.1.0\",\"protocol\":1,\"echo\":true,\"headers\":true,\"no_responders\":true}"
+                    json
+              | Ok _ -> fail "expected CONNECT"
+              | Error error -> fail_with Nats.Codec.pp_error error)
+          | _ -> fail "expected one CONNECT output");
+      test "CONNECT opts into no responders with header negotiation alone"
+        (fun () ->
+          let client = Nats.Client.v Nats.Config.default in
+          let reader = Bytesrw.Bytes.Reader.of_string headers_only_info_wire in
+          let received =
+            expect_client
+              (Nats.Client.incoming ~eod:true client ~now:Mtime.min_stamp reader)
+          in
+          let connected =
+            expect_client
+              (Nats.Client.outgoing received.state
+                 (Nats.Client.Connect
+                    {
+                      credentials = Nats.Client.Connect.v ();
+                      tls_required = false;
+                    }))
+          in
+          match connected.output with
+          | [ wire ] -> (
+              match
+                Nats.Codec.read ~eod:true (Bytesrw.Bytes.Reader.of_string wire)
+              with
+              | Ok (Nats.Op.Connect json) ->
+                  equal string
+                    "{\"verbose\":false,\"pedantic\":false,\"tls_required\":false,\"lang\":\"ocaml\",\"version\":\"0.1.0\",\"protocol\":1,\"echo\":true,\"headers\":true,\"no_responders\":true}"
+                    json
+              | Ok _ -> fail "expected CONNECT"
+              | Error error -> fail_with Nats.Codec.pp_error error)
+          | _ -> fail "expected one CONNECT output");
+      test "CONNECT disables no responders without header negotiation"
+        (fun () ->
+          let client = Nats.Client.v Nats.Config.default in
+          let reader = Bytesrw.Bytes.Reader.of_string no_headers_info_wire in
+          let received =
+            expect_client
+              (Nats.Client.incoming ~eod:true client ~now:Mtime.min_stamp reader)
+          in
+          let connected =
+            expect_client
+              (Nats.Client.outgoing received.state
+                 (Nats.Client.Connect
+                    {
+                      credentials = Nats.Client.Connect.v ();
+                      tls_required = false;
+                    }))
+          in
+          match connected.output with
+          | [ wire ] -> (
+              match
+                Nats.Codec.read ~eod:true (Bytesrw.Bytes.Reader.of_string wire)
+              with
+              | Ok (Nats.Op.Connect json) ->
+                  equal string
+                    "{\"verbose\":false,\"pedantic\":false,\"tls_required\":false,\"lang\":\"ocaml\",\"version\":\"0.1.0\",\"protocol\":1,\"echo\":true,\"headers\":true,\"no_responders\":false}"
                     json
               | Ok _ -> fail "expected CONNECT"
               | Error error -> fail_with Nats.Codec.pp_error error)
