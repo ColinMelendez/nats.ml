@@ -12,6 +12,31 @@ let expect_subject_reply delivery =
   | Some subject -> subject
   | None -> failf "request responder received no reply subject"
 
+let safe_credential value =
+  String.length value > 0
+  && String.for_all
+       (fun character ->
+         let code = Char.code character in
+         (code >= Char.code 'A' && code <= Char.code 'Z')
+         || (code >= Char.code 'a' && code <= Char.code 'z')
+         || (code >= Char.code '0' && code <= Char.code '9')
+         || code = Char.code '_'
+         || code = Char.code '-')
+       value
+
+let auth () =
+  match (Sys.getenv_opt "NATS_TEST_USER", Sys.getenv_opt "NATS_TEST_PASS") with
+  | None, None -> None
+  | Some user, Some pass when safe_credential user && safe_credential pass ->
+      Some (Nats.Auth.user_pass ~user ~pass)
+  | Some _, Some _ ->
+      failf
+        "NATS_TEST_USER and NATS_TEST_PASS must be non-empty ASCII letters, \
+         digits, underscores, or hyphens"
+  | _ ->
+      failf
+        "NATS_TEST_USER and NATS_TEST_PASS must both be non-empty or both unset"
+
 let next_with_timeout ~clock ~timeout subscription =
   let timeout = Mtime.Span.to_float_ns timeout /. 1e9 in
   Eio.Fiber.first
@@ -31,9 +56,18 @@ let endpoint () =
   | Error error ->
       failf "invalid NATS_TEST_SERVER %S: %a" value Nats.Endpoint.pp_error error
 
-let connect ~sw ~net ~clock endpoint =
+let connect ~sw ~net ~clock ?config endpoint =
   expect_ok "connect"
-    (Nats_eio.Connection.connect ~sw ~net ~clock [ endpoint ])
+    (Nats_eio.Connection.connect ~sw ~net ~clock ?config [ endpoint ])
+
+let expect_auth_required ~sw ~net ~clock endpoint =
+  match Nats_eio.Connection.connect ~sw ~net ~clock [ endpoint ] with
+  | Error (Nats_eio.Error.Auth Nats.Auth.Auth_required) -> ()
+  | Ok connection ->
+      expect_ok "close anonymous connection"
+        (Nats_eio.Connection.close connection);
+      failf "anonymous connection succeeded against an auth server"
+  | Error error -> failf "anonymous connection: %s" (error_message error)
 
 let run env =
   Eio.Switch.run @@ fun sw ->
@@ -41,8 +75,15 @@ let run env =
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.mono_clock env in
   let timeout = Mtime.Span.(2 * s) in
-  let client = connect ~sw ~net ~clock endpoint in
-  let responder = connect ~sw ~net ~clock endpoint in
+  let auth = auth () in
+  let config =
+    match auth with
+    | None -> None
+    | Some auth ->
+        Some (expect_ok "auth config" (Nats_eio.Connection.Config.v ~auth ()))
+  in
+  let client = connect ~sw ~net ~clock ?config endpoint in
+  let responder = connect ~sw ~net ~clock ?config endpoint in
   let events_subject = Nats.Subject.literal "ocaml.integration.events" in
   let events_filter = Nats.Subject.Filter.literal "ocaml.integration.events" in
   let subscription =
@@ -53,8 +94,7 @@ let run env =
     (Nats_eio.Connection.publish responder events_subject "hello");
   expect_ok "publish flush" (Nats_eio.Connection.flush responder);
   let delivery =
-    expect_ok "delivery"
-      (next_with_timeout ~clock ~timeout subscription)
+    expect_ok "delivery" (next_with_timeout ~clock ~timeout subscription)
   in
   if not (String.equal (Nats.Message.payload delivery.message) "hello") then
     failf "delivery payload was %S" (Nats.Message.payload delivery.message);
@@ -94,14 +134,18 @@ let run env =
   print_endline "flush: ok";
   expect_ok "close responder" (Nats_eio.Connection.close responder);
   expect_ok "close client" (Nats_eio.Connection.close client);
-  print_endline "close: ok"
+  print_endline "close: ok";
+  match auth with
+  | None -> ()
+  | Some _ ->
+      expect_auth_required ~sw ~net ~clock endpoint;
+      print_endline "auth: user_pass"
 
 let () =
-  try Eio_main.run run
-  with Failure message ->
-    prerr_endline ("server acceptance failed: " ^ message);
-    exit 1
+  try Eio_main.run run with
+  | Failure message ->
+      prerr_endline ("server acceptance failed: " ^ message);
+      exit 1
   | error ->
-      prerr_endline
-        ("server acceptance failed: " ^ Printexc.to_string error);
+      prerr_endline ("server acceptance failed: " ^ Printexc.to_string error);
       exit 1

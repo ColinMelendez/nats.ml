@@ -5,6 +5,8 @@ script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 cd "$script_dir/.."
 
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
+auth_user=${NATS_TEST_USER-}
+auth_pass=${NATS_TEST_PASS-}
 container=
 log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-server.XXXXXX")
 
@@ -17,7 +19,24 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-container=$(docker run --detach --rm --publish 127.0.0.1::4222 "$image")
+if [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
+  if [ -z "$auth_user" ] || [ -z "$auth_pass" ]; then
+    echo "NATS_TEST_USER and NATS_TEST_PASS must both be non-empty" >&2
+    exit 1
+  fi
+  case "$auth_user$auth_pass" in
+    *[!A-Za-z0-9_-]*)
+      echo "NATS_TEST_USER and NATS_TEST_PASS may use only ASCII letters, digits, underscores, or hyphens" >&2
+      exit 1
+      ;;
+  esac
+  container=$(docker run --detach --rm \
+    --env NATS_TEST_USER --env NATS_TEST_PASS \
+    --volume "$script_dir/nats-server-auth.conf:/etc/nats/nats.conf:ro" \
+    --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf)
+else
+  container=$(docker run --detach --rm --publish 127.0.0.1::4222 "$image")
+fi
 port=
 attempt=0
 while [ "$attempt" -lt 30 ]; do

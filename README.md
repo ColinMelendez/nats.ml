@@ -30,7 +30,12 @@ against a pinned `nats-server` Docker image is available with:
 
 The script requires Docker and is intentionally outside `dune runtest`; set
 `NATS_SERVER_IMAGE` to try another server image. Cluster, TLS, and reconnect
-scenarios will be added as the corresponding implementation phases land.
+scenarios will be added as the corresponding implementation phases land. To
+exercise username/password authentication, set both `NATS_TEST_USER` and
+`NATS_TEST_PASS` to non-empty ephemeral credentials before running the script;
+the credentials must use only ASCII letters, digits, underscores, and hyphens.
+The harness then requires anonymous connection rejection as well as successful
+authenticated traffic.
 
 The project uses Dune package management. No compatibility layer for NATS
 Streaming is planned.
