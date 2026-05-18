@@ -561,22 +561,27 @@ result for subsequent calls rather than reporting a later false success.
 
 ### Authentication and transports
 
-The core needs only the data required to construct CONNECT and to sign a server
-nonce. It should accept authentication data or an explicit one-shot signing
-function such as:
+The core now exposes a reusable `Nats.Auth.t` capability for the data required
+to construct CONNECT and sign a server nonce. Its common constructors are:
 
 ```text
 Auth.none
 Auth.token
 Auth.user_pass
-Auth.nkey_sign : sign:(nonce:string -> (signature:string, error) result) -> t
-Auth.jwt       : jwt:string -> sign:(nonce:string -> result) -> t
+Auth.nkey : nkey:string -> sign:signer -> t
+Auth.jwt  : jwt:string -> nkey:string -> sign:signer -> t
 ```
 
-Private key parsing/storage belongs in an optional authentication module. Do
-not store a signing closure or PRNG state in `Client.t`; the Eio adapter keeps
-the credential capability and supplies the signature when constructing a
-CONNECT operation. The Eio adapter now owns the TCP-to-TLS transition: it reads
+`Auth.connect` derives a fresh low-level `Client.Connect.t` from each server
+`INFO`; this makes reconnects use the new nonce rather than reusing a stale
+signature. Signer failures, missing nonces, and an authentication-required
+anonymous connection are structured local errors. The Eio adapter stores the
+capability in its configuration and invokes it after the settled `INFO`, while
+`Client.t` stores neither the capability nor a signer. Private key
+parsing/storage belongs in an optional authentication module, and the signer
+contract expects the caller to provide any required signature encoding.
+
+The Eio adapter now owns the TCP-to-TLS transition: it reads
 the initial plaintext `INFO`, pauses and joins its reader, wraps the flow with
 the configured TLS client, waits for the post-TLS `INFO`, and only then sends
 `CONNECT` with `tls_required=true`. The pure core sees only that final protocol
@@ -587,7 +592,8 @@ caller supplies the TLS peer configuration and must install the TLS RNG; host
 name/SNI policy is therefore part of that configuration. Multi-endpoint TCP
 dialing policy, server discovery, and explicit endpoint TLS are implemented in
 the Eio endpoint planner; peer identity/SNI selection remains caller-owned.
-Real-server TLS/reconnect acceptance remains a later Core milestone.
+Real-server authentication, TLS, and reconnect acceptance remain later Core
+milestones.
 
 ### JetStream, KV, Object Store, and Services
 

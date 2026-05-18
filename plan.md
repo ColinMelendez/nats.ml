@@ -63,7 +63,10 @@ available through the same configuration. Reconnect jitter is configurable,
 zero by default, and applied only to delayed retries. An opt-in Docker-backed
 real-server acceptance harness now covers single-server pub/sub, request/reply,
 flush, and close behavior; cluster, TLS, and reconnect acceptance remain ahead
-of the G2 stability gate. The recovery bridge
+of the G2 stability gate. Authentication capabilities now cover anonymous,
+token, username/password, NKey, and JWT credentials; nonce signing is repeated
+for every INFO, while private-key parsing and real-server auth acceptance remain
+later work. The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
 connection seam; replays INFO/TLS/CONNECT and subscriptions; emits
@@ -332,8 +335,9 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
   on disconnect, cancellation, timeout, and drain; they never silently replay.
 - Enforce bounded subscription and event queues with an explicit overflow
   policy. Distinguish local slow consumers from remote/server disconnects.
-- Add token, username/password, and explicit nonce-signing hooks without
-  storing private keys or signing closures in `Client.t`.
+- Keep the implemented `Nats.Auth` boundary free of private-key parsing and
+  ensure signer capabilities remain outside `Client.t`; add crypto-backed
+  credential helpers only when a concrete dependency boundary is justified.
 - Map parent-switch cancellation to a defined immediate-close or
   best-effort-drain policy, and make that policy testable.
 
