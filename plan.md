@@ -59,8 +59,9 @@ remaining configured seeds. Explicit `tls://` endpoint dialing now performs a
 bounded TLS handshake before the NATS handshake, and bare advertisements
 inherit the active session scheme. The caller-owned TLS configuration supplies
 peer identity and SNI; the existing server-required TLS upgrade path remains
-available through the same configuration. Retry jitter and real-server
-acceptance tests remain ahead of the G2 stability gate. The recovery bridge
+available through the same configuration. Reconnect jitter is configurable,
+zero by default, and applied only to delayed retries; real-server acceptance
+tests remain ahead of the G2 stability gate. The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
 connection seam; replays INFO/TLS/CONNECT and subscriptions; emits
@@ -322,9 +323,8 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
   retries, replay the handshake and subscriptions, emit non-terminal
   `Disconnected`/`Reconnected` events, and defer unsubscribe/auto-unsubscribe
   commands until reconnection completes.
-- Add retry jitter around the recovery bridge and exercise candidate selection
-  and discovery against a real server. Do not add silent Core publish replay
-  or pending-request replay.
+- Exercise candidate selection and discovery against a real server. Do not add
+  silent Core publish replay or pending-request replay.
 - Pending requests and flush barriers now fail structurally and exactly once
   on disconnect, cancellation, timeout, and drain; they never silently replay.
 - Enforce bounded subscription and event queues with an explicit overflow

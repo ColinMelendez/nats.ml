@@ -455,8 +455,9 @@ non-terminal `Disconnected` and `Reconnected` events, defers unsubscribe and
 auto-unsubscribe commands until the replacement session is connected, and
 leaves ordinary publishes and pending requests unreplayed. Explicit `tls://`
 candidates perform bounded TLS before the NATS handshake, while peer identity
-and SNI remain caller-owned through `Tls.Config.client`. Retry jitter and
-real-server acceptance remain later work.
+and SNI remain caller-owned through `Tls.Config.client`. Delayed reconnects
+support bounded configurable jitter while retaining a deterministic backoff
+base; real-server acceptance remains later work.
 
 The normal user operations should be direct-style and result-returning:
 
@@ -538,8 +539,8 @@ replaying them. Unsubscribe and auto-unsubscribe commands received during the
 handshake are deferred until `Reconnected`; `close` wins over recovery. A
 redial or handshake failure is retried when the configured policy permits it;
 exhaustion terminates the event stream with a structured error without
-emitting a second facade disconnect event. Retry jitter and any opt-in
-retryable request policy remain future extensions.
+emitting a second facade disconnect event. Any opt-in retryable request policy
+remains a future extension.
 
 Buffered publish replay is inherently at-least-once at the transport boundary:
 a publish may have reached the server just before a disconnect and then be
@@ -586,8 +587,7 @@ caller supplies the TLS peer configuration and must install the TLS RNG; host
 name/SNI policy is therefore part of that configuration. Multi-endpoint TCP
 dialing policy, server discovery, and explicit endpoint TLS are implemented in
 the Eio endpoint planner; peer identity/SNI selection remains caller-owned.
-Retry jitter and real-server TLS/reconnect acceptance remain later Core
-milestones.
+Real-server TLS/reconnect acceptance remains a later Core milestone.
 
 ### JetStream, KV, Object Store, and Services
 
