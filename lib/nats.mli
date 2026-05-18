@@ -30,6 +30,9 @@ module Config = Config
 module Info = Info
 (** Typed server information received in [INFO]. *)
 
+module Auth = Auth
+(** Reusable authentication capabilities for Core NATS handshakes. *)
+
 module Error = Error
 (** Structured errors from the client state machine. *)
 

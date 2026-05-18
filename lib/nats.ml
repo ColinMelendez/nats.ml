@@ -8,6 +8,7 @@ module Packet = Packet
 module Codec = Codec
 module Config = Config
 module Info = Info
+module Auth = Auth
 module Error = Error
 module Event = Event
 module Client = Client
