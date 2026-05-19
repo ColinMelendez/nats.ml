@@ -1288,23 +1288,32 @@ let apply_outgoing t command =
               fail_waiter resolver error;
               Error error
           | Some sid -> (
+              let unsubscribe_request () =
+                let result =
+                  if t.closed then Error Error.Closed
+                  else if
+                    t.pending_commands >= t.config.Config.command_capacity
+                  then
+                    Error
+                      (Error.Command_queue_full
+                         { capacity = t.config.Config.command_capacity })
+                  else
+                    let promise, resolver = Eio.Promise.create () in
+                    t.pending_commands <- t.pending_commands + 1;
+                    Eio.Stream.add t.work
+                      (Command (Unsubscribe { sid; resolver }));
+                    Eio.Promise.await promise
+                in
+                match result with
+                | Ok () -> Ok ()
+                | Error error ->
+                    close_subscription t sid error;
+                    Error error
+              in
               let subscription =
                 Subscription.create ~sid
                   ~capacity:t.config.subscription_capacity
-                  ~unsubscribe_request:(fun () ->
-                    if t.closed then Error Error.Closed
-                    else if
-                      t.pending_commands >= t.config.Config.command_capacity
-                    then
-                      Error
-                        (Error.Command_queue_full
-                           { capacity = t.config.Config.command_capacity })
-                    else
-                      let promise, resolver = Eio.Promise.create () in
-                      t.pending_commands <- t.pending_commands + 1;
-                      Eio.Stream.add t.work
-                        (Command (Unsubscribe { sid; resolver }));
-                      Eio.Promise.await promise)
+                  ~unsubscribe_request
                   ~auto_unsubscribe_request:(fun ~max_messages ->
                     if t.closed then Error Error.Closed
                     else if
@@ -1562,11 +1571,14 @@ let apply_outgoing t command =
   | Unsubscribe { sid; resolver } -> (
       match Nats.Client.outgoing t.state (Nats.Client.Unsubscribe { sid }) with
       | Error error ->
-          fail_waiter resolver (command_error error);
+          let error = command_error error in
+          close_subscription t sid error;
+          fail_waiter resolver error;
           Ok ()
       | Ok transition -> (
           match apply_transition t transition with
           | Error error ->
+              close_subscription t sid error;
               fail_waiter resolver error;
               Error error
           | Ok () ->
