@@ -7,6 +7,10 @@ let expect_ok label = function
   | Ok value -> value
   | Error error -> failf "%s: %s" label (error_message error)
 
+let expect_header_ok = function
+  | Ok value -> value
+  | Error error -> failf "invalid test header: %a" Nats.Header.pp_error error
+
 let expect_subject_reply delivery =
   match Nats.Message.reply_to delivery.Nats_eio.Subscription.message with
   | Some subject -> subject
@@ -44,6 +48,37 @@ let next_with_timeout ~clock ~timeout subscription =
     (fun () ->
       Eio.Time.Mono.sleep clock timeout;
       Error Nats_eio.Error.Timeout)
+
+let collect_queue_payloads ~sw ~clock ~timeout ~expected worker_one worker_two =
+  let payloads = Eio.Stream.create expected in
+  let collect subscription =
+    let finished = ref false in
+    while not !finished do
+      match Nats_eio.Subscription.next subscription with
+      | Ok delivery ->
+          Eio.Stream.add payloads (Nats.Message.payload delivery.message)
+      | Error Nats_eio.Error.Closed -> finished := true
+      | Error error -> failf "queue delivery: %s" (error_message error)
+    done
+  in
+  Eio.Fiber.fork ~sw (fun () -> collect worker_one);
+  Eio.Fiber.fork ~sw (fun () -> collect worker_two);
+  let received = ref [] in
+  Eio.Fiber.first
+    (fun () ->
+      for _ = 1 to expected do
+        received := Eio.Stream.take payloads :: !received
+      done)
+    (fun () ->
+      Eio.Time.Mono.sleep clock (Mtime.Span.to_float_ns timeout /. 1e9);
+      failf "queue group timed out after receiving %d of %d deliveries"
+        (List.length !received) expected);
+  List.rev !received
+
+let expect_headers delivery expected =
+  let actual = Nats.Header.find_all "x-trace" (Nats.Message.headers delivery) in
+  if not (List.equal String.equal actual expected) then
+    failf "header values were [%s]" (String.concat ", " actual)
 
 let endpoint () =
   let value =
@@ -84,6 +119,8 @@ let run env =
   in
   let client = connect ~sw ~net ~clock ?config endpoint in
   let responder = connect ~sw ~net ~clock ?config endpoint in
+  let worker_one = connect ~sw ~net ~clock ?config endpoint in
+  let worker_two = connect ~sw ~net ~clock ?config endpoint in
   let events_subject = Nats.Subject.literal "ocaml.integration.events" in
   let events_filter = Nats.Subject.Filter.literal "ocaml.integration.events" in
   let subscription =
@@ -99,6 +136,63 @@ let run env =
   if not (String.equal (Nats.Message.payload delivery.message) "hello") then
     failf "delivery payload was %S" (Nats.Message.payload delivery.message);
   print_endline "pubsub: ok";
+  let headers =
+    expect_header_ok
+      (Nats.Header.of_list [ ("X-Trace", "one"); ("x-trace", "two") ])
+  in
+  let headers_subject = Nats.Subject.literal "ocaml.integration.headers" in
+  let headers_filter =
+    Nats.Subject.Filter.literal "ocaml.integration.headers"
+  in
+  let headers_subscription =
+    expect_ok "headers subscribe"
+      (Nats_eio.Connection.subscribe client headers_filter)
+  in
+  expect_ok "headers subscribe flush" (Nats_eio.Connection.flush client);
+  expect_ok "headers publish"
+    (Nats_eio.Connection.publish responder ~headers headers_subject "payload");
+  expect_ok "headers publish flush" (Nats_eio.Connection.flush responder);
+  let headers_delivery =
+    expect_ok "headers delivery"
+      (next_with_timeout ~clock ~timeout headers_subscription)
+  in
+  if
+    not (String.equal (Nats.Message.payload headers_delivery.message) "payload")
+  then
+    failf "header delivery payload was %S"
+      (Nats.Message.payload headers_delivery.message);
+  expect_headers headers_delivery.message [ "one"; "two" ];
+  print_endline "headers: ok";
+  let queue_subject = Nats.Subject.literal "ocaml.integration.queue" in
+  let queue_filter = Nats.Subject.Filter.literal "ocaml.integration.queue" in
+  let queue_group = Nats.Queue_group.literal "ocaml.integration.workers" in
+  let worker_one_subscription =
+    expect_ok "worker one subscribe"
+      (Nats_eio.Connection.subscribe worker_one ~queue_group queue_filter)
+  in
+  let worker_two_subscription =
+    expect_ok "worker two subscribe"
+      (Nats_eio.Connection.subscribe worker_two ~queue_group queue_filter)
+  in
+  expect_ok "worker one subscribe flush" (Nats_eio.Connection.flush worker_one);
+  expect_ok "worker two subscribe flush" (Nats_eio.Connection.flush worker_two);
+  let queue_payloads = [ "one"; "two"; "three"; "four" ] in
+  List.iter
+    (fun payload ->
+      expect_ok "queue publish"
+        (Nats_eio.Connection.publish responder queue_subject payload))
+    queue_payloads;
+  expect_ok "queue publish flush" (Nats_eio.Connection.flush responder);
+  let delivered_payloads =
+    List.sort String.compare
+      (collect_queue_payloads ~sw ~clock ~timeout
+         ~expected:(List.length queue_payloads)
+         worker_one_subscription worker_two_subscription)
+  in
+  let expected_payloads = List.sort String.compare queue_payloads in
+  if not (List.equal String.equal delivered_payloads expected_payloads) then
+    failf "queue group delivered [%s]" (String.concat ", " delivered_payloads);
+  print_endline "queue_group: ok";
   let request_subject = Nats.Subject.literal "ocaml.integration.request" in
   let request_filter =
     Nats.Subject.Filter.literal "ocaml.integration.request"
@@ -130,9 +224,21 @@ let run env =
   if not (String.equal (Nats.Message.payload response) "pong") then
     failf "response payload was %S" (Nats.Message.payload response);
   print_endline "request: ok";
+  let no_responder_subject =
+    Nats.Subject.literal "ocaml.integration.no_responder"
+  in
+  (match
+     Nats_eio.Connection.request ~timeout client no_responder_subject "ping"
+   with
+  | Error Nats_eio.Error.No_responders -> print_endline "no_responders: ok"
+  | Ok response ->
+      failf "no-responder request returned %S" (Nats.Message.payload response)
+  | Error error -> failf "no-responder request: %s" (error_message error));
   expect_ok "flush" (Nats_eio.Connection.flush client);
   print_endline "flush: ok";
   expect_ok "close responder" (Nats_eio.Connection.close responder);
+  expect_ok "close worker one" (Nats_eio.Connection.close worker_one);
+  expect_ok "close worker two" (Nats_eio.Connection.close worker_two);
   expect_ok "close client" (Nats_eio.Connection.close client);
   print_endline "close: ok";
   match auth with
