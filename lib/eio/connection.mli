@@ -64,6 +64,10 @@ end
 type t
 type error = Error.t
 
+val fresh_inbox : t -> Nats.Subject.t
+(** [fresh_inbox connection] allocates a fresh reply subject under the
+    connection's configured inbox prefix. *)
+
 val connect :
   sw:Eio.Switch.t ->
   net:_ Eio.Net.t ->

@@ -581,14 +581,15 @@ let transport_error t error =
 
 let now t = t.clock.now ()
 let inbox_counter = Atomic.make 0
+let inbox_process_nonce = Random.State.bits (Random.State.make_self_init ())
 
 let fresh_inbox t =
   let sequence = Atomic.fetch_and_add inbox_counter 1 in
   let timestamp = Mtime.to_uint64_ns (now t) in
   Nats.Subject.literal
-    (Format.asprintf "%s.%Ld.%d"
+    (Format.asprintf "%s.%Ld.%d.%d"
        (Nats.Subject.to_string t.config.Config.inbox_prefix)
-       timestamp sequence)
+       timestamp inbox_process_nonce sequence)
 
 let write_outputs t output =
   let rec loop = function
