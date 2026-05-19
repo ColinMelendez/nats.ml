@@ -62,6 +62,7 @@ module Subscription : sig
 end
 
 type t
+type error = Error.t
 
 val connect :
   sw:Eio.Switch.t ->

@@ -458,6 +458,7 @@ type flow =
       -> flow
 
 type endpoint = Nats.Endpoint.t
+type error = Error.t
 type dial = unit -> (flow * endpoint, Error.t) result
 type transport = { mutable flow : flow; mutable closed : bool }
 

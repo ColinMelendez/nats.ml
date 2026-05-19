@@ -28,6 +28,7 @@
   (ocaml (>= 5.2))
   nats
   bytesrw
+  jsont
   eio
   cstruct
   tls-eio
