@@ -3,9 +3,20 @@ let failf format =
 
 let error_message error = Format.asprintf "%a" Nats_eio.Error.pp error
 
+let jetstream_error_message error =
+  Format.asprintf "%a" Nats_eio.Jetstream.Error.pp error
+
 let expect_ok label = function
   | Ok value -> value
   | Error error -> failf "%s: %s" label (error_message error)
+
+let expect_jetstream_ok label = function
+  | Ok value -> value
+  | Error error -> failf "%s: %s" label (jetstream_error_message error)
+
+let expect_jetstream_config_ok label = function
+  | Ok value -> value
+  | Error error -> failf "%s: %a" label Nats_eio.Jetstream.Error.pp_config error
 
 let expect_header_ok = function
   | Ok value -> value
@@ -79,6 +90,105 @@ let expect_headers delivery expected =
   let actual = Nats.Header.find_all "x-trace" (Nats.Message.headers delivery) in
   if not (List.equal String.equal actual expected) then
     failf "header values were [%s]" (String.concat ", " actual)
+
+let safe_identifier value =
+  String.length value > 0
+  && String.for_all
+       (fun character ->
+         let code = Char.code character in
+         (code >= Char.code 'A' && code <= Char.code 'Z')
+         || (code >= Char.code 'a' && code <= Char.code 'z')
+         || (code >= Char.code '0' && code <= Char.code '9')
+         || code = Char.code '_'
+         || code = Char.code '-')
+       value
+
+let run_jetstream ~client ~timeout =
+  let jetstream =
+    expect_jetstream_ok "jetstream" (Nats_eio.Jetstream.v client)
+  in
+  let run_id =
+    match Sys.getenv_opt "NATS_TEST_JETSTREAM_RUN_ID" with
+    | Some value when safe_identifier value -> value
+    | _ -> "direct"
+  in
+  let stream_name = "OCAML_TEST_STREAM_" ^ run_id in
+  let subject = Nats.Subject.literal "ocaml.integration.js.events" in
+  let filter = Nats.Subject.Filter.literal "ocaml.integration.js.events" in
+  let config =
+    expect_jetstream_config_ok "jetstream config"
+      (Nats_eio.Jetstream.Stream.Config.v ~name:stream_name ~subjects:[ filter ]
+         ~storage:Nats_eio.Jetstream.Stream.Config.Memory ())
+  in
+  let stream =
+    expect_jetstream_ok "jetstream stream create"
+      (Nats_eio.Jetstream.Stream.create jetstream config)
+  in
+  let deleted = ref false in
+  Fun.protect
+    ~finally:(fun () ->
+      if not !deleted then
+        match Nats_eio.Jetstream.Stream.delete stream with
+        | Ok () -> ()
+        | Error error ->
+            prerr_endline
+              (Format.asprintf "JetStream cleanup failed: %a"
+                 Nats_eio.Jetstream.Error.pp error))
+    (fun () ->
+      let initial_info =
+        expect_jetstream_ok "jetstream initial stream info"
+          (Nats_eio.Jetstream.Stream.info stream)
+      in
+      if
+        not
+          (Int64.equal
+             (Nats_eio.Jetstream.Stream.Info.messages initial_info)
+             0L)
+      then failf "new JetStream stream was not empty";
+      let first_ack =
+        expect_jetstream_ok "jetstream publish"
+          (Nats_eio.Jetstream.publish ~timeout ~msg_id:"integration-message-1"
+             jetstream subject "hello")
+      in
+      if
+        not
+          (String.equal
+             (Nats_eio.Jetstream.Publish_ack.stream first_ack)
+             stream_name)
+      then failf "JetStream publish ack named the wrong stream";
+      if Nats_eio.Jetstream.Publish_ack.duplicate first_ack then
+        failf "first JetStream publish was marked duplicate";
+      let duplicate_ack =
+        expect_jetstream_ok "jetstream duplicate publish"
+          (Nats_eio.Jetstream.publish ~timeout ~msg_id:"integration-message-1"
+             jetstream subject "hello")
+      in
+      if not (Nats_eio.Jetstream.Publish_ack.duplicate duplicate_ack) then
+        failf "duplicate JetStream publish was not marked duplicate";
+      if
+        not
+          (Int64.equal
+             (Nats_eio.Jetstream.Publish_ack.sequence duplicate_ack)
+             (Nats_eio.Jetstream.Publish_ack.sequence first_ack))
+      then failf "duplicate JetStream publish changed its sequence";
+      let final_info =
+        expect_jetstream_ok "jetstream final stream info"
+          (Nats_eio.Jetstream.Stream.info stream)
+      in
+      if
+        not
+          (Int64.equal (Nats_eio.Jetstream.Stream.Info.messages final_info) 1L)
+      then failf "JetStream stream retained the wrong message count";
+      if
+        not
+          (Int64.equal
+             (Nats_eio.Jetstream.Publish_ack.sequence first_ack)
+             (Nats_eio.Jetstream.Stream.Info.last_sequence final_info))
+      then failf "JetStream stream info disagreed with the publish ack";
+      expect_jetstream_ok "jetstream stream delete"
+        (Nats_eio.Jetstream.Stream.delete stream);
+      deleted := true;
+      print_endline "jetstream: ok")
 
 let endpoint () =
   let value =
@@ -236,6 +346,9 @@ let run env =
   | Error error -> failf "no-responder request: %s" (error_message error));
   expect_ok "flush" (Nats_eio.Connection.flush client);
   print_endline "flush: ok";
+  (match Sys.getenv_opt "NATS_TEST_JETSTREAM" with
+  | Some "1" -> run_jetstream ~client ~timeout
+  | _ -> ());
   expect_ok "close responder" (Nats_eio.Connection.close responder);
   expect_ok "close worker one" (Nats_eio.Connection.close worker_one);
   expect_ok "close worker two" (Nats_eio.Connection.close worker_two);

@@ -7,6 +7,8 @@ cd "$script_dir/.."
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
 auth_user=${NATS_TEST_USER-}
 auth_pass=${NATS_TEST_PASS-}
+jetstream=${NATS_TEST_JETSTREAM-}
+jetstream_run_id=${NATS_TEST_JETSTREAM_RUN_ID:-$$}
 container=
 log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-server.XXXXXX")
 
@@ -18,6 +20,22 @@ cleanup() {
 }
 
 trap cleanup EXIT INT TERM
+
+case "$jetstream" in
+  ""|0) jetstream_arg= ;;
+  1) jetstream_arg=-js ;;
+  *)
+    echo "NATS_TEST_JETSTREAM must be 1 when set" >&2
+    exit 1
+    ;;
+esac
+
+case "$jetstream_run_id" in
+  ""|*[!A-Za-z0-9_-]*)
+    echo "NATS_TEST_JETSTREAM_RUN_ID may use only ASCII letters, digits, underscores, or hyphens" >&2
+    exit 1
+    ;;
+esac
 
 if [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
   if [ -z "$auth_user" ] || [ -z "$auth_pass" ]; then
@@ -33,9 +51,9 @@ if [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
   container=$(docker run --detach --rm \
     --env NATS_TEST_USER --env NATS_TEST_PASS \
     --volume "$script_dir/nats-server-auth.conf:/etc/nats/nats.conf:ro" \
-    --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf)
+    --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf $jetstream_arg)
 else
-  container=$(docker run --detach --rm --publish 127.0.0.1::4222 "$image")
+  container=$(docker run --detach --rm --publish 127.0.0.1::4222 "$image" $jetstream_arg)
 fi
 port=
 attempt=0
@@ -71,7 +89,8 @@ if [ "$ready" -ne 1 ]; then
   exit 1
 fi
 
-if NATS_TEST_SERVER="$server" nix develop -c dune exec \
+if NATS_TEST_SERVER="$server" NATS_TEST_JETSTREAM="$jetstream" \
+    NATS_TEST_JETSTREAM_RUN_ID="$jetstream_run_id" nix develop -c dune exec \
     test/server/server_acceptance.exe >"$log" 2>&1
 then
   cat "$log"
