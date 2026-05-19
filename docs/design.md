@@ -635,6 +635,14 @@ construct `$JS.API.*` subjects or parse JSON error strings. The server-version
 minimum for each feature should be checked and returned as a structured error,
 not hidden behind a generic request failure.
 
+The first implementation slice follows this boundary in `nats-eio`: a
+resource-free `Jetstream` capability uses `Jsont`/`bytesrw` at the Eio boundary,
+decodes management success/error envelopes, and exposes typed stream
+configuration, create/bind/info/delete, and durable publish acknowledgements.
+The management prefix is configurable for JetStream domains, while application
+subjects remain ordinary Core NATS subjects. Consumer, KV, Object Store, and
+Services APIs remain later layers over the same connection.
+
 ## 6. Testing and interoperability
 
 The protocol boundary should be tested as a black-box state machine, not only
@@ -653,7 +661,9 @@ through individual helper functions:
   without a network;
 - run black-box integration tests against a real `nats-server` for reconnect,
   cluster discovery, TLS/authentication, queue groups, JetStream, KV, Object
-  Store, and Services;
+  Store, and Services. The current opt-in Docker harness enables its
+  JetStream slice with `NATS_TEST_JETSTREAM=1` and covers stream management,
+  publish acknowledgements, duplicate message ids, and cleanup;
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 

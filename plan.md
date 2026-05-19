@@ -67,7 +67,12 @@ username/password authentication; cluster, TLS, and reconnect acceptance remain
 ahead of the G2 stability gate. Authentication capabilities now cover anonymous,
 token, username/password, NKey, and JWT credentials; nonce signing is repeated
 for every INFO, while private-key parsing and NKey/JWT server acceptance remain
-later work. The recovery bridge
+later work. The JetStream foundation now adds a typed, resource-free capability
+over the connection, stream configuration/info and create/bind/info/delete
+operations, publish acknowledgements with message ids, API error envelopes, and
+an opt-in real-server acceptance path for management, deduplication, and
+cleanup. Consumer, KV, Object Store, and Services surfaces remain later work.
+The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
 connection seam; replays INFO/TLS/CONNECT and subscriptions; emits
@@ -403,12 +408,16 @@ request/reply and subscription primitives.
 
 ### Workstream 4A — Typed API and management
 
-- Choose and document the typed JSON codec boundary.
-- Model stream and consumer configuration, info, API responses, and structured
-  JetStream errors separately from `Nats.Error`.
-- Implement stream create/update/delete/info/list and consumer management.
-- Implement publish acknowledgements, including server error/status fields and
-  message-id options where supported.
+- Use `Jsont` at the Eio/JetStream boundary with `bytesrw` string codecs;
+  management replies are decoded as success/error envelopes and unknown server
+  fields are skipped until update/list shapes require preservation.
+- The completed foundation models stream configuration/info, API responses, and
+  structured JetStream errors separately from `Nats.Error`; it implements stream
+  create/bind/delete/info and durable publish acknowledgements with message-id
+  options over application subjects.
+- Implement stream update/list and consumer management.
+- Extend publish acknowledgements with all server status fields and feature
+  gates where supported.
 - Gate features by server version and return structured unsupported-feature
   errors.
 
@@ -425,8 +434,10 @@ request/reply and subscription primitives.
 
 ### Acceptance tests
 
-- Stream and consumer management without hand-built `$JS.API.*` subjects.
-- Publish ack success, typed server errors, and message-id behavior.
+- The opt-in Docker harness covers stream create/info/delete, publish ack,
+  duplicate message ids, message counts, and cleanup without hand-built
+  `$JS.API.*` subjects; it runs in anonymous and username/password modes.
+- Add typed server-error assertions and consumer management.
 - Pull backpressure and cancellation against a real JetStream server.
 - Correct acknowledgement metadata and redelivery behavior.
 - Heartbeat/consumer failure handling and server-version gates.

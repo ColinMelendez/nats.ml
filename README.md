@@ -35,7 +35,17 @@ exercise username/password authentication, set both `NATS_TEST_USER` and
 `NATS_TEST_PASS` to non-empty ephemeral credentials before running the script;
 the credentials must use only ASCII letters, digits, underscores, and hyphens.
 The harness then requires anonymous connection rejection as well as successful
-authenticated traffic.
+authenticated traffic. To enable the JetStream acceptance slice, also set
+`NATS_TEST_JETSTREAM=1`; this starts the server with JetStream enabled and
+exercises stream management, publish acknowledgements, duplicate message ids,
+and cleanup. The JetStream test uses a per-run stream name; set
+`NATS_TEST_JETSTREAM_RUN_ID` only when a stable, safe identifier is useful for
+debugging.
+
+The first JetStream layer is available through `Nats_eio.Jetstream`: typed
+stream configuration/info and create/bind/info/delete operations, plus durable
+publish acknowledgements over ordinary Core NATS request/reply. Consumer, KV,
+Object Store, and Services APIs remain later implementation phases.
 
 The project uses Dune package management. No compatibility layer for NATS
 Streaming is planned.
