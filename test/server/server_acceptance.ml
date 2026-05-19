@@ -274,6 +274,111 @@ let run_jetstream ~client ~timeout =
                  (Nats_eio.Jetstream.Consumer.Info.num_pending consumer_info)
                  1L)
           then failf "JetStream consumer info reported the wrong pending count";
+          let one_message label = function
+            | [ message ] -> message
+            | messages ->
+                failf "%s returned %d messages"
+                  label (List.length messages)
+          in
+          let first_message =
+            one_message "JetStream fetch"
+              (expect_jetstream_ok "jetstream fetch"
+                 (Nats_eio.Jetstream.Consumer.fetch consumer ~batch:1))
+          in
+          if
+            not
+              (String.equal
+                 (Nats_eio.Jetstream.Msg.payload first_message)
+                 "hello")
+          then failf "JetStream fetch returned the wrong payload";
+          if
+            not
+              (Int64.equal
+                 (Nats_eio.Jetstream.Msg.stream_sequence first_message)
+                 1L)
+          then failf "JetStream fetch returned the wrong stream sequence";
+          if
+            not
+              (Int64.equal
+                 (Nats_eio.Jetstream.Msg.num_delivered first_message)
+                 1L)
+          then failf "JetStream fetch returned the wrong delivery count";
+          if
+            Int64.compare
+              (Nats_eio.Jetstream.Msg.timestamp first_message)
+              0L
+            <= 0
+          then failf "JetStream fetch returned an invalid timestamp";
+          expect_jetstream_ok "JetStream ack"
+            (Nats_eio.Jetstream.Msg.ack first_message);
+          (match
+             expect_jetstream_ok "empty JetStream fetch"
+               (Nats_eio.Jetstream.Consumer.fetch
+                  ~expires:Mtime.Span.(1 * ms)
+                  consumer ~batch:1)
+           with
+          | [] -> ()
+          | messages ->
+              failf "empty JetStream fetch returned %d messages"
+                (List.length messages));
+          let second_ack =
+            expect_jetstream_ok "second JetStream publish"
+              (Nats_eio.Jetstream.publish ~timeout ~msg_id:"integration-message-2"
+                 jetstream subject "world")
+          in
+          if Nats_eio.Jetstream.Publish_ack.duplicate second_ack then
+            failf "second JetStream publish was marked duplicate";
+          let second_message =
+            one_message "JetStream NAK fetch"
+              (expect_jetstream_ok "JetStream NAK fetch"
+                 (Nats_eio.Jetstream.Consumer.fetch consumer ~batch:1))
+          in
+          expect_jetstream_ok "JetStream NAK"
+            (Nats_eio.Jetstream.Msg.nak second_message);
+          let redelivered_message =
+            one_message "JetStream redelivery"
+              (expect_jetstream_ok "JetStream redelivery"
+                 (Nats_eio.Jetstream.Consumer.fetch consumer ~batch:1))
+          in
+          if
+            not
+              (Int64.equal
+                 (Nats_eio.Jetstream.Msg.num_delivered redelivered_message)
+                 2L)
+          then failf "JetStream NAK did not cause a redelivery";
+          expect_jetstream_ok "JetStream redelivery ack"
+            (Nats_eio.Jetstream.Msg.ack redelivered_message);
+          let max_bytes_ack =
+            expect_jetstream_ok "max-bytes JetStream publish"
+              (Nats_eio.Jetstream.publish ~timeout
+                 ~msg_id:"integration-message-max-bytes" jetstream subject
+                 "large")
+          in
+          if Nats_eio.Jetstream.Publish_ack.duplicate max_bytes_ack then
+            failf "max-bytes JetStream publish was marked duplicate";
+          (match
+             expect_jetstream_ok "max-bytes JetStream fetch"
+               (Nats_eio.Jetstream.Consumer.fetch
+                  ~expires:Mtime.Span.(250 * ms)
+                  ~max_bytes:1 consumer ~batch:1)
+           with
+          | [] -> ()
+          | messages ->
+              failf "max-bytes JetStream fetch returned %d messages"
+                (List.length messages));
+          let max_bytes_message =
+            one_message "max-bytes JetStream redelivery"
+              (expect_jetstream_ok "max-bytes JetStream redelivery"
+                 (Nats_eio.Jetstream.Consumer.fetch consumer ~batch:1))
+          in
+          if
+            not
+              (String.equal
+                 (Nats_eio.Jetstream.Msg.payload max_bytes_message)
+                 "large")
+          then failf "max-bytes JetStream fetch lost the pending message";
+          expect_jetstream_ok "max-bytes JetStream ack"
+            (Nats_eio.Jetstream.Msg.ack max_bytes_message);
           let rebound =
             expect_jetstream_ok "jetstream consumer bind"
               (Nats_eio.Jetstream.Consumer.bind stream ~name:consumer_name)
@@ -290,13 +395,13 @@ let run_jetstream ~client ~timeout =
           then failf "bound JetStream consumer named the wrong consumer";
           expect_jetstream_ok "jetstream consumer delete"
             (Nats_eio.Jetstream.Consumer.delete consumer);
+          consumer_deleted := true;
           (match Nats_eio.Jetstream.Consumer.info consumer with
           | Error (Nats_eio.Jetstream.Error.Api _) -> ()
           | Ok _ -> failf "deleted JetStream consumer still existed"
           | Error error ->
               failf "deleted JetStream consumer info: %s"
                 (jetstream_error_message error));
-          consumer_deleted := true;
           print_endline "jetstream_consumer: ok");
       expect_jetstream_ok "jetstream stream delete"
         (Nats_eio.Jetstream.Stream.delete stream);
