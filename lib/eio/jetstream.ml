@@ -29,6 +29,14 @@ module Error = struct
     | Msg_id_already_set
     | Unexpected_stream_name of { expected : string; actual : string }
     | Unexpected_consumer_name of { expected : string; actual : string }
+    | Invalid_batch of int
+    | Invalid_max_bytes of int
+    | Invalid_fetch_span
+    | Missing_ack_reply
+    | Invalid_ack_reply of string
+    | Consumer_deleted
+    | Conflict of { code : int; description : string }
+    | Unexpected_status of { code : int; description : string }
 
   let pp_config ppf = function
     | Empty_name -> Format.pp_print_string ppf "stream name is empty"
@@ -88,6 +96,26 @@ module Error = struct
     | Unexpected_consumer_name { expected; actual } ->
         Format.fprintf ppf "JetStream response named consumer %S, expected %S"
           actual expected
+    | Invalid_batch value ->
+        Format.fprintf ppf "JetStream fetch batch must be between 1 and 256, got %d"
+          value
+    | Invalid_max_bytes value ->
+        Format.fprintf ppf "JetStream fetch max_bytes must not be negative, got %d"
+          value
+    | Invalid_fetch_span ->
+        Format.pp_print_string ppf "JetStream fetch expiry must be positive"
+    | Missing_ack_reply ->
+        Format.pp_print_string ppf
+          "JetStream delivery has no acknowledgement reply"
+    | Invalid_ack_reply subject ->
+        Format.fprintf ppf "invalid JetStream acknowledgement subject %S" subject
+    | Consumer_deleted ->
+        Format.pp_print_string ppf "JetStream consumer was deleted"
+    | Conflict { code; description } ->
+        Format.fprintf ppf "JetStream pull conflict %d: %s" code description
+    | Unexpected_status { code; description } ->
+        Format.fprintf ppf "unexpected JetStream pull status %d: %s" code
+          description
 end
 
 type config_error = Error.config
@@ -493,6 +521,139 @@ module Stream = struct
         match decode_response message with
         | Ok _ -> Ok ()
         | Error error -> Error error)
+end
+
+module Msg = struct
+  type jetstream = t
+
+  type metadata = {
+    stream : string;
+    consumer : string;
+    domain : string option;
+    num_delivered : int64;
+    stream_sequence : int64;
+    consumer_sequence : int64;
+    timestamp : int64;
+    num_pending : int64;
+  }
+
+  type t = {
+    jetstream : jetstream;
+    message : Nats.Message.t;
+    ack_subject : Nats.Subject.t;
+    metadata : metadata;
+  }
+
+  let parse_int64 subject value =
+    match Int64.of_string_opt value with
+    | Some value when Int64.compare value 0L >= 0 -> Ok value
+    | _ -> Error (Error.Invalid_ack_reply subject)
+
+  let metadata ~subject ~domain ~stream ~consumer ~num_delivered
+      ~stream_sequence ~consumer_sequence ~timestamp ~num_pending =
+    if String.equal stream "" || String.equal consumer "" then
+      Error (Error.Invalid_ack_reply subject)
+    else
+      let ( let* ) value f =
+        match value with Error error -> Error error | Ok value -> f value
+      in
+      let* num_delivered = parse_int64 subject num_delivered in
+      let* stream_sequence = parse_int64 subject stream_sequence in
+      let* consumer_sequence = parse_int64 subject consumer_sequence in
+      let* timestamp = parse_int64 subject timestamp in
+      let* num_pending = parse_int64 subject num_pending in
+      Ok
+        {
+          stream;
+          consumer;
+          domain;
+          num_delivered;
+          stream_sequence;
+          consumer_sequence;
+          timestamp;
+          num_pending;
+        }
+
+  let metadata_of_reply reply =
+    let subject = Nats.Subject.to_string reply in
+    match String.split_on_char '.' subject with
+    | "$JS" :: "ACK" :: fields -> (
+        match fields with
+        | [
+            stream;
+            consumer;
+            num_delivered;
+            stream_sequence;
+            consumer_sequence;
+            timestamp;
+            num_pending;
+          ] ->
+            metadata ~subject ~domain:None ~stream ~consumer ~num_delivered
+              ~stream_sequence ~consumer_sequence ~timestamp ~num_pending
+        | domain :: account_hash :: stream :: consumer :: num_delivered
+          :: stream_sequence :: consumer_sequence :: timestamp :: num_pending
+          :: _ ->
+            if String.equal domain "" || String.equal account_hash "" then
+              Error (Error.Invalid_ack_reply subject)
+            else
+              metadata ~subject
+                ~domain:(if String.equal domain "_" then None else Some domain)
+                ~stream ~consumer ~num_delivered ~stream_sequence
+                ~consumer_sequence ~timestamp ~num_pending
+        | _ -> Error (Error.Invalid_ack_reply subject))
+    | _ -> Error (Error.Invalid_ack_reply subject)
+
+  let of_message ~jetstream ~stream_name ~consumer_name message =
+    match Nats.Message.reply_to message with
+    | None -> Error Error.Missing_ack_reply
+    | Some ack_subject -> (
+        match metadata_of_reply ack_subject with
+        | Error error -> Error error
+        | Ok metadata ->
+            if not (String.equal metadata.stream stream_name) then
+              Error
+                (Error.Unexpected_stream_name
+                   { expected = stream_name; actual = metadata.stream })
+            else if not (String.equal metadata.consumer consumer_name) then
+              Error
+                (Error.Unexpected_consumer_name
+                   { expected = consumer_name; actual = metadata.consumer })
+            else Ok { jetstream; message; ack_subject; metadata })
+
+  let message value = value.message
+  let subject value = Nats.Message.subject value.message
+  let payload value = Nats.Message.payload value.message
+  let headers value = Nats.Message.headers value.message
+  let stream value = value.metadata.stream
+  let consumer value = value.metadata.consumer
+  let domain value = value.metadata.domain
+  let timestamp value = value.metadata.timestamp
+  let num_delivered value = value.metadata.num_delivered
+  let stream_sequence value = value.metadata.stream_sequence
+  let consumer_sequence value = value.metadata.consumer_sequence
+  let num_pending value = value.metadata.num_pending
+
+  let respond value payload =
+    match Connection.publish value.jetstream.connection value.ack_subject payload with
+    | Ok () -> Ok ()
+    | Error error -> Error (Error.Connection error)
+
+  let ack value = respond value "+ACK"
+
+  let nak ?delay value =
+    match delay with
+    | None -> respond value "-NAK"
+    | Some delay ->
+        respond value
+          (Format.asprintf "-NAK {\"delay\":%Ld}"
+             (Mtime.Span.to_uint64_ns delay))
+
+  let term ?reason value =
+    match reason with
+    | None -> respond value "+TERM"
+    | Some reason -> respond value ("+TERM " ^ reason)
+
+  let in_progress value = respond value "+WPI"
 end
 
 module Consumer = struct
@@ -1022,6 +1183,194 @@ module Consumer = struct
   type jetstream = t
   type stream = Stream.t
   type t = { jetstream : jetstream; stream : stream; name : string }
+
+  type next_request = {
+    expires : int64;
+    batch : int;
+    max_bytes : int option;
+  }
+
+  let next_request_codec =
+    Jsont.Object.map ~kind:"JetStream consumer pull request"
+      (fun expires batch max_bytes -> { expires; batch; max_bytes })
+    |> Jsont.Object.mem "expires" Jsont.int64 ~enc:(fun value -> value.expires)
+    |> Jsont.Object.mem "batch" Jsont.int ~enc:(fun value -> value.batch)
+    |> Jsont.Object.opt_mem "max_bytes" Jsont.int ~enc:(fun value ->
+        value.max_bytes)
+    |> Jsont.Object.finish
+
+  let default_fetch_expires = Mtime.Span.(5 * s)
+  let fetch_expiry_leeway = Mtime.Span.(10 * ms)
+
+  let add_fetch_expiry_leeway expires =
+    let expires_ns = Mtime.Span.to_uint64_ns expires in
+    let leeway_ns = Mtime.Span.to_uint64_ns fetch_expiry_leeway in
+    if
+      Int64.compare expires_ns (Int64.sub Int64.max_int leeway_ns) >= 0
+    then Mtime.Span.max_span
+    else Mtime.Span.of_uint64_ns (Int64.add expires_ns leeway_ns)
+
+  let validate_fetch ~batch ~expires ~max_bytes =
+    let ( let* ) value f =
+      match value with Error error -> Error error | Ok value -> f value
+    in
+    let* () =
+      if Int.compare batch 1 >= 0 && Int.compare batch 256 <= 0 then Ok ()
+      else Error (Error.Invalid_batch batch)
+    in
+    let* () =
+      if Mtime.Span.compare expires Mtime.Span.zero > 0 then Ok ()
+      else Error Error.Invalid_fetch_span
+    in
+    match max_bytes with
+    | None -> Ok ()
+    | Some value when Int.compare value 0 >= 0 -> Ok ()
+    | Some value -> Error (Error.Invalid_max_bytes value)
+
+  let contains ~needle value =
+    let value_length = String.length value in
+    let needle_length = String.length needle in
+    if needle_length = 0 then true
+    else if needle_length > value_length then false
+    else
+      let found = ref false in
+      let index = ref 0 in
+      while not !found && !index <= value_length - needle_length do
+        if String.equal (String.sub value !index needle_length) needle then
+          found := true;
+        incr index
+      done;
+      !found
+
+  let status_result status =
+    let code = status.Nats.Op.code in
+    let description = status.Nats.Op.description in
+    let normalized = String.lowercase_ascii description in
+    if Int.equal code 408 then Ok ()
+    else if contains ~needle:"consumer deleted" normalized then
+      Error Error.Consumer_deleted
+    else if
+      Int.equal code 409
+      && (contains ~needle:"message size exceeds maxbytes" normalized
+         || contains ~needle:"batch completed" normalized)
+    then Ok ()
+    else if Int.equal code 409 then
+      Error (Error.Conflict { code; description })
+    else Error (Error.Unexpected_status { code; description })
+
+  let release_subscription subscription =
+    match
+      Eio.Cancel.protect (fun () ->
+          Connection.Subscription.unsubscribe subscription)
+    with
+    | Ok () -> None
+    | Error error -> Some error
+
+  let with_fetch_subscription consumer f =
+    let connection = consumer.jetstream.connection in
+    let inbox = Connection.fresh_inbox connection in
+    let filter =
+      Nats.Subject.Filter.literal (Nats.Subject.to_string inbox)
+    in
+    match Connection.subscribe connection filter with
+    | Error error -> Error (Error.Connection error)
+    | Ok subscription ->
+        let cleanup_error = ref None in
+        let result =
+          Fun.protect
+            ~finally:(fun () ->
+              cleanup_error := release_subscription subscription)
+            (fun () -> f ~inbox subscription)
+        in
+        match (result, !cleanup_error) with
+        | Ok value, None -> Ok value
+        | Ok value, Some cleanup_error ->
+            ignore cleanup_error;
+            Ok value
+        | Error error, _ -> Error error
+
+  let fetch ?expires ?max_bytes consumer ~batch =
+    let expires = Option.value expires ~default:default_fetch_expires in
+    match validate_fetch ~batch ~expires ~max_bytes with
+    | Error error -> Error error
+    | Ok () ->
+        let request =
+          {
+            expires = Mtime.Span.to_uint64_ns expires;
+            batch;
+            max_bytes;
+          }
+        in
+        match encode next_request_codec request with
+        | Error error -> Error error
+        | Ok payload ->
+            with_fetch_subscription consumer (fun ~inbox subscription ->
+                let subject =
+                  api_subject consumer.jetstream
+                    [
+                      "CONSUMER";
+                      "MSG";
+                      "NEXT";
+                      Stream.name consumer.stream;
+                      consumer.name;
+                    ]
+                in
+                let connection = consumer.jetstream.connection in
+                match
+                  Connection.publish connection ~reply_to:inbox subject payload
+                with
+                | Error error -> Error (Error.Connection error)
+                | Ok () ->
+                    let messages = ref [] in
+                    let count = ref 0 in
+                    let deadline =
+                      let local_expires = add_fetch_expiry_leeway expires in
+                      match
+                        Mtime.add_span (Connection.now connection) local_expires
+                      with
+                      | Some deadline -> deadline
+                      | None -> Mtime.max_stamp
+                    in
+                    let terminal = ref None in
+                    while
+                      Int.compare !count batch < 0
+                      && Option.is_none !terminal
+                    do
+                      let current = Connection.now connection in
+                      if Mtime.compare current deadline >= 0 then
+                        terminal := Some (Ok (List.rev !messages))
+                      else
+                        let remaining = Mtime.span current deadline in
+                        match
+                          Connection.Subscription.next_with_timeout
+                            ~timeout:remaining subscription
+                        with
+                        | Error Core_error.Timeout ->
+                            terminal := Some (Ok (List.rev !messages))
+                        | Error error ->
+                            terminal := Some (Error (Error.Connection error))
+                        | Ok delivery -> (
+                            match delivery.status with
+                            | None -> (
+                                match
+                                  Msg.of_message
+                                    ~jetstream:consumer.jetstream
+                                    ~stream_name:(Stream.name consumer.stream)
+                                    ~consumer_name:consumer.name delivery.message
+                                with
+                                | Error error -> terminal := Some (Error error)
+                                | Ok message ->
+                                    messages := message :: !messages;
+                                    count := !count + 1)
+                            | Some status -> (
+                                match status_result status with
+                                | Ok () ->
+                                    terminal := Some (Ok (List.rev !messages))
+                                | Error error -> terminal := Some (Error error)))
+                    done;
+                    match !terminal with
+                    | Some result -> result
+                    | None -> Ok (List.rev !messages))
 
   let bind (stream : Stream.t) ~name =
     match Config.validate_name (Some name) with

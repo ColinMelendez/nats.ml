@@ -29,6 +29,14 @@ module Error : sig
     | Msg_id_already_set
     | Unexpected_stream_name of { expected : string; actual : string }
     | Unexpected_consumer_name of { expected : string; actual : string }
+    | Invalid_batch of int
+    | Invalid_max_bytes of int
+    | Invalid_fetch_span
+    | Missing_ack_reply
+    | Invalid_ack_reply of string
+    | Consumer_deleted
+    | Conflict of { code : int; description : string }
+    | Unexpected_status of { code : int; description : string }
 
   val pp_config : Format.formatter -> config -> unit
   val pp_api : Format.formatter -> api -> unit
@@ -107,6 +115,30 @@ module Stream : sig
   val name : t -> string
   val info : t -> (Info.t, Error.t) result
   val delete : t -> (unit, Error.t) result
+end
+
+module Msg : sig
+  type t
+
+  val message : t -> Nats.Message.t
+  val subject : t -> Nats.Subject.t
+  val payload : t -> string
+  val headers : t -> Nats.Header.t
+  val stream : t -> string
+  val consumer : t -> string
+  val domain : t -> string option
+  val timestamp : t -> int64
+  (** [timestamp message] is the server's Unix-epoch timestamp in
+      nanoseconds. *)
+
+  val num_delivered : t -> int64
+  val stream_sequence : t -> int64
+  val consumer_sequence : t -> int64
+  val num_pending : t -> int64
+  val ack : t -> (unit, Error.t) result
+  val nak : ?delay:Mtime.Span.t -> t -> (unit, Error.t) result
+  val term : ?reason:string -> t -> (unit, Error.t) result
+  val in_progress : t -> (unit, Error.t) result
 end
 
 module Consumer : sig
@@ -197,6 +229,15 @@ module Consumer : sig
 
   val name : t -> string
   val stream : t -> stream
+  val fetch :
+    ?expires:Mtime.Span.t ->
+    ?max_bytes:int ->
+    t ->
+    batch:int ->
+    (Msg.t list, Error.t) result
+  (** [fetch consumer ~batch] requests up to [batch] messages and returns an
+      empty or partial list when the server expires the pull request. *)
+
   val info : t -> (Info.t, Error.t) result
   val delete : t -> (unit, Error.t) result
 end
