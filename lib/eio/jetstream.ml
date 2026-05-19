@@ -7,6 +7,11 @@ module Error = struct
     | Empty_subjects
     | Invalid_limit of { field : string; value : int64 }
     | Invalid_max_age
+    | Empty_consumer_name
+    | Invalid_consumer_name_character of { position : int; character : char }
+    | Invalid_consumer_limit of { field : string; value : int64 }
+    | Invalid_consumer_span of { field : string }
+    | Invalid_consumer_policy of { field : string; value : string }
 
   type api = { code : int; err_code : int option; description : string }
 
@@ -23,6 +28,7 @@ module Error = struct
     | Empty_msg_id
     | Msg_id_already_set
     | Unexpected_stream_name of { expected : string; actual : string }
+    | Unexpected_consumer_name of { expected : string; actual : string }
 
   let pp_config ppf = function
     | Empty_name -> Format.pp_print_string ppf "stream name is empty"
@@ -35,6 +41,16 @@ module Error = struct
         Format.fprintf ppf "invalid %s limit %Ld" field value
     | Invalid_max_age ->
         Format.pp_print_string ppf "stream max age must not be negative"
+    | Empty_consumer_name -> Format.pp_print_string ppf "consumer name is empty"
+    | Invalid_consumer_name_character { position; character } ->
+        Format.fprintf ppf "invalid consumer-name character %C at position %d"
+          character position
+    | Invalid_consumer_limit { field; value } ->
+        Format.fprintf ppf "invalid consumer %s limit %Ld" field value
+    | Invalid_consumer_span { field } ->
+        Format.fprintf ppf "consumer %s must be positive" field
+    | Invalid_consumer_policy { field; value } ->
+        Format.fprintf ppf "invalid consumer %s policy %S" field value
 
   let pp_api ppf { code; err_code; description } =
     match err_code with
@@ -58,7 +74,7 @@ module Error = struct
         Format.fprintf ppf "invalid JetStream subject: %a" Nats.Subject.pp_error
           error
     | Invalid_config error ->
-        Format.fprintf ppf "invalid JetStream stream config: %a" pp_config error
+        Format.fprintf ppf "invalid JetStream config: %a" pp_config error
     | Invalid_headers error ->
         Format.fprintf ppf "invalid JetStream headers: %a" Nats.Header.pp_error
           error
@@ -68,6 +84,9 @@ module Error = struct
           "Nats-Msg-Id is already present in the publish headers"
     | Unexpected_stream_name { expected; actual } ->
         Format.fprintf ppf "JetStream response named stream %S, expected %S"
+          actual expected
+    | Unexpected_consumer_name { expected; actual } ->
+        Format.fprintf ppf "JetStream response named consumer %S, expected %S"
           actual expected
 end
 
@@ -469,6 +488,655 @@ module Stream = struct
       api_subject stream.jetstream [ "STREAM"; "DELETE"; stream.name ]
     in
     match request_msg stream.jetstream (Nats.Message.v ~subject "") with
+    | Error error -> Error error
+    | Ok message -> (
+        match decode_response message with
+        | Ok _ -> Ok ()
+        | Error error -> Error error)
+end
+
+module Consumer = struct
+  module Config = struct
+    type ack_policy = No_ack | All | Explicit
+
+    type deliver_policy =
+      | All
+      | Last
+      | New
+      | By_start_sequence of int64
+      | By_start_time of string
+      | Last_per_subject
+
+    type replay_policy = Instant | Original
+
+    type t = {
+      durable_name : string option;
+      description : string option;
+      deliver_policy : deliver_policy;
+      ack_policy : ack_policy;
+      ack_wait : Mtime.Span.t option;
+      max_deliver : int option;
+      filter_subject : Nats.Subject.Filter.t option;
+      replay_policy : replay_policy;
+      max_ack_pending : int option;
+      max_waiting : int option;
+      max_batch : int option;
+      max_expires : Mtime.Span.t option;
+      max_bytes : int option;
+      headers_only : bool option;
+      inactive_threshold : Mtime.Span.t option;
+      mem_storage : bool option;
+    }
+
+    type error = config_error
+
+    let allowed_name_character character =
+      let code = Char.code character in
+      (code >= Char.code 'A' && code <= Char.code 'Z')
+      || (code >= Char.code 'a' && code <= Char.code 'z')
+      || (code >= Char.code '0' && code <= Char.code '9')
+      || Char.equal character '_' || Char.equal character '-'
+
+    let validate_name = function
+      | None -> Ok ()
+      | Some name -> (
+          let length = String.length name in
+          if Int.equal length 0 then Error Error.Empty_consumer_name
+          else
+            let invalid = ref None in
+            for position = 0 to length - 1 do
+              match !invalid with
+              | Some _ -> ()
+              | None ->
+                  let character = String.get name position in
+                  if not (allowed_name_character character) then
+                    invalid :=
+                      Some
+                        (Error.Invalid_consumer_name_character
+                           { position; character })
+            done;
+            match !invalid with None -> Ok () | Some error -> Error error)
+
+    let validate_limit field = function
+      | None -> Ok ()
+      | Some value when Int.compare value (-1) >= 0 -> Ok ()
+      | Some value ->
+          Error
+            (Error.Invalid_consumer_limit { field; value = Int64.of_int value })
+
+    let validate_span error = function
+      | None -> Ok ()
+      | Some value when Mtime.Span.compare value Mtime.Span.zero > 0 -> Ok ()
+      | Some _ -> Error error
+
+    let normalize_span = function
+      | Some value when Int.equal (Mtime.Span.compare value Mtime.Span.zero) 0
+        ->
+          None
+      | value -> value
+
+    let validate_deliver_policy = function
+      | By_start_sequence sequence when Int64.compare sequence 1L < 0 ->
+          Error
+            (Error.Invalid_consumer_policy
+               { field = "opt_start_seq"; value = Int64.to_string sequence })
+      | By_start_time value when String.equal value "" ->
+          Error
+            (Error.Invalid_consumer_policy { field = "opt_start_time"; value })
+      | _ -> Ok ()
+
+    let v ?durable_name ?description ?(deliver_policy = All)
+        ?(ack_policy = Explicit) ?ack_wait ?max_deliver ?filter_subject
+        ?(replay_policy = Instant) ?max_ack_pending ?max_waiting ?max_batch
+        ?max_expires ?max_bytes ?headers_only ?inactive_threshold ?mem_storage
+        () =
+      let max_expires = normalize_span max_expires in
+      let inactive_threshold = normalize_span inactive_threshold in
+      let ( let* ) value f =
+        match value with Error error -> Error error | Ok value -> f value
+      in
+      let* () = validate_name durable_name in
+      let* () = validate_deliver_policy deliver_policy in
+      let* () =
+        validate_span
+          (Error.Invalid_consumer_span { field = "ack_wait" })
+          ack_wait
+      in
+      let* () =
+        validate_span
+          (Error.Invalid_consumer_span { field = "max_expires" })
+          max_expires
+      in
+      let* () =
+        validate_span
+          (Error.Invalid_consumer_span { field = "inactive_threshold" })
+          inactive_threshold
+      in
+      let* () = validate_limit "max_deliver" max_deliver in
+      let* () = validate_limit "max_ack_pending" max_ack_pending in
+      let* () = validate_limit "max_waiting" max_waiting in
+      let* () = validate_limit "max_batch" max_batch in
+      let* () = validate_limit "max_bytes" max_bytes in
+      Ok
+        {
+          durable_name;
+          description;
+          deliver_policy;
+          ack_policy;
+          ack_wait;
+          max_deliver;
+          filter_subject;
+          replay_policy;
+          max_ack_pending;
+          max_waiting;
+          max_batch;
+          max_expires;
+          max_bytes;
+          headers_only;
+          inactive_threshold;
+          mem_storage;
+        }
+
+    let durable_name value = value.durable_name
+    let description value = value.description
+    let deliver_policy value = value.deliver_policy
+    let ack_policy value = value.ack_policy
+    let ack_wait value = value.ack_wait
+    let max_deliver value = value.max_deliver
+    let filter_subject value = value.filter_subject
+    let replay_policy value = value.replay_policy
+    let max_ack_pending value = value.max_ack_pending
+    let max_waiting value = value.max_waiting
+    let max_batch value = value.max_batch
+    let max_expires value = value.max_expires
+    let max_bytes value = value.max_bytes
+    let headers_only value = value.headers_only
+    let inactive_threshold value = value.inactive_threshold
+    let mem_storage value = value.mem_storage
+  end
+
+  type wire_config = {
+    durable_name : string option;
+    description : string option;
+    deliver_policy : string;
+    opt_start_seq : int64 option;
+    opt_start_time : string option;
+    ack_policy : Config.ack_policy;
+    ack_wait : int64 option;
+    max_deliver : int option;
+    filter_subject : string option;
+    replay_policy : Config.replay_policy;
+    max_ack_pending : int option;
+    max_waiting : int option;
+    max_batch : int option;
+    max_expires : int64 option;
+    max_bytes : int option;
+    headers_only : bool option;
+    inactive_threshold : int64 option;
+    mem_storage : bool option;
+    unknown : Jsont.json;
+  }
+
+  let ack_policy_codec =
+    Jsont.enum
+      [
+        ("none", Config.No_ack);
+        ("all", Config.All);
+        ("explicit", Config.Explicit);
+      ]
+
+  let replay_policy_codec =
+    Jsont.enum [ ("instant", Config.Instant); ("original", Config.Original) ]
+
+  let wire_config_codec =
+    Jsont.Object.map ~kind:"JetStream consumer config"
+      (fun
+        durable_name
+        description
+        deliver_policy
+        opt_start_seq
+        opt_start_time
+        ack_policy
+        ack_wait
+        max_deliver
+        filter_subject
+        replay_policy
+        max_ack_pending
+        max_waiting
+        max_batch
+        max_expires
+        max_bytes
+        headers_only
+        inactive_threshold
+        mem_storage
+        unknown
+      ->
+        {
+          durable_name;
+          description;
+          deliver_policy;
+          opt_start_seq;
+          opt_start_time;
+          ack_policy;
+          ack_wait;
+          max_deliver;
+          filter_subject;
+          replay_policy;
+          max_ack_pending;
+          max_waiting;
+          max_batch;
+          max_expires;
+          max_bytes;
+          headers_only;
+          inactive_threshold;
+          mem_storage;
+          unknown;
+        })
+    |> Jsont.Object.opt_mem "durable_name" Jsont.string ~enc:(fun value ->
+        value.durable_name)
+    |> Jsont.Object.opt_mem "description" Jsont.string ~enc:(fun value ->
+        value.description)
+    |> Jsont.Object.mem "deliver_policy" Jsont.string ~enc:(fun value ->
+        value.deliver_policy)
+    |> Jsont.Object.opt_mem "opt_start_seq" Jsont.int64 ~enc:(fun value ->
+        value.opt_start_seq)
+    |> Jsont.Object.opt_mem "opt_start_time" Jsont.string ~enc:(fun value ->
+        value.opt_start_time)
+    |> Jsont.Object.mem "ack_policy" ack_policy_codec ~enc:(fun value ->
+        value.ack_policy)
+    |> Jsont.Object.opt_mem "ack_wait" Jsont.int64 ~enc:(fun value ->
+        value.ack_wait)
+    |> Jsont.Object.opt_mem "max_deliver" Jsont.int ~enc:(fun value ->
+        value.max_deliver)
+    |> Jsont.Object.opt_mem "filter_subject" Jsont.string ~enc:(fun value ->
+        value.filter_subject)
+    |> Jsont.Object.mem "replay_policy" replay_policy_codec ~enc:(fun value ->
+        value.replay_policy)
+    |> Jsont.Object.opt_mem "max_ack_pending" Jsont.int ~enc:(fun value ->
+        value.max_ack_pending)
+    |> Jsont.Object.opt_mem "max_waiting" Jsont.int ~enc:(fun value ->
+        value.max_waiting)
+    |> Jsont.Object.opt_mem "max_batch" Jsont.int ~enc:(fun value ->
+        value.max_batch)
+    |> Jsont.Object.opt_mem "max_expires" Jsont.int64 ~enc:(fun value ->
+        value.max_expires)
+    |> Jsont.Object.opt_mem "max_bytes" Jsont.int ~enc:(fun value ->
+        value.max_bytes)
+    |> Jsont.Object.opt_mem "headers_only" Jsont.bool ~enc:(fun value ->
+        value.headers_only)
+    |> Jsont.Object.opt_mem "inactive_threshold" Jsont.int64 ~enc:(fun value ->
+        value.inactive_threshold)
+    |> Jsont.Object.opt_mem "mem_storage" Jsont.bool ~enc:(fun value ->
+        value.mem_storage)
+    |> Jsont.Object.keep_unknown
+         ~enc:(fun value -> value.unknown)
+         Jsont.json_mems
+    |> Jsont.Object.finish
+
+  type create_request = { stream_name : string; config : wire_config }
+
+  let create_request_codec =
+    Jsont.Object.map ~kind:"JetStream consumer create request"
+      (fun stream_name config -> { stream_name; config })
+    |> Jsont.Object.mem "stream_name" Jsont.string ~enc:(fun value ->
+        value.stream_name)
+    |> Jsont.Object.mem "config" wire_config_codec ~enc:(fun value ->
+        value.config)
+    |> Jsont.Object.finish
+
+  let wire_config value =
+    let deliver_policy, opt_start_seq, opt_start_time =
+      match Config.deliver_policy value with
+      | Config.All -> ("all", None, None)
+      | Config.Last -> ("last", None, None)
+      | Config.New -> ("new", None, None)
+      | Config.By_start_sequence sequence ->
+          ("by_start_sequence", Some sequence, None)
+      | Config.By_start_time time -> ("by_start_time", None, Some time)
+      | Config.Last_per_subject -> ("last_per_subject", None, None)
+    in
+    {
+      durable_name = Config.durable_name value;
+      description = Config.description value;
+      deliver_policy;
+      opt_start_seq;
+      opt_start_time;
+      ack_policy = Config.ack_policy value;
+      ack_wait = Option.map Mtime.Span.to_uint64_ns (Config.ack_wait value);
+      max_deliver = Config.max_deliver value;
+      filter_subject =
+        Option.map Nats.Subject.Filter.to_string (Config.filter_subject value);
+      replay_policy = Config.replay_policy value;
+      max_ack_pending = Config.max_ack_pending value;
+      max_waiting = Config.max_waiting value;
+      max_batch = Config.max_batch value;
+      max_expires =
+        Option.map Mtime.Span.to_uint64_ns (Config.max_expires value);
+      max_bytes = Config.max_bytes value;
+      headers_only = Config.headers_only value;
+      inactive_threshold =
+        Option.map Mtime.Span.to_uint64_ns (Config.inactive_threshold value);
+      mem_storage = Config.mem_storage value;
+      unknown = Jsont.Json.object' [];
+    }
+
+  let config_of_wire value =
+    let normalize_limit = function Some (-1) -> None | value -> value in
+    let deliver_policy =
+      match value.deliver_policy with
+      | "all" -> Ok Config.All
+      | "last" -> Ok Config.Last
+      | "new" -> Ok Config.New
+      | "by_start_sequence" -> (
+          match value.opt_start_seq with
+          | Some sequence -> Ok (Config.By_start_sequence sequence)
+          | None -> Error (Error.Missing_field "opt_start_seq"))
+      | "by_start_time" -> (
+          match value.opt_start_time with
+          | Some time -> Ok (Config.By_start_time time)
+          | None -> Error (Error.Missing_field "opt_start_time"))
+      | "last_per_subject" -> Ok Config.Last_per_subject
+      | value ->
+          Error
+            (Error.Invalid_config
+               (Error.Invalid_consumer_policy
+                  { field = "deliver_policy"; value }))
+    in
+    let filter_subject =
+      match value.filter_subject with
+      | None -> Ok None
+      | Some "" -> Ok None
+      | Some subject -> (
+          match Nats.Subject.Filter.of_string subject with
+          | Ok subject -> Ok (Some subject)
+          | Error error -> Error (Error.Invalid_subject error))
+    in
+    match deliver_policy with
+    | Error error -> Error error
+    | Ok deliver_policy -> (
+        match filter_subject with
+        | Error error -> Error error
+        | Ok filter_subject -> (
+            let ack_wait = Option.map Mtime.Span.of_uint64_ns value.ack_wait in
+            let max_expires =
+              Option.map Mtime.Span.of_uint64_ns value.max_expires
+            in
+            let inactive_threshold =
+              Option.map Mtime.Span.of_uint64_ns value.inactive_threshold
+            in
+            let max_deliver = normalize_limit value.max_deliver in
+            let max_ack_pending = normalize_limit value.max_ack_pending in
+            let max_waiting = normalize_limit value.max_waiting in
+            let max_batch = normalize_limit value.max_batch in
+            let max_bytes = normalize_limit value.max_bytes in
+            match
+              Config.v ?durable_name:value.durable_name
+                ?description:value.description ~deliver_policy
+                ~ack_policy:value.ack_policy ?ack_wait
+                ?max_deliver ?filter_subject
+                ~replay_policy:value.replay_policy
+                ?max_ack_pending ?max_waiting ?max_batch ?max_expires ?max_bytes
+                ?headers_only:value.headers_only ?inactive_threshold
+                ?mem_storage:value.mem_storage ()
+            with
+            | Ok config -> Ok (config, value.unknown)
+            | Error error -> Error (Error.Invalid_config error)))
+
+  type wire_sequence = {
+    consumer_sequence : int64 option;
+    stream_sequence : int64 option;
+  }
+
+  let wire_sequence_codec =
+    Jsont.Object.map ~kind:"JetStream consumer sequence"
+      (fun consumer_sequence stream_sequence ->
+        { consumer_sequence; stream_sequence })
+    |> Jsont.Object.opt_mem "consumer_seq" Jsont.int64 ~enc:(fun value ->
+        value.consumer_sequence)
+    |> Jsont.Object.opt_mem "stream_seq" Jsont.int64 ~enc:(fun value ->
+        value.stream_sequence)
+    |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+
+  type response = {
+    error : api_error option;
+    stream_name : string option;
+    name : string option;
+    config : wire_config option;
+    created : string option;
+    delivered : wire_sequence option;
+    ack_floor : wire_sequence option;
+    num_ack_pending : int option;
+    num_redelivered : int option;
+    num_waiting : int option;
+    num_pending : int64 option;
+    unknown : Jsont.json;
+  }
+
+  let response_codec =
+    Jsont.Object.map ~kind:"JetStream consumer response"
+      (fun
+        error
+        stream_name
+        name
+        config
+        created
+        delivered
+        ack_floor
+        num_ack_pending
+        num_redelivered
+        num_waiting
+        num_pending
+        unknown
+      ->
+        {
+          error;
+          stream_name;
+          name;
+          config;
+          created;
+          delivered;
+          ack_floor;
+          num_ack_pending;
+          num_redelivered;
+          num_waiting;
+          num_pending;
+          unknown;
+        })
+    |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
+        value.error)
+    |> Jsont.Object.opt_mem "stream_name" Jsont.string ~enc:(fun value ->
+        value.stream_name)
+    |> Jsont.Object.opt_mem "name" Jsont.string ~enc:(fun value -> value.name)
+    |> Jsont.Object.opt_mem "config" wire_config_codec ~enc:(fun value ->
+        value.config)
+    |> Jsont.Object.opt_mem "created" Jsont.string ~enc:(fun value ->
+        value.created)
+    |> Jsont.Object.opt_mem "delivered" wire_sequence_codec ~enc:(fun value ->
+        value.delivered)
+    |> Jsont.Object.opt_mem "ack_floor" wire_sequence_codec ~enc:(fun value ->
+        value.ack_floor)
+    |> Jsont.Object.opt_mem "num_ack_pending" Jsont.int ~enc:(fun value ->
+        value.num_ack_pending)
+    |> Jsont.Object.opt_mem "num_redelivered" Jsont.int ~enc:(fun value ->
+        value.num_redelivered)
+    |> Jsont.Object.opt_mem "num_waiting" Jsont.int ~enc:(fun value ->
+        value.num_waiting)
+    |> Jsont.Object.opt_mem "num_pending" Jsont.int64 ~enc:(fun value ->
+        value.num_pending)
+    |> Jsont.Object.keep_unknown
+         ~enc:(fun value -> value.unknown)
+         Jsont.json_mems
+    |> Jsont.Object.finish
+
+  let decode_response message =
+    match decode response_codec message with
+    | Error error -> Error error
+    | Ok { error = Some error; _ } -> Error (Error.Api error)
+    | Ok response -> Ok response
+
+  module Info = struct
+    type t = {
+      name : string;
+      stream_name : string;
+      created : string option;
+      config : Config.t;
+      unknown : Jsont.json;
+      config_unknown : Jsont.json;
+      delivered : wire_sequence option;
+      ack_floor : wire_sequence option;
+      num_ack_pending : int;
+      num_redelivered : int;
+      num_waiting : int;
+      num_pending : int64;
+    }
+
+    let name value = value.name
+    let stream_name value = value.stream_name
+    let created value = value.created
+    let config value = value.config
+    let unknown value = value.unknown
+    let config_unknown value = value.config_unknown
+
+    let delivered_consumer_sequence value =
+      Option.bind value.delivered (fun sequence -> sequence.consumer_sequence)
+
+    let delivered_stream_sequence value =
+      Option.bind value.delivered (fun sequence -> sequence.stream_sequence)
+
+    let ack_floor_consumer_sequence value =
+      Option.bind value.ack_floor (fun sequence -> sequence.consumer_sequence)
+
+    let ack_floor_stream_sequence value =
+      Option.bind value.ack_floor (fun sequence -> sequence.stream_sequence)
+
+    let num_ack_pending value = value.num_ack_pending
+    let num_redelivered value = value.num_redelivered
+    let num_waiting value = value.num_waiting
+    let num_pending value = value.num_pending
+
+    let pp ppf value =
+      Format.fprintf ppf "JetStream consumer %S on stream %S (pending=%Ld)"
+        value.name value.stream_name value.num_pending
+  end
+
+  type jetstream = t
+  type stream = Stream.t
+  type t = { jetstream : jetstream; stream : stream; name : string }
+
+  let bind (stream : Stream.t) ~name =
+    match Config.validate_name (Some name) with
+    | Ok () -> Ok { jetstream = stream.jetstream; stream; name }
+    | Error error -> Error (Error.Invalid_config error)
+
+  let name value = value.name
+  let stream value = value.stream
+
+  let create (stream : Stream.t) config =
+    let jetstream = stream.jetstream in
+    let stream_name = Stream.name stream in
+    let subject =
+      match Config.durable_name config with
+      | None -> api_subject jetstream [ "CONSUMER"; "CREATE"; stream_name ]
+      | Some name ->
+          api_subject jetstream [ "CONSUMER"; "CREATE"; stream_name; name ]
+    in
+    let request = { stream_name; config = wire_config config } in
+    match encode create_request_codec request with
+    | Error error -> Error error
+    | Ok payload -> (
+        match request_msg jetstream (Nats.Message.v ~subject payload) with
+        | Error error -> Error error
+        | Ok message -> (
+            match decode_response message with
+            | Error error -> Error error
+            | Ok { name = None; _ } -> Error (Error.Missing_field "name")
+            | Ok { name = Some name; config = None; _ } ->
+                Error (Error.Missing_field "config")
+            | Ok { name = Some name; config = Some response_config; _ } -> (
+                match Config.durable_name config with
+                | Some expected when not (String.equal expected name) ->
+                    Error
+                      (Error.Unexpected_consumer_name
+                         { expected; actual = name })
+                | _ -> (
+                    match config_of_wire response_config with
+                    | Ok _ -> Ok { jetstream; stream; name }
+                    | Error error -> Error error))))
+
+  let info consumer =
+    let subject =
+      api_subject consumer.jetstream
+        [ "CONSUMER"; "INFO"; Stream.name consumer.stream; consumer.name ]
+    in
+    match request_msg consumer.jetstream (Nats.Message.v ~subject "") with
+    | Error error -> Error error
+    | Ok message -> (
+        match decode_response message with
+        | Error error -> Error error
+        | Ok { stream_name = None; _ } ->
+            Error (Error.Missing_field "stream_name")
+        | Ok { stream_name = Some stream_name; name = None; _ } ->
+            Error (Error.Missing_field "name")
+        | Ok
+            {
+              stream_name = Some stream_name;
+              name = Some name;
+              config = None;
+              _;
+            } ->
+            Error (Error.Missing_field "config")
+        | Ok
+            {
+              stream_name = Some stream_name;
+              name = Some name;
+              config = Some config;
+              created;
+              delivered;
+              ack_floor;
+              num_ack_pending;
+              num_redelivered;
+              num_waiting;
+              num_pending;
+              unknown;
+              _;
+            } -> (
+            if not (String.equal stream_name (Stream.name consumer.stream)) then
+              Error
+                (Error.Unexpected_stream_name
+                   {
+                     expected = Stream.name consumer.stream;
+                     actual = stream_name;
+                   })
+            else if not (String.equal name consumer.name) then
+              Error
+                (Error.Unexpected_consumer_name
+                   { expected = consumer.name; actual = name })
+            else
+              match config_of_wire config with
+              | Error error -> Error error
+              | Ok (config, config_unknown) ->
+                  Ok
+                    {
+                      Info.name;
+                      stream_name;
+                      created;
+                      config;
+                      unknown;
+                      config_unknown;
+                      delivered;
+                      ack_floor;
+                      num_ack_pending = Option.value ~default:0 num_ack_pending;
+                      num_redelivered = Option.value ~default:0 num_redelivered;
+                      num_waiting = Option.value ~default:0 num_waiting;
+                      num_pending = Option.value ~default:0L num_pending;
+                    }))
+
+  let delete consumer =
+    let subject =
+      api_subject consumer.jetstream
+        [ "CONSUMER"; "DELETE"; Stream.name consumer.stream; consumer.name ]
+    in
+    match request_msg consumer.jetstream (Nats.Message.v ~subject "") with
     | Error error -> Error error
     | Ok message -> (
         match decode_response message with
