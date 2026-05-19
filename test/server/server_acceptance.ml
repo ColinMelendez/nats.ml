@@ -185,6 +185,119 @@ let run_jetstream ~client ~timeout =
              (Nats_eio.Jetstream.Publish_ack.sequence first_ack)
              (Nats_eio.Jetstream.Stream.Info.last_sequence final_info))
       then failf "JetStream stream info disagreed with the publish ack";
+      let consumer_name = "OCAML_TEST_CONSUMER_" ^ run_id in
+      let consumer_config =
+        expect_jetstream_config_ok "jetstream consumer config"
+          (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:consumer_name
+             ~filter_subject:filter ())
+      in
+      let consumer =
+        expect_jetstream_ok "jetstream consumer create"
+          (Nats_eio.Jetstream.Consumer.create stream consumer_config)
+      in
+      let consumer_deleted = ref false in
+      Fun.protect
+        ~finally:(fun () ->
+          if not !consumer_deleted then
+            match Nats_eio.Jetstream.Consumer.delete consumer with
+            | Ok () -> ()
+            | Error error ->
+                prerr_endline
+                  (Format.asprintf "JetStream consumer cleanup failed: %a"
+                     Nats_eio.Jetstream.Error.pp error))
+        (fun () ->
+          let consumer_info =
+            expect_jetstream_ok "jetstream consumer info"
+              (Nats_eio.Jetstream.Consumer.info consumer)
+          in
+          if
+            not
+              (String.equal
+                 (Nats_eio.Jetstream.Consumer.Info.name consumer_info)
+                 consumer_name)
+          then failf "JetStream consumer info named the wrong consumer";
+          if
+            not
+              (String.equal
+                 (Nats_eio.Jetstream.Consumer.Info.stream_name consumer_info)
+                 stream_name)
+          then failf "JetStream consumer info named the wrong stream";
+          let info_config =
+            Nats_eio.Jetstream.Consumer.Info.config consumer_info
+          in
+          if
+            not
+              (match
+                 Nats_eio.Jetstream.Consumer.Config.filter_subject info_config
+               with
+              | Some value ->
+                  String.equal
+                    (Nats.Subject.Filter.to_string value)
+                    (Nats.Subject.Filter.to_string filter)
+              | None -> false)
+          then failf "JetStream consumer info lost its filter subject";
+          if
+            not
+              (match
+                 Nats_eio.Jetstream.Consumer.Config.durable_name info_config
+               with
+              | Some value -> String.equal value consumer_name
+              | None -> false)
+          then failf "JetStream consumer info lost its durable name";
+          if
+            not
+              (match
+                 Nats_eio.Jetstream.Consumer.Config.ack_policy info_config
+               with
+              | Nats_eio.Jetstream.Consumer.Config.Explicit -> true
+              | _ -> false)
+          then failf "JetStream consumer info changed its ack policy";
+          if
+            not
+              (match
+                 Nats_eio.Jetstream.Consumer.Config.max_deliver info_config
+               with
+              | None -> true
+              | Some _ -> false)
+          then failf "JetStream consumer info exposed an unlimited max deliver";
+          if
+            not
+              (match
+                 Nats_eio.Jetstream.Consumer.Config.deliver_policy info_config
+               with
+              | Nats_eio.Jetstream.Consumer.Config.All -> true
+              | _ -> false)
+          then failf "JetStream consumer info changed its deliver policy";
+          if
+            not
+              (Int64.equal
+                 (Nats_eio.Jetstream.Consumer.Info.num_pending consumer_info)
+                 1L)
+          then failf "JetStream consumer info reported the wrong pending count";
+          let rebound =
+            expect_jetstream_ok "jetstream consumer bind"
+              (Nats_eio.Jetstream.Consumer.bind stream ~name:consumer_name)
+          in
+          let rebound_info =
+            expect_jetstream_ok "jetstream rebound consumer info"
+              (Nats_eio.Jetstream.Consumer.info rebound)
+          in
+          if
+            not
+              (String.equal
+                 (Nats_eio.Jetstream.Consumer.Info.name rebound_info)
+                 consumer_name)
+          then failf "bound JetStream consumer named the wrong consumer";
+          expect_jetstream_ok "jetstream consumer delete"
+            (Nats_eio.Jetstream.Consumer.delete consumer);
+          (match Nats_eio.Jetstream.Consumer.info consumer with
+          | Error (Nats_eio.Jetstream.Error.Api _) -> ()
+          | Ok _ -> failf "deleted JetStream consumer still existed"
+          | Error error ->
+              failf "deleted JetStream consumer info: %s"
+                (jetstream_error_message error));
+          consumer_deleted := true;
+          print_endline "jetstream_consumer: ok");
       expect_jetstream_ok "jetstream stream delete"
         (Nats_eio.Jetstream.Stream.delete stream);
       deleted := true;
