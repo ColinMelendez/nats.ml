@@ -64,6 +64,7 @@ module Subscription : sig
       "subscription"]. A timeout leaves the subscription active and returns
       [Error.Timeout]; closure, disconnection, and cancellation retain the
       same behavior as [next]. *)
+
   val iter : t -> f:(delivery -> unit) -> (unit, Error.t) result
   val unsubscribe : t -> (unit, Error.t) result
   val auto_unsubscribe : t -> max_messages:int -> (unit, Error.t) result
