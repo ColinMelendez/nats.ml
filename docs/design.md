@@ -457,7 +457,8 @@ leaves ordinary publishes and pending requests unreplayed. Explicit `tls://`
 candidates perform bounded TLS before the NATS handshake, while peer identity
 and SNI remain caller-owned through `Tls.Config.client`. Delayed reconnects
 support bounded configurable jitter while retaining a deterministic backoff
-base; the opt-in real-server harness covers single-server Core NATS and
+base; the opt-in real-server harness covers single-server Core NATS
+publish/subscribe, headers, queue groups, request/reply, no-responders, and
 username/password authentication, while cluster, TLS, and reconnect acceptance
 remain later work.
 
@@ -595,8 +596,9 @@ name/SNI policy is therefore part of that configuration. Multi-endpoint TCP
 dialing policy, server discovery, and explicit endpoint TLS are implemented in
 the Eio endpoint planner; peer identity/SNI selection remains caller-owned.
 The opt-in real-server harness now exercises username/password authentication
-alongside the single-server Core NATS path. NKey/JWT server acceptance, TLS,
-and reconnect acceptance remain later Core milestones.
+alongside single-server Core NATS headers, queue groups, request/reply, and
+no-responders. NKey/JWT server acceptance, TLS, and reconnect acceptance remain
+later Core milestones.
 
 ### JetStream, KV, Object Store, and Services
 

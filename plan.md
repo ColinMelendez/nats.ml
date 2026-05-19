@@ -61,12 +61,13 @@ inherit the active session scheme. The caller-owned TLS configuration supplies
 peer identity and SNI; the existing server-required TLS upgrade path remains
 available through the same configuration. Reconnect jitter is configurable,
 zero by default, and applied only to delayed retries. An opt-in Docker-backed
-real-server acceptance harness now covers single-server pub/sub, request/reply,
-flush, close, and optional username/password authentication; cluster, TLS, and
-reconnect acceptance remain ahead of the G2 stability gate. Authentication
-capabilities now cover anonymous, token, username/password, NKey, and JWT
-credentials; nonce signing is repeated for every INFO, while private-key
-parsing and NKey/JWT server acceptance remain later work. The recovery bridge
+real-server acceptance harness now covers single-server pub/sub, headers, queue
+groups, request/reply, no-responders, flush, close, and optional
+username/password authentication; cluster, TLS, and reconnect acceptance remain
+ahead of the G2 stability gate. Authentication capabilities now cover anonymous,
+token, username/password, NKey, and JWT credentials; nonce signing is repeated
+for every INFO, while private-key parsing and NKey/JWT server acceptance remain
+later work. The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
 connection seam; replays INFO/TLS/CONNECT and subscriptions; emits
@@ -343,11 +344,12 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
 
 ### Acceptance tests against `nats-server`
 
-The opt-in `scripts/runtest-server.sh` harness currently covers the basic
-single-server publish/subscribe, request/reply, flush, and close contract. It
-uses a private executable and is not part of the default Dune test alias. The
-remaining scenarios below require server configuration, a cluster, or
-failure-injection control that a lone `nats-server` process cannot provide.
+The opt-in `scripts/runtest-server.sh` harness currently covers single-server
+publish/subscribe, headers, queue groups, request/reply, no-responders, flush,
+close, and optional username/password authentication. It uses a private
+executable and is not part of the default Dune test alias. The remaining
+scenarios below require server configuration, a cluster, or failure-injection
+control that a lone `nats-server` process cannot provide.
 
 - Core publish/subscribe, queue-group load balancing, headers, and replies.
 - Request success, timeout, no responders, cancellation, and disconnect race.
