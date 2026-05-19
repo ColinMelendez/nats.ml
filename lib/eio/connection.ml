@@ -248,10 +248,11 @@ module Subscription = struct
       resolver:(unit, Error.t) result Eio.Promise.u ->
       (unit, Error.t) result;
     cancel_drain_request : unit -> unit;
+    wait : Mtime.Span.t -> (unit, Error.t) result;
   }
 
   let create ~sid ~capacity ~unsubscribe_request ~auto_unsubscribe_request
-      ~drain_request ~cancel_drain_request =
+      ~drain_request ~cancel_drain_request ~wait =
     {
       sid;
       queue =
@@ -268,6 +269,7 @@ module Subscription = struct
       auto_unsubscribe_request;
       drain_request;
       cancel_drain_request;
+      wait;
     }
 
   let sid t = t.sid
@@ -345,6 +347,23 @@ module Subscription = struct
               waiter.done_seen <- true;
               if waiter.server_flushed then complete_drain t waiter (Ok ()));
           Error error
+
+  let next_with_timeout ~timeout t =
+    if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then
+      Error (Error.Invalid_timeout "subscription")
+    else
+      let prefer first second =
+        match (first, second) with
+        | (Ok _ as value), _ | _, (Ok _ as value) -> value
+        | Error Error.Timeout, other | other, Error Error.Timeout -> other
+        | first, _ -> first
+      in
+      Eio.Fiber.first ~combine:prefer
+        (fun () -> next t)
+        (fun () ->
+          match t.wait timeout with
+          | Ok () -> Error Error.Timeout
+          | Error error -> Error error)
 
   let unsubscribe t = if not t.active then Ok () else t.unsubscribe_request ()
 
@@ -1340,6 +1359,12 @@ let apply_outgoing t command =
                         if not t.closed then
                           Eio.Stream.add t.work
                             (Command (Cancel_subscription_drain { sid }))))
+                  ~wait:(fun timeout ->
+                    match Mtime.add_span (now t) timeout with
+                    | None -> Error Error.Timeout
+                    | Some deadline ->
+                        t.clock.sleep_until deadline;
+                        Ok ())
               in
               Hashtbl.replace t.subscriptions sid subscription;
               match apply_transition t transition with

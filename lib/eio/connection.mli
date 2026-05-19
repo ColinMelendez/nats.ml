@@ -55,6 +55,15 @@ module Subscription : sig
 
   val sid : t -> int
   val next : t -> (delivery, Error.t) result
+  (** [next] waits until a delivery or a terminal subscription error is
+      available. *)
+
+  val next_with_timeout : timeout:Mtime.Span.t -> t -> (delivery, Error.t) result
+  (** [next_with_timeout ~timeout subscription] waits at most [timeout] for a
+      delivery. A non-positive timeout is rejected with [Invalid_timeout
+      "subscription"]. A timeout leaves the subscription active and returns
+      [Error.Timeout]; closure, disconnection, and cancellation retain the
+      same behavior as [next]. *)
   val iter : t -> f:(delivery -> unit) -> (unit, Error.t) result
   val unsubscribe : t -> (unit, Error.t) result
   val auto_unsubscribe : t -> max_messages:int -> (unit, Error.t) result
@@ -63,6 +72,11 @@ end
 
 type t
 type error = Error.t
+
+val now : t -> Mtime.t
+(** [now connection] reads the monotonic clock used by the connection for
+    protocol deadlines. Use it when calculating deadlines for operations that
+    combine several connection primitives. *)
 
 val fresh_inbox : t -> Nats.Subject.t
 (** [fresh_inbox connection] allocates a fresh reply subject under the
