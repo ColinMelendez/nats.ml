@@ -103,6 +103,19 @@ let safe_identifier value =
          || code = Char.code '-')
        value
 
+let contains_substring ~needle value =
+  let needle_length = String.length needle in
+  let value_length = String.length value in
+  if Int.equal needle_length 0 then true
+  else
+    let found = ref false in
+    let last_position = value_length - needle_length in
+    for position = 0 to last_position do
+      if String.equal (String.sub value position needle_length) needle then
+        found := true
+    done;
+    !found
+
 let run_jetstream ~sw ~client ~timeout =
   let jetstream =
     expect_jetstream_ok "jetstream" (Nats_eio.Jetstream.v client)
@@ -145,6 +158,157 @@ let run_jetstream ~sw ~client ~timeout =
              (Nats_eio.Jetstream.Stream.Info.messages initial_info)
              0L)
       then failf "new JetStream stream was not empty";
+      let raw_stream_name = stream_name ^ "_RAW" in
+      let raw_stream_subject =
+        Nats.Subject.literal "ocaml.integration.js.raw"
+      in
+      let raw_stream_created = ref false in
+      let raw_stream_deleted = ref false in
+      Fun.protect
+        ~finally:(fun () ->
+          if !raw_stream_created && not !raw_stream_deleted then
+            match
+              Nats_eio.Jetstream.Stream.bind jetstream ~name:raw_stream_name
+            with
+            | Error error ->
+                prerr_endline
+                  (Format.asprintf "raw JetStream cleanup bind failed: %a"
+                     Nats_eio.Jetstream.Error.pp error)
+            | Ok raw_stream -> (
+                match Nats_eio.Jetstream.Stream.delete raw_stream with
+                | Ok () -> ()
+                | Error error ->
+                    prerr_endline
+                      (Format.asprintf "raw JetStream cleanup failed: %a"
+                         Nats_eio.Jetstream.Error.pp error)))
+        (fun () ->
+          let raw_create_subject =
+            Nats.Subject.literal ("$JS.API.STREAM.CREATE." ^ raw_stream_name)
+          in
+          let raw_config =
+            Format.sprintf
+              {|{"name":%S,"subjects":[%S],"storage":"memory","retention":"limits","discard":"old","description":"preserve-me"}|}
+              raw_stream_name
+              (Nats.Subject.to_string raw_stream_subject)
+          in
+          let raw_create_response =
+            expect_ok "raw JetStream stream create"
+              (Nats_eio.Connection.request ~timeout client raw_create_subject
+                 raw_config)
+          in
+          raw_stream_created := true;
+          let raw_create_payload = Nats.Message.payload raw_create_response in
+          if
+            (not
+               (contains_substring ~needle:"\"description\"" raw_create_payload))
+            || not (contains_substring ~needle:"preserve-me" raw_create_payload)
+          then
+            failf "raw JetStream stream create lost its description: %s"
+              raw_create_payload;
+          let raw_stream =
+            expect_jetstream_ok "raw JetStream stream bind"
+              (Nats_eio.Jetstream.Stream.bind jetstream ~name:raw_stream_name)
+          in
+          let raw_current_info =
+            expect_jetstream_ok "raw JetStream stream info before update"
+              (Nats_eio.Jetstream.Stream.info raw_stream)
+          in
+          let raw_update_config =
+            expect_jetstream_config_ok "raw JetStream stream update config"
+              (Nats_eio.Jetstream.Stream.Config.with_max_msgs
+                 (Nats_eio.Jetstream.Stream.Info.config raw_current_info)
+                 (Some 10_000L))
+          in
+          let raw_updated_info =
+            expect_jetstream_ok "raw JetStream stream update"
+              (Nats_eio.Jetstream.Stream.update raw_stream raw_update_config)
+          in
+          (match
+             Nats_eio.Jetstream.Stream.Config.max_msgs
+               (Nats_eio.Jetstream.Stream.Info.config raw_updated_info)
+           with
+          | Some value when Int64.equal value 10_000L -> ()
+          | Some value -> failf "raw stream update applied max_msgs=%Ld" value
+          | None -> failf "raw stream update lost max_msgs");
+          let raw_info_subject =
+            Nats.Subject.literal ("$JS.API.STREAM.INFO." ^ raw_stream_name)
+          in
+          let raw_info_response =
+            expect_ok "raw JetStream stream info"
+              (Nats_eio.Connection.request ~timeout client raw_info_subject "")
+          in
+          let raw_info_payload = Nats.Message.payload raw_info_response in
+          if
+            (not
+               (contains_substring ~needle:"\"description\"" raw_info_payload))
+            || not (contains_substring ~needle:"preserve-me" raw_info_payload)
+          then
+            failf "stream update lost an unmodeled description: %s"
+              raw_info_payload;
+          expect_jetstream_ok "raw JetStream stream delete"
+            (Nats_eio.Jetstream.Stream.delete raw_stream);
+          raw_stream_deleted := true);
+      let updated_config =
+        expect_jetstream_config_ok "jetstream stream update config"
+          (Nats_eio.Jetstream.Stream.Config.v ~name:stream_name
+             ~subjects:[ filter ]
+             ~storage:Nats_eio.Jetstream.Stream.Config.Memory ~max_msgs:10_000L
+             ())
+      in
+      let updated_info =
+        expect_jetstream_ok "jetstream stream update"
+          (Nats_eio.Jetstream.Stream.update stream updated_config)
+      in
+      (match
+         Nats_eio.Jetstream.Stream.Config.max_msgs
+           (Nats_eio.Jetstream.Stream.Info.config updated_info)
+       with
+      | Some value when Int64.equal value 10_000L -> ()
+      | Some value -> failf "stream update applied max_msgs=%Ld" value
+      | None -> failf "stream update lost max_msgs");
+      let stream_infos =
+        expect_jetstream_ok "jetstream stream list"
+          (Nats_eio.Jetstream.Stream.list jetstream)
+      in
+      if
+        not
+          (List.exists
+             (fun info ->
+               String.equal
+                 (Nats_eio.Jetstream.Stream.Config.name
+                    (Nats_eio.Jetstream.Stream.Info.config info))
+                 stream_name)
+             stream_infos)
+      then failf "stream list did not include the created stream";
+      let filtered_stream_infos =
+        expect_jetstream_ok "jetstream filtered stream list"
+          (Nats_eio.Jetstream.Stream.list ~subject:filter jetstream)
+      in
+      if
+        not
+          (List.exists
+             (fun info ->
+               String.equal
+                 (Nats_eio.Jetstream.Stream.Config.name
+                    (Nats_eio.Jetstream.Stream.Info.config info))
+                 stream_name)
+             filtered_stream_infos)
+      then failf "filtered stream list did not include the created stream";
+      let mismatched_config =
+        expect_jetstream_config_ok "jetstream mismatched update config"
+          (Nats_eio.Jetstream.Stream.Config.v ~name:(stream_name ^ "_OTHER")
+             ~subjects:[ filter ]
+             ~storage:Nats_eio.Jetstream.Stream.Config.Memory ())
+      in
+      (match Nats_eio.Jetstream.Stream.update stream mismatched_config with
+      | Error
+          (Nats_eio.Jetstream.Error.Unexpected_stream_name { expected; actual })
+        when String.equal expected stream_name
+             && String.equal actual (stream_name ^ "_OTHER") ->
+          ()
+      | Ok _ -> failf "mismatched stream update unexpectedly succeeded"
+      | Error error ->
+          failf "mismatched stream update: %s" (jetstream_error_message error));
       let first_ack =
         expect_jetstream_ok "jetstream publish"
           (Nats_eio.Jetstream.publish ~timeout ~msg_id:"integration-message-1"
@@ -222,6 +386,19 @@ let run_jetstream ~sw ~client ~timeout =
                  (Nats_eio.Jetstream.Consumer.Info.stream_name consumer_info)
                  stream_name)
           then failf "JetStream consumer info named the wrong stream";
+          let consumer_infos =
+            expect_jetstream_ok "jetstream consumer list"
+              (Nats_eio.Jetstream.Consumer.list stream)
+          in
+          if
+            not
+              (List.exists
+                 (fun info ->
+                   String.equal
+                     (Nats_eio.Jetstream.Consumer.Info.name info)
+                     consumer_name)
+                 consumer_infos)
+          then failf "consumer list did not include the created consumer";
           let info_config =
             Nats_eio.Jetstream.Consumer.Info.config consumer_info
           in
