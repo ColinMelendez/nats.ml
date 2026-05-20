@@ -37,6 +37,7 @@ module Error : sig
     | Consumer_deleted
     | Conflict of { code : int; description : string }
     | Unexpected_status of { code : int; description : string }
+    | Pull_closed
 
   val pp_config : Format.formatter -> config -> unit
   val pp_api : Format.formatter -> api -> unit
@@ -237,6 +238,51 @@ module Consumer : sig
     (Msg.t list, Error.t) result
   (** [fetch consumer ~batch] requests up to [batch] messages and returns an
       empty or partial list when the server expires the pull request. *)
+
+  module Pull : sig
+    type consumer = t
+    type t
+
+    val v :
+      sw:Eio.Switch.t ->
+      ?batch:int ->
+      ?expires:Mtime.Span.t ->
+      ?max_bytes:int ->
+      consumer ->
+      (t, Error.t) result
+    (** [v ~sw consumer] opens a persistent pull session using a fresh reply
+        inbox. The default batch is one and the default server expiry is five
+        seconds. The session owns its subscription and closes it when [sw]
+        releases. A session is not transparently restored after a transport
+        loss; recreate it after receiving [Error (Connection Disconnected)].
+        A pull session is single-owner: do not call [next] or
+        [next_with_timeout] concurrently on the same value. *)
+
+    val next : t -> (Msg.t, Error.t) result
+    (** [next pull] waits for the next message. Empty pull batches and the
+        JetStream [408] and [batch completed] statuses are handled internally.
+        Other statuses, including [message size exceeds maxbytes], fail the
+        session. Messages are not acknowledged automatically. Explicit
+        closure returns [Pull_closed]. *)
+
+    val next_with_timeout :
+      timeout:Mtime.Span.t -> t -> (Msg.t, Error.t) result
+    (** [next_with_timeout ~timeout pull] bounds the wait, including retries
+        after empty server batches. A timeout returns [Error (Connection
+        Timeout)] and leaves the pull session open with its current server
+        request outstanding. A transport loss returns [Error (Connection
+        Disconnected)]. *)
+
+    val iter : t -> f:(Msg.t -> unit) -> (unit, Error.t) result
+    (** [iter pull ~f] repeatedly calls [f] for delivered messages until the
+        session fails or is closed. It returns [Ok ()] for an explicit close
+        and does not acknowledge messages. *)
+
+    val close : t -> (unit, Error.t) result
+    (** [close pull] stops the session and is idempotent. An outstanding pull
+        request is abandoned; messages not received by the client may be
+        redelivered according to the consumer's acknowledgement policy. *)
+  end
 
   val info : t -> (Info.t, Error.t) result
   val delete : t -> (unit, Error.t) result

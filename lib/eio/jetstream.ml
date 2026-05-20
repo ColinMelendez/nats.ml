@@ -37,6 +37,7 @@ module Error = struct
     | Consumer_deleted
     | Conflict of { code : int; description : string }
     | Unexpected_status of { code : int; description : string }
+    | Pull_closed
 
   let pp_config ppf = function
     | Empty_name -> Format.pp_print_string ppf "stream name is empty"
@@ -116,6 +117,8 @@ module Error = struct
     | Unexpected_status { code; description } ->
         Format.fprintf ppf "unexpected JetStream pull status %d: %s" code
           description
+    | Pull_closed ->
+        Format.pp_print_string ppf "JetStream pull consumer is closed"
 end
 
 type config_error = Error.config
@@ -1258,6 +1261,18 @@ module Consumer = struct
       Error (Error.Conflict { code; description })
     else Error (Error.Unexpected_status { code; description })
 
+  let pull_status_result status =
+    let code = status.Nats.Op.code in
+    let description = status.Nats.Op.description in
+    let normalized = String.lowercase_ascii description in
+    if Int.equal code 408 then Ok ()
+    else if Int.equal code 409 && contains ~needle:"batch completed" normalized
+    then Ok ()
+    else
+      match status_result status with
+      | Ok () -> Error (Error.Conflict { code; description })
+      | Error error -> Error error
+
   let release_subscription subscription =
     match
       Eio.Cancel.protect (fun () ->
@@ -1371,6 +1386,209 @@ module Consumer = struct
                     match !terminal with
                     | Some result -> result
                     | None -> Ok (List.rev !messages))
+
+  module Pull = struct
+    type consumer = t
+    type state = Open | Closed | Failed of Error.t
+
+    type t = {
+      consumer : consumer;
+      connection : Connection.t;
+      subscription : Connection.Subscription.t;
+      inbox : Nats.Subject.t;
+      subject : Nats.Subject.t;
+      payload : string;
+      batch : int;
+      mutable remaining : int;
+      mutable state : state;
+      mutable hook : Eio.Switch.hook option;
+    }
+
+    let fail pull error =
+      match pull.state with
+      | Open ->
+          pull.state <- Failed error;
+          ignore (release_subscription pull.subscription)
+      | Closed | Failed _ -> ()
+
+    let connection_error pull error =
+      let error = Error.Connection error in
+      fail pull error;
+      Error error
+
+    let subscription_error pull error =
+      match (pull.state, error) with
+      | Closed, (Core_error.Closed | Core_error.Draining) ->
+          Error Error.Pull_closed
+      | _, error -> connection_error pull error
+
+    let close pull =
+      match pull.state with
+      | Closed -> Ok ()
+      | Open | Failed _ ->
+          pull.state <- Closed;
+          Option.iter
+            (fun hook -> ignore (Eio.Switch.try_remove_hook hook))
+            pull.hook;
+          pull.hook <- None;
+          match release_subscription pull.subscription with
+          | None -> Ok ()
+          | Some error -> Error (Error.Connection error)
+
+    let ensure_request pull =
+      if Int.compare pull.remaining 0 > 0 then Ok ()
+      else
+        match pull.state with
+        | Closed -> Error Error.Pull_closed
+        | Failed error -> Error error
+        | Open -> (
+            match
+              Connection.publish pull.connection ~reply_to:pull.inbox
+                pull.subject pull.payload
+            with
+            | Ok () -> (
+                match pull.state with
+                | Open ->
+                    pull.remaining <- pull.batch;
+                    Ok ()
+                | Closed -> Error Error.Pull_closed
+                | Failed error -> Error error)
+            | Error error -> connection_error pull error)
+
+    let timeout_error = Error.Connection (Core_error.Invalid_timeout "pull")
+    let timed_out = Error.Connection Core_error.Timeout
+
+    let next_loop pull ~deadline =
+      let result = ref None in
+      while Option.is_none !result do
+        match pull.state with
+        | Closed -> result := Some (Error Error.Pull_closed)
+        | Failed error -> result := Some (Error error)
+        | Open ->
+            let deadline_reached =
+              match deadline with
+              | Some deadline ->
+                  Mtime.compare (Connection.now pull.connection) deadline >= 0
+              | None -> false
+            in
+            if deadline_reached then result := Some (Error timed_out)
+            else
+              match ensure_request pull with
+              | Error error -> result := Some (Error error)
+              | Ok () ->
+                  let wait_result =
+                    match deadline with
+                    | None -> Connection.Subscription.next pull.subscription
+                    | Some deadline ->
+                        let now = Connection.now pull.connection in
+                        if Mtime.compare now deadline >= 0 then
+                          Error Core_error.Timeout
+                        else
+                          let timeout = Mtime.span now deadline in
+                          Connection.Subscription.next_with_timeout ~timeout
+                            pull.subscription
+                  in
+                  (match wait_result with
+                  | Error Core_error.Timeout -> result := Some (Error timed_out)
+                  | Error error ->
+                      result := Some (subscription_error pull error)
+                  | Ok { status = Some status; _ } ->
+                      (match pull_status_result status with
+                      | Ok () -> pull.remaining <- 0
+                      | Error error ->
+                          fail pull error;
+                          result := Some (Error error))
+                  | Ok { status = None; message } ->
+                      (match
+                         Msg.of_message ~jetstream:pull.consumer.jetstream
+                           ~stream_name:(Stream.name pull.consumer.stream)
+                           ~consumer_name:pull.consumer.name message
+                       with
+                      | Ok message ->
+                          pull.remaining <- pull.remaining - 1;
+                          result := Some (Ok message)
+                      | Error error ->
+                          fail pull error;
+                          result := Some (Error error)))
+      done;
+      match !result with Some result -> result | None -> assert false
+
+    let v ~sw ?(batch = 1) ?expires ?max_bytes consumer =
+      let expires = Option.value expires ~default:default_fetch_expires in
+      match validate_fetch ~batch ~expires ~max_bytes with
+      | Error error -> Error error
+      | Ok () -> (
+          let request =
+            { expires = Mtime.Span.to_uint64_ns expires; batch; max_bytes }
+          in
+          match encode next_request_codec request with
+          | Error error -> Error error
+          | Ok payload -> (
+              let connection = consumer.jetstream.connection in
+              let inbox = Connection.fresh_inbox connection in
+              let filter =
+                Nats.Subject.Filter.literal (Nats.Subject.to_string inbox)
+              in
+              match
+                Connection.subscribe connection ~replay_on_reconnect:false
+                  filter
+              with
+              | Error error -> Error (Error.Connection error)
+              | Ok subscription ->
+                  let subject =
+                    api_subject consumer.jetstream
+                      [
+                        "CONSUMER";
+                        "MSG";
+                        "NEXT";
+                        Stream.name consumer.stream;
+                        consumer.name;
+                      ]
+                  in
+                  let pull =
+                    {
+                      consumer;
+                      connection;
+                      subscription;
+                      inbox;
+                      subject;
+                      payload;
+                      batch;
+                      remaining = 0;
+                      state = Open;
+                      hook = None;
+                    }
+                  in
+                  let hook =
+                    Eio.Switch.on_release_cancellable sw (fun () ->
+                        ignore (close pull))
+                  in
+                  pull.hook <- Some hook;
+                  Ok pull))
+
+    let next pull = next_loop pull ~deadline:None
+
+    let next_with_timeout ~timeout pull =
+      if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then
+        Error timeout_error
+      else
+        let deadline =
+          match Mtime.add_span (Connection.now pull.connection) timeout with
+          | Some deadline -> deadline
+          | None -> Mtime.max_stamp
+        in
+        next_loop pull ~deadline:(Some deadline)
+
+    let iter pull ~f =
+      let result = ref None in
+      while Option.is_none !result do
+        match next pull with
+        | Ok message -> f message
+        | Error Error.Pull_closed -> result := Some (Ok ())
+        | Error error -> result := Some (Error error)
+      done;
+      match !result with Some result -> result | None -> assert false
+  end
 
   let bind (stream : Stream.t) ~name =
     match Config.validate_name (Some name) with
