@@ -103,7 +103,7 @@ let safe_identifier value =
          || code = Char.code '-')
        value
 
-let run_jetstream ~client ~timeout =
+let run_jetstream ~sw ~client ~timeout =
   let jetstream =
     expect_jetstream_ok "jetstream" (Nats_eio.Jetstream.v client)
   in
@@ -379,6 +379,221 @@ let run_jetstream ~client ~timeout =
           then failf "max-bytes JetStream fetch lost the pending message";
           expect_jetstream_ok "max-bytes JetStream ack"
             (Nats_eio.Jetstream.Msg.ack max_bytes_message);
+          let with_pull ?batch ?expires ?max_bytes label f =
+            let pull =
+              expect_jetstream_ok (label ^ " create")
+                (Nats_eio.Jetstream.Consumer.Pull.v ~sw ?batch ?expires
+                   ?max_bytes consumer)
+            in
+            Fun.protect
+              ~finally:(fun () ->
+                match Nats_eio.Jetstream.Consumer.Pull.close pull with
+                | Ok () -> ()
+                | Error error ->
+                    failf "%s close: %s" label (jetstream_error_message error))
+              (fun () -> f pull)
+          in
+          let pull_one_ack =
+            expect_jetstream_ok "JetStream first pull publish"
+              (Nats_eio.Jetstream.publish ~timeout
+                 ~msg_id:"integration-message-pull-1" jetstream subject
+                 "pull-one")
+          in
+          if Nats_eio.Jetstream.Publish_ack.duplicate pull_one_ack then
+            failf "first pull publish was marked duplicate";
+          let pull_two_ack =
+            expect_jetstream_ok "JetStream second pull publish"
+              (Nats_eio.Jetstream.publish ~timeout
+                 ~msg_id:"integration-message-pull-2" jetstream subject
+                 "pull-two")
+          in
+          if Nats_eio.Jetstream.Publish_ack.duplicate pull_two_ack then
+            failf "second pull publish was marked duplicate";
+          with_pull "JetStream single-message pull" (fun pull ->
+              let first =
+                expect_jetstream_ok "JetStream first pull"
+                  (Nats_eio.Jetstream.Consumer.Pull.next pull)
+              in
+              if
+                not
+                  (String.equal
+                     (Nats_eio.Jetstream.Msg.payload first)
+                     "pull-one")
+              then failf "first pull returned the wrong payload";
+              expect_jetstream_ok "JetStream first pull ack"
+                (Nats_eio.Jetstream.Msg.ack first);
+              let second =
+                expect_jetstream_ok "JetStream second pull"
+                  (Nats_eio.Jetstream.Consumer.Pull.next pull)
+              in
+              if
+                not
+                  (String.equal
+                     (Nats_eio.Jetstream.Msg.payload second)
+                     "pull-two")
+              then failf "second pull returned the wrong payload";
+              expect_jetstream_ok "JetStream second pull ack"
+                (Nats_eio.Jetstream.Msg.ack second));
+          let pull_three_ack =
+            expect_jetstream_ok "JetStream third pull publish"
+              (Nats_eio.Jetstream.publish ~timeout
+                 ~msg_id:"integration-message-pull-3" jetstream subject
+                 "pull-three")
+          in
+          if Nats_eio.Jetstream.Publish_ack.duplicate pull_three_ack then
+            failf "third pull publish was marked duplicate";
+          let pull_four_ack =
+            expect_jetstream_ok "JetStream fourth pull publish"
+              (Nats_eio.Jetstream.publish ~timeout
+                 ~msg_id:"integration-message-pull-4" jetstream subject
+                 "pull-four")
+          in
+          if Nats_eio.Jetstream.Publish_ack.duplicate pull_four_ack then
+            failf "fourth pull publish was marked duplicate";
+          with_pull ~batch:2 "JetStream batched pull" (fun pull ->
+              let first =
+                expect_jetstream_ok "JetStream batched first pull"
+                  (Nats_eio.Jetstream.Consumer.Pull.next pull)
+              in
+              let second =
+                expect_jetstream_ok "JetStream batched second pull"
+                  (Nats_eio.Jetstream.Consumer.Pull.next pull)
+              in
+              if
+                not
+                  (String.equal
+                     (Nats_eio.Jetstream.Msg.payload first)
+                     "pull-three")
+              then failf "batched first pull returned the wrong payload";
+              if
+                not
+                  (String.equal
+                     (Nats_eio.Jetstream.Msg.payload second)
+                     "pull-four")
+              then failf "batched second pull returned the wrong payload";
+              expect_jetstream_ok "JetStream batched first pull ack"
+                (Nats_eio.Jetstream.Msg.ack first);
+              expect_jetstream_ok "JetStream batched second pull ack"
+                (Nats_eio.Jetstream.Msg.ack second));
+          with_pull
+            ~expires:Mtime.Span.(1 * s)
+            "JetStream timed pull"
+            (fun pull ->
+              (match
+                 Nats_eio.Jetstream.Consumer.Pull.next_with_timeout
+                   ~timeout:Mtime.Span.(50 * ms)
+                   pull
+               with
+              | Error
+                  (Nats_eio.Jetstream.Error.Connection Nats_eio.Error.Timeout)
+                ->
+                  ()
+              | Ok _ -> failf "empty timed pull unexpectedly returned a message"
+              | Error error ->
+                  failf "empty timed pull: %s" (jetstream_error_message error));
+              let timeout_ack =
+                expect_jetstream_ok "JetStream post-timeout pull publish"
+                  (Nats_eio.Jetstream.publish ~timeout
+                     ~msg_id:"integration-message-pull-timeout" jetstream
+                     subject "pull-after-timeout")
+              in
+              if Nats_eio.Jetstream.Publish_ack.duplicate timeout_ack then
+                failf "post-timeout pull publish was marked duplicate";
+              let message =
+                expect_jetstream_ok "JetStream post-timeout pull"
+                  (Nats_eio.Jetstream.Consumer.Pull.next pull)
+              in
+              if
+                not
+                  (String.equal
+                     (Nats_eio.Jetstream.Msg.payload message)
+                     "pull-after-timeout")
+              then failf "post-timeout pull returned the wrong payload";
+              expect_jetstream_ok "JetStream post-timeout pull ack"
+                (Nats_eio.Jetstream.Msg.ack message));
+          with_pull
+            ~expires:Mtime.Span.(1 * ms)
+            "JetStream server-expiring pull"
+            (fun pull ->
+              (match
+                 Nats_eio.Jetstream.Consumer.Pull.next_with_timeout
+                   ~timeout:Mtime.Span.(100 * ms)
+                   pull
+               with
+              | Error
+                  (Nats_eio.Jetstream.Error.Connection Nats_eio.Error.Timeout)
+                ->
+                  ()
+              | Ok _ ->
+                  failf "server-expiring pull unexpectedly returned a message"
+              | Error error ->
+                  failf "server-expiring pull: %s"
+                    (jetstream_error_message error));
+              let server_expiring_ack =
+                expect_jetstream_ok "JetStream server-expiring pull publish"
+                  (Nats_eio.Jetstream.publish ~timeout
+                     ~msg_id:"integration-message-pull-server-expiring"
+                     jetstream subject "pull-after-server-expiry")
+              in
+              if Nats_eio.Jetstream.Publish_ack.duplicate server_expiring_ack
+              then failf "server-expiring pull publish was marked duplicate";
+              let message =
+                expect_jetstream_ok "JetStream server-expiring pull message"
+                  (Nats_eio.Jetstream.Consumer.Pull.next pull)
+              in
+              if
+                not
+                  (String.equal
+                     (Nats_eio.Jetstream.Msg.payload message)
+                     "pull-after-server-expiry")
+              then failf "server-expiring pull returned the wrong payload";
+              expect_jetstream_ok "JetStream server-expiring pull ack"
+                (Nats_eio.Jetstream.Msg.ack message));
+          let pull_max_bytes_ack =
+            expect_jetstream_ok "JetStream pull max-bytes publish"
+              (Nats_eio.Jetstream.publish ~timeout
+                 ~msg_id:"integration-message-pull-max-bytes" jetstream subject
+                 "pull-max-bytes")
+          in
+          if Nats_eio.Jetstream.Publish_ack.duplicate pull_max_bytes_ack then
+            failf "pull max-bytes publish was marked duplicate";
+          with_pull ~max_bytes:1 "JetStream max-bytes pull" (fun pull ->
+              match Nats_eio.Jetstream.Consumer.Pull.next pull with
+              | Error
+                  (Nats_eio.Jetstream.Error.Conflict { code = 409; _ })
+                ->
+                  ()
+              | Ok _ -> failf "max-bytes pull returned an oversized message"
+              | Error error ->
+                  failf "max-bytes pull: %s" (jetstream_error_message error));
+          let pull_max_bytes_message =
+            one_message "JetStream pull max-bytes redelivery"
+              (expect_jetstream_ok "JetStream pull max-bytes redelivery"
+                 (Nats_eio.Jetstream.Consumer.fetch consumer ~batch:1))
+          in
+          if
+            not
+              (String.equal
+                 (Nats_eio.Jetstream.Msg.payload pull_max_bytes_message)
+                 "pull-max-bytes")
+          then failf "pull max-bytes redelivery returned the wrong payload";
+          expect_jetstream_ok "JetStream pull max-bytes ack"
+            (Nats_eio.Jetstream.Msg.ack pull_max_bytes_message);
+          with_pull "JetStream closed pull" (fun pull ->
+              expect_jetstream_ok "JetStream pull close"
+                (Nats_eio.Jetstream.Consumer.Pull.close pull);
+              (match Nats_eio.Jetstream.Consumer.Pull.next pull with
+              | Error Nats_eio.Jetstream.Error.Pull_closed -> ()
+              | Ok _ -> failf "closed pull returned a message"
+              | Error error ->
+                  failf "closed pull next: %s" (jetstream_error_message error));
+              match
+                Nats_eio.Jetstream.Consumer.Pull.iter pull ~f:(fun _ ->
+                    failf "closed pull iter received a message")
+              with
+              | Ok () -> ()
+              | Error error ->
+                  failf "closed pull iter: %s" (jetstream_error_message error));
           let rebound =
             expect_jetstream_ok "jetstream consumer bind"
               (Nats_eio.Jetstream.Consumer.bind stream ~name:consumer_name)
@@ -565,7 +780,7 @@ let run env =
   expect_ok "flush" (Nats_eio.Connection.flush client);
   print_endline "flush: ok";
   (match Sys.getenv_opt "NATS_TEST_JETSTREAM" with
-  | Some "1" -> run_jetstream ~client ~timeout
+  | Some "1" -> run_jetstream ~sw ~client ~timeout
   | _ -> ());
   expect_ok "close responder" (Nats_eio.Connection.close responder);
   expect_ok "close worker one" (Nats_eio.Connection.close worker_one);
