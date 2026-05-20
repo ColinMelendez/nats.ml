@@ -620,8 +620,9 @@ These modules should be layered over `Connection.request` and
 `Connection.subscribe`:
 
 - `Nats_eio.Jetstream` provides a connection capability, typed API request and
-  response models, stream/consumer management, publish acknowledgements,
-  consumer handles, one-shot fetch, and a persistent `Consumer.Pull` session.
+  response models, stream/consumer management (including typed update and
+  inventory operations), publish acknowledgements, consumer handles, one-shot
+  fetch, and a persistent `Consumer.Pull` session.
   Delivered `Msg.t` values carry the stream/consumer metadata needed for
   explicit `ack`, `nak`, `term`, and `in_progress` operations. Push and
   ordered consumption, heartbeats, flow control, and synchronous ack remain
@@ -649,17 +650,23 @@ Management operations should use typed request/response codecs and preserve
 unknown server fields where practical. They should not require callers to
 construct `$JS.API.*` subjects or parse JSON error strings. The server-version
 minimum for each feature should be checked and returned as a structured error,
-not hidden behind a generic request failure.
+not hidden behind a generic request failure. A full-replacement server update
+must use a read-modify-write boundary when the public OCaml config is only a
+projection of the wire config; modeled fields are explicit replacements and
+unknown fields must not be silently reset.
 
 The implemented JetStream slice follows this boundary in `nats-eio`: a
 resource-free `Jetstream` capability uses `Jsont`/`bytesrw` at the Eio boundary,
 decodes management success/error envelopes, and exposes typed stream
-configuration, stream/consumer create/bind/info/delete, durable publish
-acknowledgements, message acknowledgement verbs, one-shot fetch, and
-persistent pull sessions. The management prefix is configurable for JetStream
-domains, while application subjects remain ordinary Core NATS subjects. KV,
-Object Store, Services, push/ordered consumers, and heartbeat/flow-control
-features remain later layers over the same connection.
+configuration, stream create/bind/update/list/info/delete, consumer
+create/bind/info/list/delete, durable publish acknowledgements, message
+acknowledgement verbs, one-shot fetch, and persistent pull sessions. Stream
+updates preserve unknown server configuration through an INFO/read-modify-write
+cycle; list operations consume server pagination and fail explicitly on an
+incomplete page. The management prefix is configurable for JetStream domains,
+while application subjects remain ordinary Core NATS subjects. KV, Object
+Store, Services, push/ordered consumers, and heartbeat/flow-control features
+remain later layers over the same connection.
 
 ## 6. Testing and interoperability
 
@@ -681,8 +688,9 @@ through individual helper functions:
   cluster discovery, TLS/authentication, queue groups, JetStream, KV, Object
   Store, and Services. The current opt-in Docker harness enables its
   JetStream slice with `NATS_TEST_JETSTREAM=1` and covers stream management,
-  publish acknowledgements, duplicate message ids, one-shot and persistent
-  pull delivery, timeout/expiry behavior, max-bytes errors, and cleanup;
+  stream update/list, consumer inventory, unknown-config preservation, publish
+  acknowledgements, duplicate message ids, one-shot and persistent pull
+  delivery, timeout/expiry behavior, max-bytes errors, and cleanup;
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 

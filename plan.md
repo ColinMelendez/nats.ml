@@ -68,11 +68,12 @@ ahead of the G2 stability gate. Authentication capabilities now cover anonymous,
 token, username/password, NKey, and JWT credentials; nonce signing is repeated
 for every INFO, while private-key parsing and NKey/JWT server acceptance remain
 later work. The JetStream foundation now adds a typed, resource-free capability
-over the connection, stream configuration/info and create/bind/info/delete
-operations, publish acknowledgements with message ids, API error envelopes, and
-an opt-in real-server acceptance path for management, deduplication, and
-cleanup. The consumer slice now includes consumer management, one-shot fetch,
-typed message acknowledgements, and a persistent single-owner
+over the connection, stream configuration/info and
+create/bind/update/list/info/delete operations, publish acknowledgements with
+message ids, API error envelopes, and an opt-in real-server acceptance path for
+management, deduplication, and cleanup. The consumer slice now includes
+consumer management and inventory, one-shot fetch, typed message
+acknowledgements, and a persistent single-owner
 `Consumer.Pull` session with batch accounting, local timeout/resumption,
 server-expiry retries, structured terminal statuses, and switch-owned cleanup.
 KV, Object Store, Services, and the remaining push/ordered/heartbeat consumer
@@ -415,12 +416,15 @@ request/reply and subscription primitives.
 
 - Use `Jsont` at the Eio/JetStream boundary with `bytesrw` string codecs;
   management replies are decoded as success/error envelopes and unknown server
-  fields are skipped until update/list shapes require preservation.
-- The completed foundation models stream configuration/info, API responses, and
-  structured JetStream errors separately from `Nats.Error`; it implements stream
-  create/bind/delete/info and durable publish acknowledgements with message-id
-  options over application subjects.
-- Implement stream update/list and consumer management.
+  fields are preserved on stream update/list wire paths even when the public
+  projection does not expose them.
+- Completed: model stream configuration/info, API responses, and structured
+  JetStream errors separately from `Nats.Error`; implement stream
+  create/bind/update/list/delete/info, consumer create/bind/info/list/delete,
+  and durable publish acknowledgements with message-id options over application
+  subjects. Stream updates preserve unknown server configuration through an
+  INFO/read-modify-write cycle, and list operations fail with a structured
+  error rather than silently returning an incomplete page.
 - Extend publish acknowledgements with all server status fields and feature
   gates where supported.
 - Gate features by server version and return structured unsupported-feature
@@ -443,9 +447,10 @@ request/reply and subscription primitives.
 
 ### Acceptance tests
 
-- The opt-in Docker harness covers stream create/info/delete, publish ack,
-  duplicate message ids, message counts, and cleanup without hand-built
-  `$JS.API.*` subjects; it runs in anonymous and username/password modes.
+- The opt-in Docker harness covers stream create/update/info/list/delete,
+  filtered stream and consumer inventory, publish ack, duplicate message ids,
+  message counts, unknown-config preservation, and cleanup; it runs in
+  anonymous and username/password modes.
 - Completed: add typed server-error assertions, consumer management, pull
   backpressure, local/server-expiry behavior, cancellation/cleanup, and
   acknowledgement metadata/redelivery coverage against a real JetStream
