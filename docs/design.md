@@ -2,11 +2,11 @@
 
 ## Status
 
-This is the initial design proposal, based on the maintained NATS clients and
-the NATS protocol documentation available on 2026-08-10. It is deliberately a
-design document rather than an API commitment: names and exact module
-signatures should be checked against small working prototypes before they are
-stabilised.
+This design began as a proposal based on the maintained NATS clients and the
+NATS protocol documentation available on 2026-08-10. It remains a design
+document rather than a promise that every planned surface is stable; concrete
+APIs that have been implemented are called out explicitly and should continue
+to pass the stability gates below.
 
 The recommendation is to build a feature-complete SDK in waves around a small,
 runtime-independent protocol core and an Eio integration. The core should own
@@ -173,26 +173,40 @@ rule is not: the switch that creates a connection owns its termination.
 
 ### JetStream pull consumption
 
-JetStream should expose a typed consumer rather than make users assemble API
-subjects and decode acknowledgement metadata themselves:
+JetStream exposes a typed consumer rather than making users assemble API
+subjects and decode acknowledgement metadata themselves. The current Eio
+surface separates a local consumer handle from a persistent pull session:
 
 ```ocaml
-let js = Nats_eio.Jetstream.connect conn in
-let stream =
-  Nats_eio.Jetstream.Stream.create js
-    ~name:"ORDERS"
-    ~subjects:[Nats.Subject.Filter.literal "orders.>"]
-in
-let consumer = Nats_eio.Jetstream.Consumer.pull stream ~durable:"worker" in
-
-Nats_eio.Jetstream.Consumer.iter consumer ~f:(fun message ->
-  match process_order message with
-  | Ok () -> Nats_eio.Jetstream.Message.ack message
-  | Error _ -> Nats_eio.Jetstream.Message.nak message)
+let consume ~sw consumer =
+  match Nats_eio.Jetstream.Consumer.Pull.v ~sw consumer with
+  | Error error -> report_error error
+  | Ok pull ->
+      Fun.protect
+        ~finally:(fun () -> ignore (Nats_eio.Jetstream.Consumer.Pull.close pull))
+        (fun () ->
+          match
+            Nats_eio.Jetstream.Consumer.Pull.iter pull ~f:(fun message ->
+                match process_order message with
+                | Ok () -> ignore (Nats_eio.Jetstream.Msg.ack message)
+                | Error _ -> ignore (Nats_eio.Jetstream.Msg.nak message))
+          with
+          | Ok () -> ()
+          | Error error -> report_error error)
 ```
 
-The high-level API should still expose raw request/reply and raw NATS messages
-for advanced JetStream features that arrive before a convenience wrapper.
+`Consumer.fetch` remains available for one-shot pulls. `Consumer.Pull` owns a
+fresh reply inbox subscription, keeps at most one server pull outstanding, and
+uses the requested batch/count and byte limits for the session. `next` and
+`iter` do not acknowledge messages; acknowledgement is an explicit operation
+on the typed `Msg.t`. A local timeout leaves the current server request
+outstanding so a later call can receive its message, while a transport loss
+returns a structured error and requires the caller to create a new session.
+The session is single-owner and closes its subscription with its switch or
+through `close`.
+
+The high-level API still exposes raw request/reply and raw NATS messages for
+advanced JetStream features that arrive before a convenience wrapper.
 
 ### The protocol core as a testable boundary
 
@@ -607,9 +621,11 @@ These modules should be layered over `Connection.request` and
 
 - `Nats_eio.Jetstream` provides a connection capability, typed API request and
   response models, stream/consumer management, publish acknowledgements,
-  consumer handles, pull and push consumption, ordered consumers, fetch by
-  count/bytes, heartbeats, and acknowledgement operations (`ack`, `nak`,
-  `term`, `in_progress`, and synchronous ack where supported).
+  consumer handles, one-shot fetch, and a persistent `Consumer.Pull` session.
+  Delivered `Msg.t` values carry the stream/consumer metadata needed for
+  explicit `ack`, `nak`, `term`, and `in_progress` operations. Push and
+  ordered consumption, heartbeats, flow control, and synchronous ack remain
+  planned extensions.
 - `Nats_eio.Key_value` provides bucket creation/opening, get/put, create/update
   compare-and-set, delete/purge, revision/history, TTL, keys, status, and
   cancellable watches. Watch entries preserve bucket, key, value, revision,
@@ -635,13 +651,15 @@ construct `$JS.API.*` subjects or parse JSON error strings. The server-version
 minimum for each feature should be checked and returned as a structured error,
 not hidden behind a generic request failure.
 
-The first implementation slice follows this boundary in `nats-eio`: a
+The implemented JetStream slice follows this boundary in `nats-eio`: a
 resource-free `Jetstream` capability uses `Jsont`/`bytesrw` at the Eio boundary,
 decodes management success/error envelopes, and exposes typed stream
-configuration, create/bind/info/delete, and durable publish acknowledgements.
-The management prefix is configurable for JetStream domains, while application
-subjects remain ordinary Core NATS subjects. Consumer, KV, Object Store, and
-Services APIs remain later layers over the same connection.
+configuration, stream/consumer create/bind/info/delete, durable publish
+acknowledgements, message acknowledgement verbs, one-shot fetch, and
+persistent pull sessions. The management prefix is configurable for JetStream
+domains, while application subjects remain ordinary Core NATS subjects. KV,
+Object Store, Services, push/ordered consumers, and heartbeat/flow-control
+features remain later layers over the same connection.
 
 ## 6. Testing and interoperability
 
@@ -663,7 +681,8 @@ through individual helper functions:
   cluster discovery, TLS/authentication, queue groups, JetStream, KV, Object
   Store, and Services. The current opt-in Docker harness enables its
   JetStream slice with `NATS_TEST_JETSTREAM=1` and covers stream management,
-  publish acknowledgements, duplicate message ids, and cleanup;
+  publish acknowledgements, duplicate message ids, one-shot and persistent
+  pull delivery, timeout/expiry behavior, max-bytes errors, and cleanup;
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 

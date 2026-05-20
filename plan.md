@@ -71,7 +71,12 @@ later work. The JetStream foundation now adds a typed, resource-free capability
 over the connection, stream configuration/info and create/bind/info/delete
 operations, publish acknowledgements with message ids, API error envelopes, and
 an opt-in real-server acceptance path for management, deduplication, and
-cleanup. Consumer, KV, Object Store, and Services surfaces remain later work.
+cleanup. The consumer slice now includes consumer management, one-shot fetch,
+typed message acknowledgements, and a persistent single-owner
+`Consumer.Pull` session with batch accounting, local timeout/resumption,
+server-expiry retries, structured terminal statuses, and switch-owned cleanup.
+KV, Object Store, Services, and the remaining push/ordered/heartbeat consumer
+features remain later work.
 The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
@@ -423,13 +428,17 @@ request/reply and subscription primitives.
 
 ### Workstream 4B — Consumer delivery
 
-- Implement pull consumers first, with one-shot fetch and long-lived iteration.
-- Expose delivery metadata as a typed value tied to the delivered message.
-- Implement `ack`, `nak`, `term`, `in_progress`, and synchronous ack where
-  supported.
-- Add batch/count/byte limits, cancellation, heartbeat handling, and consumer
-  cleanup.
-- Add push consumers, ordered consumers, filtering, and flow-control behavior
+- Completed: implement pull consumers first, with one-shot fetch and a
+  long-lived `Consumer.Pull` session that exposes `next`, bounded
+  `next_with_timeout`, `iter`, and idempotent `close`.
+- Completed: expose delivery metadata as a typed `Msg.t` tied to the delivered
+  message and implement `ack`, `nak`, `term`, and `in_progress`.
+- Completed: validate batch/count/byte limits, account for partial batches,
+  retry empty server batches without recursive growth, preserve an outstanding
+  request across a local timeout, and release subscriptions on close or switch
+  release.
+- Remaining: add server idle heartbeats and consumer-failure detection, then
+  add push consumers, ordered consumers, filtering, and flow-control behavior
   without introducing a second runtime or subscription abstraction.
 
 ### Acceptance tests
@@ -437,10 +446,11 @@ request/reply and subscription primitives.
 - The opt-in Docker harness covers stream create/info/delete, publish ack,
   duplicate message ids, message counts, and cleanup without hand-built
   `$JS.API.*` subjects; it runs in anonymous and username/password modes.
-- Add typed server-error assertions and consumer management.
-- Pull backpressure and cancellation against a real JetStream server.
-- Correct acknowledgement metadata and redelivery behavior.
-- Heartbeat/consumer failure handling and server-version gates.
+- Completed: add typed server-error assertions, consumer management, pull
+  backpressure, local/server-expiry behavior, cancellation/cleanup, and
+  acknowledgement metadata/redelivery coverage against a real JetStream
+  server.
+- Remaining: heartbeat/consumer failure handling and server-version gates.
 - Push and ordered consumer behavior once their implementation lands.
 
 ### Gate G4 — JetStream API stabilization
