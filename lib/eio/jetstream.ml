@@ -33,6 +33,9 @@ module Error = struct
     | Invalid_batch of int
     | Invalid_max_bytes of int
     | Invalid_fetch_span
+    | Invalid_idle_heartbeat
+    | Idle_heartbeat_expires_too_short
+    | Missing_heartbeat
     | Missing_ack_reply
     | Invalid_ack_reply of string
     | Consumer_deleted
@@ -107,6 +110,14 @@ module Error = struct
           "JetStream fetch max_bytes must not be negative, got %d" value
     | Invalid_fetch_span ->
         Format.pp_print_string ppf "JetStream fetch expiry must be positive"
+    | Invalid_idle_heartbeat ->
+        Format.pp_print_string ppf "JetStream idle heartbeat must be positive"
+    | Idle_heartbeat_expires_too_short ->
+        Format.pp_print_string ppf
+          "JetStream pull expiry must be at least twice the idle heartbeat"
+    | Missing_heartbeat ->
+        Format.pp_print_string ppf
+          "JetStream pull idle heartbeat was not received"
     | Missing_ack_reply ->
         Format.pp_print_string ppf
           "JetStream delivery has no acknowledgement reply"
@@ -1556,15 +1567,24 @@ module Consumer = struct
   type jetstream = t
   type stream = Stream.t
   type t = { jetstream : jetstream; stream : stream; name : string }
-  type next_request = { expires : int64; batch : int; max_bytes : int option }
+
+  type next_request = {
+    expires : int64;
+    batch : int;
+    max_bytes : int option;
+    idle_heartbeat : int64 option;
+  }
 
   let next_request_codec =
     Jsont.Object.map ~kind:"JetStream consumer pull request"
-      (fun expires batch max_bytes -> { expires; batch; max_bytes })
+      (fun expires batch max_bytes idle_heartbeat ->
+        { expires; batch; max_bytes; idle_heartbeat })
     |> Jsont.Object.mem "expires" Jsont.int64 ~enc:(fun value -> value.expires)
     |> Jsont.Object.mem "batch" Jsont.int ~enc:(fun value -> value.batch)
     |> Jsont.Object.opt_mem "max_bytes" Jsont.int ~enc:(fun value ->
         value.max_bytes)
+    |> Jsont.Object.opt_mem "idle_heartbeat" Jsont.int64 ~enc:(fun value ->
+        value.idle_heartbeat)
     |> Jsont.Object.finish
 
   let default_fetch_expires = Mtime.Span.(5 * s)
@@ -1577,7 +1597,7 @@ module Consumer = struct
       Mtime.Span.max_span
     else Mtime.Span.of_uint64_ns (Int64.add expires_ns leeway_ns)
 
-  let validate_fetch ~batch ~expires ~max_bytes =
+  let validate_fetch ~batch ~expires ~max_bytes ~idle_heartbeat =
     let ( let* ) value f =
       match value with Error error -> Error error | Ok value -> f value
     in
@@ -1589,10 +1609,40 @@ module Consumer = struct
       if Mtime.Span.compare expires Mtime.Span.zero > 0 then Ok ()
       else Error Error.Invalid_fetch_span
     in
-    match max_bytes with
+    let* () =
+      match max_bytes with
+      | None -> Ok ()
+      | Some value when Int.compare value 0 >= 0 -> Ok ()
+      | Some value -> Error (Error.Invalid_max_bytes value)
+    in
+    match idle_heartbeat with
     | None -> Ok ()
-    | Some value when Int.compare value 0 >= 0 -> Ok ()
-    | Some value -> Error (Error.Invalid_max_bytes value)
+    | Some heartbeat ->
+        if Mtime.Span.compare heartbeat Mtime.Span.zero <= 0 then
+          Error Error.Invalid_idle_heartbeat
+        else
+          let heartbeat_ns = Mtime.Span.to_uint64_ns heartbeat in
+          let max_heartbeat_ns =
+            Int64.div (Mtime.Span.to_uint64_ns expires) 2L
+          in
+          if Int64.compare heartbeat_ns max_heartbeat_ns <= 0 then Ok ()
+          else Error Error.Idle_heartbeat_expires_too_short
+
+  let heartbeat_deadline_at connection = function
+    | None -> None
+    | Some heartbeat -> (
+        let timeout_ns = Int64.mul (Mtime.Span.to_uint64_ns heartbeat) 2L in
+        let timeout = Mtime.Span.of_uint64_ns timeout_ns in
+        match Mtime.add_span (Connection.now connection) timeout with
+        | Some deadline -> Some deadline
+        | None -> Some Mtime.max_stamp)
+
+  let earliest_deadline first second =
+    match (first, second) with
+    | None, None -> None
+    | Some deadline, None | None, Some deadline -> Some deadline
+    | Some first, Some second ->
+        Some (if Mtime.compare first second <= 0 then first else second)
 
   let contains ~needle value =
     let value_length = String.length value in
@@ -1665,13 +1715,18 @@ module Consumer = struct
             Ok value
         | Error error, _ -> Error error)
 
-  let fetch ?expires ?max_bytes consumer ~batch =
+  let fetch ?expires ?idle_heartbeat ?max_bytes consumer ~batch =
     let expires = Option.value expires ~default:default_fetch_expires in
-    match validate_fetch ~batch ~expires ~max_bytes with
+    match validate_fetch ~batch ~expires ~max_bytes ~idle_heartbeat with
     | Error error -> Error error
     | Ok () -> (
         let request =
-          { expires = Mtime.Span.to_uint64_ns expires; batch; max_bytes }
+          {
+            expires = Mtime.Span.to_uint64_ns expires;
+            batch;
+            max_bytes;
+            idle_heartbeat = Option.map Mtime.Span.to_uint64_ns idle_heartbeat;
+          }
         in
         match encode next_request_codec request with
         | Error error -> Error error
@@ -1703,42 +1758,76 @@ module Consumer = struct
                       | Some deadline -> deadline
                       | None -> Mtime.max_stamp
                     in
+                    let heartbeat_deadline =
+                      ref (heartbeat_deadline_at connection idle_heartbeat)
+                    in
                     let terminal = ref None in
                     while
                       Int.compare !count batch < 0 && Option.is_none !terminal
                     do
                       let current = Connection.now connection in
-                      if Mtime.compare current deadline >= 0 then
-                        terminal := Some (Ok (List.rev !messages))
-                      else
-                        let remaining = Mtime.span current deadline in
-                        match
-                          Connection.Subscription.next_with_timeout
-                            ~timeout:remaining subscription
-                        with
-                        | Error Core_error.Timeout ->
-                            terminal := Some (Ok (List.rev !messages))
-                        | Error error ->
-                            terminal := Some (Error (Error.Connection error))
-                        | Ok delivery -> (
-                            match delivery.status with
-                            | None -> (
-                                match
-                                  Msg.of_message ~jetstream:consumer.jetstream
-                                    ~stream_name:(Stream.name consumer.stream)
-                                    ~consumer_name:consumer.name
-                                    delivery.message
-                                with
-                                | Error error -> terminal := Some (Error error)
-                                | Ok message ->
-                                    messages := message :: !messages;
-                                    count := !count + 1)
-                            | Some status -> (
+                      let wait_deadline =
+                        Option.value
+                          (earliest_deadline !heartbeat_deadline (Some deadline))
+                          ~default:deadline
+                      in
+                      let wait_result =
+                        if Mtime.compare current wait_deadline >= 0 then
+                          Error Core_error.Timeout
+                        else
+                          let remaining = Mtime.span current wait_deadline in
+                          match
+                            Connection.Subscription.next_with_timeout
+                              ~timeout:remaining subscription
+                          with
+                          | Error error -> Error error
+                          | Ok delivery -> Ok delivery
+                      in
+                      match wait_result with
+                      | Error Core_error.Timeout -> (
+                          let now = Connection.now connection in
+                          match !heartbeat_deadline with
+                          | Some heartbeat_deadline
+                            when Mtime.compare now heartbeat_deadline >= 0 ->
+                              terminal := Some (Error Error.Missing_heartbeat)
+                          | _ -> terminal := Some (Ok (List.rev !messages)))
+                      | Error error ->
+                          terminal := Some (Error (Error.Connection error))
+                      | Ok delivery -> (
+                          match delivery.status with
+                          | None -> (
+                              match
+                                Msg.of_message ~jetstream:consumer.jetstream
+                                  ~stream_name:(Stream.name consumer.stream)
+                                  ~consumer_name:consumer.name delivery.message
+                              with
+                              | Error error -> terminal := Some (Error error)
+                              | Ok message ->
+                                  heartbeat_deadline :=
+                                    heartbeat_deadline_at connection
+                                      idle_heartbeat;
+                                  messages := message :: !messages;
+                                  count := !count + 1)
+                          | Some status -> (
+                              if Int.equal status.Nats.Op.code 100 then
+                                match idle_heartbeat with
+                                | Some _ ->
+                                    heartbeat_deadline :=
+                                      heartbeat_deadline_at connection
+                                        idle_heartbeat
+                                | None -> (
+                                    match status_result status with
+                                    | Ok () ->
+                                        terminal :=
+                                          Some (Ok (List.rev !messages))
+                                    | Error error ->
+                                        terminal := Some (Error error))
+                              else
                                 match status_result status with
                                 | Ok () ->
                                     terminal := Some (Ok (List.rev !messages))
                                 | Error error -> terminal := Some (Error error))
-                            )
+                          )
                     done;
                     match !terminal with
                     | Some result -> result
@@ -1757,6 +1846,8 @@ module Consumer = struct
       payload : string;
       batch : int;
       mutable remaining : int;
+      idle_heartbeat : Mtime.Span.t option;
+      mutable heartbeat_deadline : Mtime.t option;
       mutable state : state;
       mutable hook : Eio.Switch.hook option;
     }
@@ -1807,6 +1898,8 @@ module Consumer = struct
                 match pull.state with
                 | Open ->
                     pull.remaining <- pull.batch;
+                    pull.heartbeat_deadline <-
+                      heartbeat_deadline_at pull.connection pull.idle_heartbeat;
                     Ok ()
                 | Closed -> Error Error.Pull_closed
                 | Failed error -> Error error)
@@ -1815,68 +1908,128 @@ module Consumer = struct
     let timeout_error = Error.Connection (Core_error.Invalid_timeout "pull")
     let timed_out = Error.Connection Core_error.Timeout
 
+    let heartbeat_missed pull =
+      match pull.heartbeat_deadline with
+      | Some deadline ->
+          Mtime.compare (Connection.now pull.connection) deadline >= 0
+      | None -> false
+
+    let consume_delivery pull (delivery : Connection.Subscription.delivery) =
+      match delivery.status with
+      | Some status -> (
+          if Int.equal status.Nats.Op.code 100 then
+            match pull.idle_heartbeat with
+            | Some _ ->
+                pull.heartbeat_deadline <-
+                  heartbeat_deadline_at pull.connection pull.idle_heartbeat;
+                Ok None
+            | None -> (
+                match pull_status_result status with
+                | Ok () ->
+                    pull.remaining <- 0;
+                    pull.heartbeat_deadline <- None;
+                    Ok None
+                | Error error -> Error error)
+          else
+            match pull_status_result status with
+            | Ok () ->
+                pull.remaining <- 0;
+                pull.heartbeat_deadline <- None;
+                Ok None
+            | Error error -> Error error)
+      | None -> (
+          match
+            Msg.of_message ~jetstream:pull.consumer.jetstream
+              ~stream_name:(Stream.name pull.consumer.stream)
+              ~consumer_name:pull.consumer.name delivery.message
+          with
+          | Error error -> Error error
+          | Ok message ->
+              pull.remaining <- pull.remaining - 1;
+              if Int.equal pull.remaining 0 then pull.heartbeat_deadline <- None
+              else
+                pull.heartbeat_deadline <-
+                  heartbeat_deadline_at pull.connection pull.idle_heartbeat;
+              Ok (Some message))
+
     let next_loop pull ~deadline =
       let result = ref None in
+      let handle_delivery delivery =
+        match consume_delivery pull delivery with
+        | Ok None -> ()
+        | Ok (Some message) -> result := Some (Ok message)
+        | Error error ->
+            fail pull error;
+            result := Some (Error error)
+      in
       while Option.is_none !result do
         match pull.state with
         | Closed -> result := Some (Error Error.Pull_closed)
         | Failed error -> result := Some (Error error)
         | Open -> (
-            let deadline_reached =
-              match deadline with
-              | Some deadline ->
-                  Mtime.compare (Connection.now pull.connection) deadline >= 0
-              | None -> false
-            in
-            if deadline_reached then result := Some (Error timed_out)
-            else
-              match ensure_request pull with
-              | Error error -> result := Some (Error error)
-              | Ok () -> (
-                  let wait_result =
-                    match deadline with
-                    | None -> Connection.Subscription.next pull.subscription
-                    | Some deadline ->
-                        let now = Connection.now pull.connection in
-                        if Mtime.compare now deadline >= 0 then
-                          Error Core_error.Timeout
-                        else
-                          let timeout = Mtime.span now deadline in
-                          Connection.Subscription.next_with_timeout ~timeout
-                            pull.subscription
-                  in
-                  match wait_result with
-                  | Error Core_error.Timeout -> result := Some (Error timed_out)
-                  | Error error ->
-                      result := Some (subscription_error pull error)
-                  | Ok { status = Some status; _ } -> (
-                      match pull_status_result status with
-                      | Ok () -> pull.remaining <- 0
+            match
+              Connection.Subscription.next_nonblocking pull.subscription
+            with
+            | Some (Ok delivery) -> handle_delivery delivery
+            | Some (Error error) ->
+                result := Some (subscription_error pull error)
+            | None -> (
+                let deadline_reached =
+                  match deadline with
+                  | Some deadline ->
+                      Mtime.compare (Connection.now pull.connection) deadline
+                      >= 0
+                  | None -> false
+                in
+                if heartbeat_missed pull then (
+                  let error = Error.Missing_heartbeat in
+                  fail pull error;
+                  result := Some (Error error))
+                else if deadline_reached then result := Some (Error timed_out)
+                else
+                  match ensure_request pull with
+                  | Error error -> result := Some (Error error)
+                  | Ok () -> (
+                      let wait_result =
+                        match
+                          earliest_deadline deadline pull.heartbeat_deadline
+                        with
+                        | None ->
+                            Connection.Subscription.next pull.subscription
+                        | Some wait_deadline ->
+                            let now = Connection.now pull.connection in
+                            if Mtime.compare now wait_deadline >= 0 then
+                              Error Core_error.Timeout
+                            else
+                              let timeout = Mtime.span now wait_deadline in
+                              Connection.Subscription.next_with_timeout ~timeout
+                                pull.subscription
+                      in
+                      match wait_result with
+                      | Error Core_error.Timeout ->
+                          if heartbeat_missed pull then (
+                            let error = Error.Missing_heartbeat in
+                            fail pull error;
+                            result := Some (Error error))
+                          else result := Some (Error timed_out)
                       | Error error ->
-                          fail pull error;
-                          result := Some (Error error))
-                  | Ok { status = None; message } -> (
-                      match
-                        Msg.of_message ~jetstream:pull.consumer.jetstream
-                          ~stream_name:(Stream.name pull.consumer.stream)
-                          ~consumer_name:pull.consumer.name message
-                      with
-                      | Ok message ->
-                          pull.remaining <- pull.remaining - 1;
-                          result := Some (Ok message)
-                      | Error error ->
-                          fail pull error;
-                          result := Some (Error error))))
+                          result := Some (subscription_error pull error)
+                      | Ok delivery -> handle_delivery delivery)))
       done;
       match !result with Some result -> result | None -> assert false
 
-    let v ~sw ?(batch = 1) ?expires ?max_bytes consumer =
+    let v ~sw ?(batch = 1) ?expires ?idle_heartbeat ?max_bytes consumer =
       let expires = Option.value expires ~default:default_fetch_expires in
-      match validate_fetch ~batch ~expires ~max_bytes with
+      match validate_fetch ~batch ~expires ~max_bytes ~idle_heartbeat with
       | Error error -> Error error
       | Ok () -> (
           let request =
-            { expires = Mtime.Span.to_uint64_ns expires; batch; max_bytes }
+            {
+              expires = Mtime.Span.to_uint64_ns expires;
+              batch;
+              max_bytes;
+              idle_heartbeat = Option.map Mtime.Span.to_uint64_ns idle_heartbeat;
+            }
           in
           match encode next_request_codec request with
           | Error error -> Error error
@@ -1912,6 +2065,8 @@ module Consumer = struct
                       payload;
                       batch;
                       remaining = 0;
+                      idle_heartbeat;
+                      heartbeat_deadline = None;
                       state = Open;
                       hook = None;
                     }

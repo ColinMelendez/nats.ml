@@ -76,8 +76,8 @@ consumer management and inventory, one-shot fetch, typed message
 acknowledgements, and a persistent single-owner
 `Consumer.Pull` session with batch accounting, local timeout/resumption,
 server-expiry retries, structured terminal statuses, and switch-owned cleanup.
-KV, Object Store, Services, and the remaining push/ordered/heartbeat consumer
-features remain later work.
+KV, Object Store, Services, consumer-failure detection, and the remaining
+push/ordered consumer features remain later work.
 The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
@@ -441,9 +441,14 @@ request/reply and subscription primitives.
   retry empty server batches without recursive growth, preserve an outstanding
   request across a local timeout, and release subscriptions on close or switch
   release.
-- Remaining: add server idle heartbeats and consumer-failure detection, then
-  add push consumers, ordered consumers, filtering, and flow-control behavior
-  without introducing a second runtime or subscription abstraction.
+- Completed: add opt-in server idle-heartbeat support to one-shot fetches and
+  persistent pull sessions. Status-100 deliveries reset typed heartbeat
+  deadlines, local timeouts preserve the outstanding request, queued control
+  deliveries are drained before declaring a miss, and missing heartbeats fail
+  the pull session with structured cleanup.
+- Remaining: add consumer-failure detection, then push consumers, ordered
+  consumers, filtering, and flow-control behavior without introducing a second
+  runtime or subscription abstraction.
 
 ### Acceptance tests
 
@@ -455,7 +460,8 @@ request/reply and subscription primitives.
   backpressure, local/server-expiry behavior, cancellation/cleanup, and
   acknowledgement metadata/redelivery coverage against a real JetStream
   server.
-- Remaining: heartbeat/consumer failure handling and server-version gates.
+- Completed: heartbeat liveness and local/server timeout interaction.
+- Remaining: consumer-failure handling and server-version gates.
 - Push and ordered consumer behavior once their implementation lands.
 
 ### Gate G4 — JetStream API stabilization

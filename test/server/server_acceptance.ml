@@ -489,6 +489,31 @@ let run_jetstream ~sw ~client ~timeout =
           expect_jetstream_ok "JetStream ack"
             (Nats_eio.Jetstream.Msg.ack first_message);
           (match
+             Nats_eio.Jetstream.Consumer.fetch
+               ~expires:Mtime.Span.(100 * ms)
+               ~idle_heartbeat:Mtime.Span.(100 * ms)
+               consumer ~batch:1
+           with
+          | Error Nats_eio.Jetstream.Error.Idle_heartbeat_expires_too_short ->
+              ()
+          | Ok messages ->
+              failf "invalid JetStream heartbeat request returned %d messages"
+                (List.length messages)
+          | Error error ->
+              failf "invalid JetStream heartbeat request: %s"
+                (jetstream_error_message error));
+          (match
+             expect_jetstream_ok "empty JetStream heartbeat fetch"
+               (Nats_eio.Jetstream.Consumer.fetch
+                  ~expires:Mtime.Span.(500 * ms)
+                  ~idle_heartbeat:Mtime.Span.(100 * ms)
+                  consumer ~batch:1)
+           with
+          | [] -> ()
+          | messages ->
+              failf "empty JetStream heartbeat fetch returned %d messages"
+                (List.length messages));
+          (match
              expect_jetstream_ok "empty JetStream fetch"
                (Nats_eio.Jetstream.Consumer.fetch
                   ~expires:Mtime.Span.(1 * ms)
@@ -556,11 +581,11 @@ let run_jetstream ~sw ~client ~timeout =
           then failf "max-bytes JetStream fetch lost the pending message";
           expect_jetstream_ok "max-bytes JetStream ack"
             (Nats_eio.Jetstream.Msg.ack max_bytes_message);
-          let with_pull ?batch ?expires ?max_bytes label f =
+          let with_pull ?batch ?expires ?idle_heartbeat ?max_bytes label f =
             let pull =
               expect_jetstream_ok (label ^ " create")
                 (Nats_eio.Jetstream.Consumer.Pull.v ~sw ?batch ?expires
-                   ?max_bytes consumer)
+                   ?idle_heartbeat ?max_bytes consumer)
             in
             Fun.protect
               ~finally:(fun () ->
@@ -687,6 +712,46 @@ let run_jetstream ~sw ~client ~timeout =
                      "pull-after-timeout")
               then failf "post-timeout pull returned the wrong payload";
               expect_jetstream_ok "JetStream post-timeout pull ack"
+                (Nats_eio.Jetstream.Msg.ack message));
+          with_pull
+            ~expires:Mtime.Span.(1 * s)
+            ~idle_heartbeat:Mtime.Span.(100 * ms)
+            "JetStream heartbeat pull"
+            (fun pull ->
+              (match
+                 Nats_eio.Jetstream.Consumer.Pull.next_with_timeout
+                   ~timeout:Mtime.Span.(350 * ms)
+                   pull
+               with
+              | Error
+                  (Nats_eio.Jetstream.Error.Connection Nats_eio.Error.Timeout)
+                ->
+                  ()
+              | Ok _ -> failf "heartbeat pull unexpectedly returned a message"
+              | Error Nats_eio.Jetstream.Error.Missing_heartbeat ->
+                  failf "heartbeat pull missed an idle heartbeat"
+              | Error error ->
+                  failf "heartbeat pull timeout: %s"
+                    (jetstream_error_message error));
+              let heartbeat_ack =
+                expect_jetstream_ok "JetStream heartbeat pull publish"
+                  (Nats_eio.Jetstream.publish ~timeout
+                     ~msg_id:"integration-message-pull-heartbeat" jetstream
+                     subject "pull-after-heartbeat")
+              in
+              if Nats_eio.Jetstream.Publish_ack.duplicate heartbeat_ack then
+                failf "heartbeat pull publish was marked duplicate";
+              let message =
+                expect_jetstream_ok "JetStream heartbeat pull message"
+                  (Nats_eio.Jetstream.Consumer.Pull.next pull)
+              in
+              if
+                not
+                  (String.equal
+                     (Nats_eio.Jetstream.Msg.payload message)
+                     "pull-after-heartbeat")
+              then failf "heartbeat pull returned the wrong payload";
+              expect_jetstream_ok "JetStream heartbeat pull ack"
                 (Nats_eio.Jetstream.Msg.ack message));
           with_pull
             ~expires:Mtime.Span.(1 * ms)

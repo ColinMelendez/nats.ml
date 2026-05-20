@@ -208,6 +208,15 @@ through `close`.
 The high-level API still exposes raw request/reply and raw NATS messages for
 advanced JetStream features that arrive before a convenience wrapper.
 
+Both one-shot fetch and persistent pull sessions accept an opt-in
+[`idle_heartbeat`](https://docs.nats.io/nats-concepts/jetstream/consumers)
+interval. The request codec sends the interval in nanoseconds, status-100
+heartbeat deliveries are consumed internally, and a missing heartbeat after
+two intervals fails the operation with a structured error. Pull sessions use
+heartbeat deadlines alongside caller timeouts and drain already queued control
+deliveries before declaring the session unhealthy; a normal local timeout still
+leaves the outstanding server request available for a later call.
+
 ### The protocol core as a testable boundary
 
 An adapter should be able to drive the protocol without a socket:
@@ -625,8 +634,8 @@ These modules should be layered over `Connection.request` and
   fetch, and a persistent `Consumer.Pull` session.
   Delivered `Msg.t` values carry the stream/consumer metadata needed for
   explicit `ack`, `nak`, `term`, and `in_progress` operations. Push and
-  ordered consumption, heartbeats, flow control, and synchronous ack remain
-  planned extensions.
+  ordered consumption, consumer-failure detection, flow control, and
+  synchronous ack remain planned extensions.
 - `Nats_eio.Key_value` provides bucket creation/opening, get/put, create/update
   compare-and-set, delete/purge, revision/history, TTL, keys, status, and
   cancellable watches. Watch entries preserve bucket, key, value, revision,
@@ -665,8 +674,8 @@ updates preserve unknown server configuration through an INFO/read-modify-write
 cycle; list operations consume server pagination and fail explicitly on an
 incomplete page. The management prefix is configurable for JetStream domains,
 while application subjects remain ordinary Core NATS subjects. KV, Object
-Store, Services, push/ordered consumers, and heartbeat/flow-control features
-remain later layers over the same connection.
+Store, Services, push/ordered consumers, consumer-failure detection, and
+flow-control features remain later layers over the same connection.
 
 ## 6. Testing and interoperability
 
@@ -690,7 +699,8 @@ through individual helper functions:
   JetStream slice with `NATS_TEST_JETSTREAM=1` and covers stream management,
   stream update/list, consumer inventory, unknown-config preservation, publish
   acknowledgements, duplicate message ids, one-shot and persistent pull
-  delivery, timeout/expiry behavior, max-bytes errors, and cleanup;
+  delivery, idle-heartbeat behavior, timeout/expiry behavior, max-bytes errors,
+  and cleanup;
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 
