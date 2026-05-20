@@ -14,6 +14,7 @@ module Error = struct
     | Invalid_consumer_policy of { field : string; value : string }
 
   type api = { code : int; err_code : int option; description : string }
+  type list_kind = Streams | Consumers
 
   type t =
     | Connection of Connection.error
@@ -37,6 +38,7 @@ module Error = struct
     | Consumer_deleted
     | Conflict of { code : int; description : string }
     | Unexpected_status of { code : int; description : string }
+    | Incomplete_list of { kind : list_kind; missing : string list }
     | Pull_closed
 
   let pp_config ppf = function
@@ -98,18 +100,19 @@ module Error = struct
         Format.fprintf ppf "JetStream response named consumer %S, expected %S"
           actual expected
     | Invalid_batch value ->
-        Format.fprintf ppf "JetStream fetch batch must be between 1 and 256, got %d"
-          value
+        Format.fprintf ppf
+          "JetStream fetch batch must be between 1 and 256, got %d" value
     | Invalid_max_bytes value ->
-        Format.fprintf ppf "JetStream fetch max_bytes must not be negative, got %d"
-          value
+        Format.fprintf ppf
+          "JetStream fetch max_bytes must not be negative, got %d" value
     | Invalid_fetch_span ->
         Format.pp_print_string ppf "JetStream fetch expiry must be positive"
     | Missing_ack_reply ->
         Format.pp_print_string ppf
           "JetStream delivery has no acknowledgement reply"
     | Invalid_ack_reply subject ->
-        Format.fprintf ppf "invalid JetStream acknowledgement subject %S" subject
+        Format.fprintf ppf "invalid JetStream acknowledgement subject %S"
+          subject
     | Consumer_deleted ->
         Format.pp_print_string ppf "JetStream consumer was deleted"
     | Conflict { code; description } ->
@@ -117,6 +120,15 @@ module Error = struct
     | Unexpected_status { code; description } ->
         Format.fprintf ppf "unexpected JetStream pull status %d: %s" code
           description
+    | Incomplete_list { kind; missing } -> (
+        let kind =
+          match kind with Streams -> "stream" | Consumers -> "consumer"
+        in
+        match missing with
+        | [] -> Format.fprintf ppf "incomplete JetStream %s list" kind
+        | _ :: _ ->
+            Format.fprintf ppf "incomplete JetStream %s list; missing: %s" kind
+              (String.concat ", " missing))
     | Pull_closed ->
         Format.pp_print_string ppf "JetStream pull consumer is closed"
 end
@@ -212,8 +224,9 @@ module Stream = struct
       | Some value when Int64.compare value (-1L) >= 0 -> Ok ()
       | Some value -> Error (Error.Invalid_limit { field; value })
 
-    let v ~name ~subjects ?(storage = File) ?(retention = Limits)
-        ?(discard = Old) ?max_msgs ?max_bytes ?max_age ?max_msg_size () =
+    let v_internal ~allow_empty_subjects ~name ~subjects ?(storage = File)
+        ?(retention = Limits) ?(discard = Old) ?max_msgs ?max_bytes ?max_age
+        ?max_msg_size () =
       let max_age =
         match max_age with
         | Some value when Int.equal (Mtime.Span.compare value Mtime.Span.zero) 0
@@ -223,7 +236,8 @@ module Stream = struct
       in
       match validate_name name with
       | Error error -> Error error
-      | Ok () when Int.equal (List.length subjects) 0 ->
+      | Ok ()
+        when Int.equal (List.length subjects) 0 && not allow_empty_subjects ->
           Error Error.Empty_subjects
       | Ok () -> (
           match validate_limit "max_msgs" max_msgs with
@@ -253,6 +267,11 @@ module Stream = struct
                               max_msg_size;
                             }))))
 
+    let v ~name ~subjects ?storage ?retention ?discard ?max_msgs ?max_bytes
+        ?max_age ?max_msg_size () =
+      v_internal ~allow_empty_subjects:false ~name ~subjects ?storage ?retention
+        ?discard ?max_msgs ?max_bytes ?max_age ?max_msg_size ()
+
     let name value = value.name
     let subjects value = value.subjects
     let storage value = value.storage
@@ -262,6 +281,67 @@ module Stream = struct
     let max_bytes value = value.max_bytes
     let max_age value = value.max_age
     let max_msg_size value = value.max_msg_size
+
+    let rebuild value ~name ~subjects ~storage ~retention ~discard ~max_msgs
+        ~max_bytes ~max_age ~max_msg_size =
+      v_internal
+        ~allow_empty_subjects:(Int.equal (List.length value.subjects) 0)
+        ~name ~subjects ~storage ~retention ~discard ?max_msgs ?max_bytes
+        ?max_age ?max_msg_size ()
+
+    let with_name value name =
+      rebuild value ~name ~subjects:value.subjects ~storage:value.storage
+        ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs ~max_bytes:value.max_bytes
+        ~max_age:value.max_age ~max_msg_size:value.max_msg_size
+
+    let with_subjects value subjects =
+      rebuild value ~name:value.name ~subjects ~storage:value.storage
+        ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs ~max_bytes:value.max_bytes
+        ~max_age:value.max_age ~max_msg_size:value.max_msg_size
+
+    let with_storage value storage =
+      rebuild value ~name:value.name ~subjects:value.subjects ~storage
+        ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs ~max_bytes:value.max_bytes
+        ~max_age:value.max_age ~max_msg_size:value.max_msg_size
+
+    let with_retention value retention =
+      rebuild value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention ~discard:value.discard
+        ~max_msgs:value.max_msgs ~max_bytes:value.max_bytes
+        ~max_age:value.max_age ~max_msg_size:value.max_msg_size
+
+    let with_discard value discard =
+      rebuild value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard
+        ~max_msgs:value.max_msgs ~max_bytes:value.max_bytes
+        ~max_age:value.max_age ~max_msg_size:value.max_msg_size
+
+    let with_max_msgs value max_msgs =
+      rebuild value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size
+
+    let with_max_bytes value max_bytes =
+      rebuild value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs ~max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size
+
+    let with_max_age value max_age =
+      rebuild value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs ~max_bytes:value.max_bytes ~max_age
+        ~max_msg_size:value.max_msg_size
+
+    let with_max_msg_size value max_msg_size =
+      rebuild value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs ~max_bytes:value.max_bytes
+        ~max_age:value.max_age ~max_msg_size
   end
 
   module Info = struct
@@ -299,6 +379,7 @@ module Stream = struct
     max_bytes : int64 option;
     max_age : int64 option;
     max_msg_size : int64 option;
+    unknown : Jsont.json;
   }
 
   let storage_codec =
@@ -326,10 +407,11 @@ module Stream = struct
         max_bytes
         max_age
         max_msg_size
+        unknown
       ->
         {
           name;
-          subjects;
+          subjects = Option.value ~default:[] subjects;
           storage;
           retention;
           discard;
@@ -337,10 +419,12 @@ module Stream = struct
           max_bytes;
           max_age;
           max_msg_size;
+          unknown;
         })
     |> Jsont.Object.mem "name" Jsont.string ~enc:(fun value -> value.name)
-    |> Jsont.Object.mem "subjects" (Jsont.list Jsont.string) ~enc:(fun value ->
-        value.subjects)
+    |> Jsont.Object.opt_mem "subjects" (Jsont.list Jsont.string)
+         ~enc:(fun value ->
+           match value.subjects with [] -> None | subjects -> Some subjects)
     |> Jsont.Object.mem "storage" storage_codec ~enc:(fun value ->
         value.storage)
     |> Jsont.Object.mem "retention" retention_codec ~enc:(fun value ->
@@ -355,7 +439,10 @@ module Stream = struct
         value.max_age)
     |> Jsont.Object.opt_mem "max_msg_size" Jsont.int64 ~enc:(fun value ->
         value.max_msg_size)
-    |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+    |> Jsont.Object.keep_unknown
+         ~enc:(fun value -> value.unknown)
+         Jsont.json_mems
+    |> Jsont.Object.finish
 
   type wire_state = {
     messages : int64;
@@ -397,6 +484,48 @@ module Stream = struct
         value.state)
     |> Jsont.Object.skip_unknown |> Jsont.Object.finish
 
+  type list_request = { offset : int; subject : string option }
+
+  let list_request_codec =
+    Jsont.Object.map ~kind:"JetStream stream list request"
+      (fun offset subject -> { offset; subject })
+    |> Jsont.Object.mem "offset" Jsont.int ~enc:(fun value -> value.offset)
+    |> Jsont.Object.opt_mem "subject" Jsont.string ~enc:(fun value ->
+        value.subject)
+    |> Jsont.Object.finish
+
+  type list_response = {
+    error : api_error option;
+    total : int;
+    offset : int;
+    limit : int;
+    streams : response list;
+    missing : string list;
+  }
+
+  let list_response_codec =
+    Jsont.Object.map ~kind:"JetStream stream list response"
+      (fun error total offset limit streams missing ->
+        {
+          error;
+          total;
+          offset;
+          limit;
+          streams;
+          missing = Option.value ~default:[] missing;
+        })
+    |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
+        value.error)
+    |> Jsont.Object.mem "total" Jsont.int ~enc:(fun value -> value.total)
+    |> Jsont.Object.mem "offset" Jsont.int ~enc:(fun value -> value.offset)
+    |> Jsont.Object.mem "limit" Jsont.int ~enc:(fun value -> value.limit)
+    |> Jsont.Object.mem "streams" (Jsont.list response_codec) ~enc:(fun value ->
+        value.streams)
+    |> Jsont.Object.opt_mem "missing" (Jsont.list Jsont.string)
+         ~enc:(fun value ->
+           match value.missing with [] -> None | missing -> Some missing)
+    |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+
   let wire_config value =
     {
       name = Config.name value;
@@ -408,6 +537,29 @@ module Stream = struct
       max_bytes = Config.max_bytes value;
       max_age = Option.map Mtime.Span.to_uint64_ns (Config.max_age value);
       max_msg_size = Config.max_msg_size value;
+      unknown = Jsont.Json.object' [];
+    }
+
+  let wire_config_for_update ~current value =
+    let subjects =
+      List.map Nats.Subject.Filter.to_string (Config.subjects value)
+    in
+    {
+      current with
+      name = Config.name value;
+      subjects =
+        (match subjects with [] -> current.subjects | _ :: _ -> subjects);
+      storage = Config.storage value;
+      retention = Config.retention value;
+      discard = Config.discard value;
+      max_msgs = Some (Option.value ~default:(-1L) (Config.max_msgs value));
+      max_bytes = Some (Option.value ~default:(-1L) (Config.max_bytes value));
+      max_age =
+        Some
+          (Option.value ~default:0L
+             (Option.map Mtime.Span.to_uint64_ns (Config.max_age value)));
+      max_msg_size =
+        Some (Option.value ~default:(-1L) (Config.max_msg_size value));
     }
 
   let config_of_wire value =
@@ -441,9 +593,10 @@ module Stream = struct
           | Some nanoseconds -> Some (Mtime.Span.of_uint64_ns nanoseconds)
         in
         match
-          Config.v ~name:value.name ~subjects ~storage:value.storage
-            ~retention:value.retention ~discard:value.discard ?max_msgs
-            ?max_bytes ?max_age ?max_msg_size ()
+          Config.v_internal ~allow_empty_subjects:true ~name:value.name
+            ~subjects ~storage:value.storage ~retention:value.retention
+            ~discard:value.discard ?max_msgs ?max_bytes ?max_age ?max_msg_size
+            ()
         with
         | Ok config -> Ok config
         | Error error -> Error (Error.Invalid_config error))
@@ -454,7 +607,14 @@ module Stream = struct
     | Ok { error = Some error; _ } -> Error (Error.Api error)
     | Ok response -> Ok response
 
+  let decode_list_response message =
+    match decode list_response_codec message with
+    | Error error -> Error error
+    | Ok { error = Some error; _ } -> Error (Error.Api error)
+    | Ok response -> Ok response
+
   let encode_config value = encode wire_config_codec (wire_config value)
+  let encode_wire_config value = encode wire_config_codec value
   let name (value : t) = value.name
 
   let bind jetstream ~name =
@@ -484,35 +644,156 @@ module Stream = struct
                   | Ok _ -> Ok { jetstream; name }
                   | Error error -> Error error)))
 
-  let info stream =
+  let info_of_response ?expected_name (response : response) =
+    match response.error with
+    | Some error -> Error (Error.Api error)
+    | None -> (
+        match (response.config, response.state) with
+        | None, _ -> Error (Error.Missing_field "config")
+        | _, None -> Error (Error.Missing_field "state")
+        | Some config, Some state -> (
+            match config_of_wire config with
+            | Error error -> Error error
+            | Ok config -> (
+                match expected_name with
+                | Some expected
+                  when not (String.equal (Config.name config) expected) ->
+                    Error
+                      (Error.Unexpected_stream_name
+                         { expected; actual = Config.name config })
+                | _ ->
+                    Ok
+                      {
+                        Info.config;
+                        messages = state.messages;
+                        bytes = state.bytes;
+                        first_sequence = state.first_seq;
+                        last_sequence = state.last_seq;
+                        consumer_count = state.consumer_count;
+                      })))
+
+  let info_response stream =
     let subject =
       api_subject stream.jetstream [ "STREAM"; "INFO"; stream.name ]
     in
     match request_msg stream.jetstream (Nats.Message.v ~subject "") with
     | Error error -> Error error
-    | Ok message -> (
-        match decode_response message with
-        | Error error -> Error error
-        | Ok { config = None; _ } -> Error (Error.Missing_field "config")
-        | Ok { state = None; _ } -> Error (Error.Missing_field "state")
-        | Ok { config = Some config; state = Some state } -> (
-            match config_of_wire config with
-            | Error error -> Error error
-            | Ok config ->
-                if not (String.equal (Config.name config) stream.name) then
-                  Error
-                    (Error.Unexpected_stream_name
-                       { expected = stream.name; actual = Config.name config })
-                else
-                  Ok
-                    {
-                      Info.config;
-                      messages = state.messages;
-                      bytes = state.bytes;
-                      first_sequence = state.first_seq;
-                      last_sequence = state.last_seq;
-                      consumer_count = state.consumer_count;
-                    }))
+    | Ok message -> decode_response message
+
+  let update (stream : t) (config : Config.t) =
+    let name = Config.name config in
+    if not (String.equal name stream.name) then
+      Error
+        (Error.Unexpected_stream_name { expected = stream.name; actual = name })
+    else
+      match info_response stream with
+      | Error error -> Error error
+      | Ok { config = None; _ } -> Error (Error.Missing_field "config")
+      | Ok ({ config = Some current; _ } as response) -> (
+          match info_of_response ~expected_name:stream.name response with
+          | Error error -> Error error
+          | Ok _ -> (
+              let subject =
+                api_subject stream.jetstream [ "STREAM"; "UPDATE"; stream.name ]
+              in
+              let update_config = wire_config_for_update ~current config in
+              match encode_wire_config update_config with
+              | Error error -> Error error
+              | Ok payload -> (
+                  match
+                    request_msg stream.jetstream
+                      (Nats.Message.v ~subject payload)
+                  with
+                  | Error error -> Error error
+                  | Ok message -> (
+                      match decode_response message with
+                      | Error error -> Error error
+                      | Ok response ->
+                          info_of_response ~expected_name:stream.name response))
+              ))
+
+  let list ?subject jetstream =
+    let offset = ref 0 in
+    let infos = ref [] in
+    let result = ref None in
+    while Option.is_none !result do
+      let request =
+        {
+          offset = !offset;
+          subject = Option.map Nats.Subject.Filter.to_string subject;
+        }
+      in
+      match encode list_request_codec request with
+      | Error error -> result := Some (Error error)
+      | Ok payload -> (
+          let subject = api_subject jetstream [ "STREAM"; "LIST" ] in
+          match request_msg jetstream (Nats.Message.v ~subject payload) with
+          | Error error -> result := Some (Error error)
+          | Ok message -> (
+              match decode_list_response message with
+              | Error error -> result := Some (Error error)
+              | Ok { total; offset = page_offset; limit; streams; missing } -> (
+                  match missing with
+                  | _ :: _ ->
+                      result :=
+                        Some
+                          (Error
+                             (Error.Incomplete_list
+                                { kind = Error.Streams; missing }))
+                  | [] -> (
+                      let returned = List.length streams in
+                      let window =
+                        if Int.compare page_offset total < 0 then
+                          Int.min limit (total - page_offset)
+                        else 0
+                      in
+                      if
+                        (not (Int.equal page_offset !offset))
+                        || not (Int.equal returned window)
+                      then
+                        result :=
+                          Some
+                            (Error
+                               (Error.Incomplete_list
+                                  { kind = Error.Streams; missing = [] }))
+                      else
+                        let page =
+                          List.fold_left
+                            (fun page response ->
+                              match page with
+                              | Error _ -> page
+                              | Ok infos -> (
+                                  match info_of_response response with
+                                  | Ok info -> Ok (info :: infos)
+                                  | Error error -> Error error))
+                            (Ok []) streams
+                        in
+                        match page with
+                        | Error error -> result := Some (Error error)
+                        | Ok page ->
+                            infos :=
+                              List.fold_left
+                                (fun infos info -> info :: infos)
+                                !infos (List.rev page);
+                            let next_offset = page_offset + window in
+                            if Int.compare page_offset total >= 0 then
+                              result := Some (Ok (List.rev !infos))
+                            else if Int.compare next_offset !offset <= 0 then
+                              result :=
+                                Some
+                                  (Error
+                                     (Error.Incomplete_list
+                                        { kind = Error.Streams; missing = [] }))
+                            else if Int.compare next_offset total >= 0 then
+                              result := Some (Ok (List.rev !infos))
+                            else offset := next_offset))))
+    done;
+    match !result with Some result -> result | None -> assert false
+
+  let info stream =
+    match info_response stream with
+    | Error error -> Error error
+    | Ok response -> info_of_response ~expected_name:stream.name response
 
   let delete stream =
     let subject =
@@ -583,14 +864,14 @@ module Msg = struct
     | "$JS" :: "ACK" :: fields -> (
         match fields with
         | [
-            stream;
-            consumer;
-            num_delivered;
-            stream_sequence;
-            consumer_sequence;
-            timestamp;
-            num_pending;
-          ] ->
+         stream;
+         consumer;
+         num_delivered;
+         stream_sequence;
+         consumer_sequence;
+         timestamp;
+         num_pending;
+        ] ->
             metadata ~subject ~domain:None ~stream ~consumer ~num_delivered
               ~stream_sequence ~consumer_sequence ~timestamp ~num_pending
         | domain :: account_hash :: stream :: consumer :: num_delivered
@@ -637,7 +918,9 @@ module Msg = struct
   let num_pending value = value.metadata.num_pending
 
   let respond value payload =
-    match Connection.publish value.jetstream.connection value.ack_subject payload with
+    match
+      Connection.publish value.jetstream.connection value.ack_subject payload
+    with
     | Ok () -> Ok ()
     | Error error -> Error (Error.Connection error)
 
@@ -985,7 +1268,7 @@ module Consumer = struct
     }
 
   let config_of_wire value =
-    let normalize_limit = function Some (-1) -> None | value -> value in
+    let normalize_limit = function Some -1 -> None | value -> value in
     let deliver_policy =
       match value.deliver_policy with
       | "all" -> Ok Config.All
@@ -1036,9 +1319,8 @@ module Consumer = struct
             match
               Config.v ?durable_name:value.durable_name
                 ?description:value.description ~deliver_policy
-                ~ack_policy:value.ack_policy ?ack_wait
-                ?max_deliver ?filter_subject
-                ~replay_policy:value.replay_policy
+                ~ack_policy:value.ack_policy ?ack_wait ?max_deliver
+                ?filter_subject ~replay_policy:value.replay_policy
                 ?max_ack_pending ?max_waiting ?max_batch ?max_expires ?max_bytes
                 ?headers_only:value.headers_only ?inactive_threshold
                 ?mem_storage:value.mem_storage ()
@@ -1138,6 +1420,52 @@ module Consumer = struct
     | Ok { error = Some error; _ } -> Error (Error.Api error)
     | Ok response -> Ok response
 
+  type list_request = { offset : int }
+
+  let list_request_codec =
+    Jsont.Object.map ~kind:"JetStream consumer list request" (fun offset ->
+        { offset })
+    |> Jsont.Object.mem "offset" Jsont.int ~enc:(fun value -> value.offset)
+    |> Jsont.Object.finish
+
+  type list_response = {
+    error : api_error option;
+    total : int;
+    offset : int;
+    limit : int;
+    consumers : response list;
+    missing : string list;
+  }
+
+  let list_response_codec =
+    Jsont.Object.map ~kind:"JetStream consumer list response"
+      (fun error total offset limit consumers missing ->
+        {
+          error;
+          total;
+          offset;
+          limit;
+          consumers;
+          missing = Option.value ~default:[] missing;
+        })
+    |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
+        value.error)
+    |> Jsont.Object.mem "total" Jsont.int ~enc:(fun value -> value.total)
+    |> Jsont.Object.mem "offset" Jsont.int ~enc:(fun value -> value.offset)
+    |> Jsont.Object.mem "limit" Jsont.int ~enc:(fun value -> value.limit)
+    |> Jsont.Object.mem "consumers" (Jsont.list response_codec)
+         ~enc:(fun value -> value.consumers)
+    |> Jsont.Object.opt_mem "missing" (Jsont.list Jsont.string)
+         ~enc:(fun value ->
+           match value.missing with [] -> None | missing -> Some missing)
+    |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+
+  let decode_list_response message =
+    match decode list_response_codec message with
+    | Error error -> Error error
+    | Ok { error = Some error; _ } -> Error (Error.Api error)
+    | Ok response -> Ok response
+
   module Info = struct
     type t = {
       name : string;
@@ -1183,15 +1511,52 @@ module Consumer = struct
         value.name value.stream_name value.num_pending
   end
 
+  let info_of_response ~stream ?expected_name (response : response) =
+    match response.error with
+    | Some error -> Error (Error.Api error)
+    | None -> (
+        match (response.stream_name, response.name, response.config) with
+        | None, _, _ -> Error (Error.Missing_field "stream_name")
+        | _, None, _ -> Error (Error.Missing_field "name")
+        | _, _, None -> Error (Error.Missing_field "config")
+        | Some stream_name, Some name, Some config -> (
+            if not (String.equal stream_name (Stream.name stream)) then
+              Error
+                (Error.Unexpected_stream_name
+                   { expected = Stream.name stream; actual = stream_name })
+            else
+              match expected_name with
+              | Some expected when not (String.equal name expected) ->
+                  Error
+                    (Error.Unexpected_consumer_name { expected; actual = name })
+              | _ -> (
+                  match config_of_wire config with
+                  | Error error -> Error error
+                  | Ok (config, config_unknown) ->
+                      Ok
+                        {
+                          Info.name;
+                          stream_name;
+                          created = response.created;
+                          config;
+                          unknown = response.unknown;
+                          config_unknown;
+                          delivered = response.delivered;
+                          ack_floor = response.ack_floor;
+                          num_ack_pending =
+                            Option.value ~default:0 response.num_ack_pending;
+                          num_redelivered =
+                            Option.value ~default:0 response.num_redelivered;
+                          num_waiting =
+                            Option.value ~default:0 response.num_waiting;
+                          num_pending =
+                            Option.value ~default:0L response.num_pending;
+                        })))
+
   type jetstream = t
   type stream = Stream.t
   type t = { jetstream : jetstream; stream : stream; name : string }
-
-  type next_request = {
-    expires : int64;
-    batch : int;
-    max_bytes : int option;
-  }
+  type next_request = { expires : int64; batch : int; max_bytes : int option }
 
   let next_request_codec =
     Jsont.Object.map ~kind:"JetStream consumer pull request"
@@ -1208,9 +1573,8 @@ module Consumer = struct
   let add_fetch_expiry_leeway expires =
     let expires_ns = Mtime.Span.to_uint64_ns expires in
     let leeway_ns = Mtime.Span.to_uint64_ns fetch_expiry_leeway in
-    if
-      Int64.compare expires_ns (Int64.sub Int64.max_int leeway_ns) >= 0
-    then Mtime.Span.max_span
+    if Int64.compare expires_ns (Int64.sub Int64.max_int leeway_ns) >= 0 then
+      Mtime.Span.max_span
     else Mtime.Span.of_uint64_ns (Int64.add expires_ns leeway_ns)
 
   let validate_fetch ~batch ~expires ~max_bytes =
@@ -1238,7 +1602,7 @@ module Consumer = struct
     else
       let found = ref false in
       let index = ref 0 in
-      while not !found && !index <= value_length - needle_length do
+      while (not !found) && !index <= value_length - needle_length do
         if String.equal (String.sub value !index needle_length) needle then
           found := true;
         incr index
@@ -1257,8 +1621,7 @@ module Consumer = struct
       && (contains ~needle:"message size exceeds maxbytes" normalized
          || contains ~needle:"batch completed" normalized)
     then Ok ()
-    else if Int.equal code 409 then
-      Error (Error.Conflict { code; description })
+    else if Int.equal code 409 then Error (Error.Conflict { code; description })
     else Error (Error.Unexpected_status { code; description })
 
   let pull_status_result status =
@@ -1284,12 +1647,10 @@ module Consumer = struct
   let with_fetch_subscription consumer f =
     let connection = consumer.jetstream.connection in
     let inbox = Connection.fresh_inbox connection in
-    let filter =
-      Nats.Subject.Filter.literal (Nats.Subject.to_string inbox)
-    in
+    let filter = Nats.Subject.Filter.literal (Nats.Subject.to_string inbox) in
     match Connection.subscribe connection filter with
     | Error error -> Error (Error.Connection error)
-    | Ok subscription ->
+    | Ok subscription -> (
         let cleanup_error = ref None in
         let result =
           Fun.protect
@@ -1302,19 +1663,15 @@ module Consumer = struct
         | Ok value, Some cleanup_error ->
             ignore cleanup_error;
             Ok value
-        | Error error, _ -> Error error
+        | Error error, _ -> Error error)
 
   let fetch ?expires ?max_bytes consumer ~batch =
     let expires = Option.value expires ~default:default_fetch_expires in
     match validate_fetch ~batch ~expires ~max_bytes with
     | Error error -> Error error
-    | Ok () ->
+    | Ok () -> (
         let request =
-          {
-            expires = Mtime.Span.to_uint64_ns expires;
-            batch;
-            max_bytes;
-          }
+          { expires = Mtime.Span.to_uint64_ns expires; batch; max_bytes }
         in
         match encode next_request_codec request with
         | Error error -> Error error
@@ -1335,7 +1692,7 @@ module Consumer = struct
                   Connection.publish connection ~reply_to:inbox subject payload
                 with
                 | Error error -> Error (Error.Connection error)
-                | Ok () ->
+                | Ok () -> (
                     let messages = ref [] in
                     let count = ref 0 in
                     let deadline =
@@ -1348,8 +1705,7 @@ module Consumer = struct
                     in
                     let terminal = ref None in
                     while
-                      Int.compare !count batch < 0
-                      && Option.is_none !terminal
+                      Int.compare !count batch < 0 && Option.is_none !terminal
                     do
                       let current = Connection.now connection in
                       if Mtime.compare current deadline >= 0 then
@@ -1368,10 +1724,10 @@ module Consumer = struct
                             match delivery.status with
                             | None -> (
                                 match
-                                  Msg.of_message
-                                    ~jetstream:consumer.jetstream
+                                  Msg.of_message ~jetstream:consumer.jetstream
                                     ~stream_name:(Stream.name consumer.stream)
-                                    ~consumer_name:consumer.name delivery.message
+                                    ~consumer_name:consumer.name
+                                    delivery.message
                                 with
                                 | Error error -> terminal := Some (Error error)
                                 | Ok message ->
@@ -1381,11 +1737,12 @@ module Consumer = struct
                                 match status_result status with
                                 | Ok () ->
                                     terminal := Some (Ok (List.rev !messages))
-                                | Error error -> terminal := Some (Error error)))
+                                | Error error -> terminal := Some (Error error))
+                            )
                     done;
                     match !terminal with
                     | Some result -> result
-                    | None -> Ok (List.rev !messages))
+                    | None -> Ok (List.rev !messages))))
 
   module Pull = struct
     type consumer = t
@@ -1425,7 +1782,7 @@ module Consumer = struct
     let close pull =
       match pull.state with
       | Closed -> Ok ()
-      | Open | Failed _ ->
+      | Open | Failed _ -> (
           pull.state <- Closed;
           Option.iter
             (fun hook -> ignore (Eio.Switch.try_remove_hook hook))
@@ -1433,7 +1790,7 @@ module Consumer = struct
           pull.hook <- None;
           match release_subscription pull.subscription with
           | None -> Ok ()
-          | Some error -> Error (Error.Connection error)
+          | Some error -> Error (Error.Connection error))
 
     let ensure_request pull =
       if Int.compare pull.remaining 0 > 0 then Ok ()
@@ -1464,7 +1821,7 @@ module Consumer = struct
         match pull.state with
         | Closed -> result := Some (Error Error.Pull_closed)
         | Failed error -> result := Some (Error error)
-        | Open ->
+        | Open -> (
             let deadline_reached =
               match deadline with
               | Some deadline ->
@@ -1475,7 +1832,7 @@ module Consumer = struct
             else
               match ensure_request pull with
               | Error error -> result := Some (Error error)
-              | Ok () ->
+              | Ok () -> (
                   let wait_result =
                     match deadline with
                     | None -> Connection.Subscription.next pull.subscription
@@ -1488,28 +1845,28 @@ module Consumer = struct
                           Connection.Subscription.next_with_timeout ~timeout
                             pull.subscription
                   in
-                  (match wait_result with
+                  match wait_result with
                   | Error Core_error.Timeout -> result := Some (Error timed_out)
                   | Error error ->
                       result := Some (subscription_error pull error)
-                  | Ok { status = Some status; _ } ->
-                      (match pull_status_result status with
+                  | Ok { status = Some status; _ } -> (
+                      match pull_status_result status with
                       | Ok () -> pull.remaining <- 0
                       | Error error ->
                           fail pull error;
                           result := Some (Error error))
-                  | Ok { status = None; message } ->
-                      (match
-                         Msg.of_message ~jetstream:pull.consumer.jetstream
-                           ~stream_name:(Stream.name pull.consumer.stream)
-                           ~consumer_name:pull.consumer.name message
-                       with
+                  | Ok { status = None; message } -> (
+                      match
+                        Msg.of_message ~jetstream:pull.consumer.jetstream
+                          ~stream_name:(Stream.name pull.consumer.stream)
+                          ~consumer_name:pull.consumer.name message
+                      with
                       | Ok message ->
                           pull.remaining <- pull.remaining - 1;
                           result := Some (Ok message)
                       | Error error ->
                           fail pull error;
-                          result := Some (Error error)))
+                          result := Some (Error error))))
       done;
       match !result with Some result -> result | None -> assert false
 
@@ -1640,63 +1997,91 @@ module Consumer = struct
     | Ok message -> (
         match decode_response message with
         | Error error -> Error error
-        | Ok { stream_name = None; _ } ->
-            Error (Error.Missing_field "stream_name")
-        | Ok { stream_name = Some stream_name; name = None; _ } ->
-            Error (Error.Missing_field "name")
-        | Ok
-            {
-              stream_name = Some stream_name;
-              name = Some name;
-              config = None;
-              _;
-            } ->
-            Error (Error.Missing_field "config")
-        | Ok
-            {
-              stream_name = Some stream_name;
-              name = Some name;
-              config = Some config;
-              created;
-              delivered;
-              ack_floor;
-              num_ack_pending;
-              num_redelivered;
-              num_waiting;
-              num_pending;
-              unknown;
-              _;
-            } -> (
-            if not (String.equal stream_name (Stream.name consumer.stream)) then
-              Error
-                (Error.Unexpected_stream_name
-                   {
-                     expected = Stream.name consumer.stream;
-                     actual = stream_name;
-                   })
-            else if not (String.equal name consumer.name) then
-              Error
-                (Error.Unexpected_consumer_name
-                   { expected = consumer.name; actual = name })
-            else
-              match config_of_wire config with
-              | Error error -> Error error
-              | Ok (config, config_unknown) ->
-                  Ok
-                    {
-                      Info.name;
-                      stream_name;
-                      created;
-                      config;
-                      unknown;
-                      config_unknown;
-                      delivered;
-                      ack_floor;
-                      num_ack_pending = Option.value ~default:0 num_ack_pending;
-                      num_redelivered = Option.value ~default:0 num_redelivered;
-                      num_waiting = Option.value ~default:0 num_waiting;
-                      num_pending = Option.value ~default:0L num_pending;
-                    }))
+        | Ok response ->
+            info_of_response ~stream:consumer.stream
+              ~expected_name:consumer.name response)
+
+  let list (stream : stream) =
+    let offset = ref 0 in
+    let infos = ref [] in
+    let result = ref None in
+    while Option.is_none !result do
+      let request = { offset = !offset } in
+      match encode list_request_codec request with
+      | Error error -> result := Some (Error error)
+      | Ok payload -> (
+          let subject =
+            api_subject stream.jetstream
+              [ "CONSUMER"; "LIST"; Stream.name stream ]
+          in
+          match
+            request_msg stream.jetstream (Nats.Message.v ~subject payload)
+          with
+          | Error error -> result := Some (Error error)
+          | Ok message -> (
+              match decode_list_response message with
+              | Error error -> result := Some (Error error)
+              | Ok { total; offset = page_offset; limit; consumers; missing }
+                -> (
+                  match missing with
+                  | _ :: _ ->
+                      result :=
+                        Some
+                          (Error
+                             (Error.Incomplete_list
+                                { kind = Error.Consumers; missing }))
+                  | [] -> (
+                      let returned = List.length consumers in
+                      let window =
+                        if Int.compare page_offset total < 0 then
+                          Int.min limit (total - page_offset)
+                        else 0
+                      in
+                      if
+                        (not (Int.equal page_offset !offset))
+                        || not (Int.equal returned window)
+                      then
+                        result :=
+                          Some
+                            (Error
+                               (Error.Incomplete_list
+                                  { kind = Error.Consumers; missing = [] }))
+                      else
+                        let page =
+                          List.fold_left
+                            (fun page response ->
+                              match page with
+                              | Error _ -> page
+                              | Ok infos -> (
+                                  match
+                                    info_of_response ~stream ?expected_name:None
+                                      response
+                                  with
+                                  | Ok info -> Ok (info :: infos)
+                                  | Error error -> Error error))
+                            (Ok []) consumers
+                        in
+                        match page with
+                        | Error error -> result := Some (Error error)
+                        | Ok page ->
+                            infos :=
+                              List.fold_left
+                                (fun infos info -> info :: infos)
+                                !infos (List.rev page);
+                            let next_offset = page_offset + window in
+                            if Int.compare page_offset total >= 0 then
+                              result := Some (Ok (List.rev !infos))
+                            else if Int.compare next_offset !offset <= 0 then
+                              result :=
+                                Some
+                                  (Error
+                                     (Error.Incomplete_list
+                                        { kind = Error.Consumers; missing = [] }))
+                            else if Int.compare next_offset total >= 0 then
+                              result := Some (Ok (List.rev !infos))
+                            else offset := next_offset))))
+    done;
+    match !result with Some result -> result | None -> assert false
 
   let delete consumer =
     let subject =

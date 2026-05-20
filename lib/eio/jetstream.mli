@@ -14,6 +14,7 @@ module Error : sig
     | Invalid_consumer_policy of { field : string; value : string }
 
   type api = { code : int; err_code : int option; description : string }
+  type list_kind = Streams | Consumers
 
   type t =
     | Connection of Connection.error
@@ -37,6 +38,7 @@ module Error : sig
     | Consumer_deleted
     | Conflict of { code : int; description : string }
     | Unexpected_status of { code : int; description : string }
+    | Incomplete_list of { kind : list_kind; missing : string list }
     | Pull_closed
 
   val pp_config : Format.formatter -> config -> unit
@@ -89,6 +91,41 @@ module Stream : sig
     val max_bytes : t -> int64 option
     val max_age : t -> Mtime.Span.t option
     val max_msg_size : t -> int64 option
+
+    val with_name : t -> string -> (t, error) result
+    (** [with_name config name] validates [name] while preserving the other
+        fields. *)
+
+    val with_subjects : t -> Nats.Subject.Filter.t list -> (t, error) result
+    (** [with_subjects config subjects] validates [subjects] while preserving
+        the other fields. An existing server-side mirror may retain an empty
+        subject list. *)
+
+    val with_storage : t -> storage -> (t, error) result
+    (** [with_storage config storage] preserves all fields except storage. *)
+
+    val with_retention : t -> retention -> (t, error) result
+    (** [with_retention config retention] preserves all fields except retention.
+    *)
+
+    val with_discard : t -> discard -> (t, error) result
+    (** [with_discard config discard] preserves all fields except discard. *)
+
+    val with_max_msgs : t -> int64 option -> (t, error) result
+    (** [with_max_msgs config value] validates and replaces the message limit.
+        [None] means unlimited. *)
+
+    val with_max_bytes : t -> int64 option -> (t, error) result
+    (** [with_max_bytes config value] validates and replaces the byte limit.
+        [None] means unlimited. *)
+
+    val with_max_age : t -> Mtime.Span.t option -> (t, error) result
+    (** [with_max_age config value] validates and replaces the age limit. [None]
+        means unlimited. *)
+
+    val with_max_msg_size : t -> int64 option -> (t, error) result
+    (** [with_max_msg_size config value] validates and replaces the per-message
+        size limit. [None] means unlimited. *)
   end
 
   module Info : sig
@@ -112,6 +149,20 @@ module Stream : sig
   val create : jetstream -> Config.t -> (t, Error.t) result
   (** [create jetstream config] creates the server-side stream and returns a
       handle for it. *)
+
+  val update : t -> Config.t -> (Info.t, Error.t) result
+  (** [update stream config] applies the modeled fields in [config] to an
+      existing stream and returns the server's resulting stream information. The
+      operation reads the current server configuration first, preserving fields
+      not modeled by {!Config.t}; every modeled field is replaced, and [None]
+      clears its corresponding limit. Values omitted from [Config.v] use that
+      constructor's defaults. Concurrent changes use last-writer-wins semantics.
+      The configuration name must equal [name stream]. *)
+
+  val list :
+    ?subject:Nats.Subject.Filter.t -> jetstream -> (Info.t list, Error.t) result
+  (** [list jetstream] returns detailed information for all matching streams.
+      The optional [subject] filters streams by their captured subjects. *)
 
   val name : t -> string
   val info : t -> (Info.t, Error.t) result
@@ -228,8 +279,13 @@ module Consumer : sig
   (** [create stream config] creates a server-side consumer and returns its
       name. *)
 
+  val list : stream -> (Info.t list, Error.t) result
+  (** [list stream] returns detailed information for all consumers on [stream].
+  *)
+
   val name : t -> string
   val stream : t -> stream
+
   val fetch :
     ?expires:Mtime.Span.t ->
     ?max_bytes:int ->
