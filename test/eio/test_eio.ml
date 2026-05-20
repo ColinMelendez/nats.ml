@@ -84,6 +84,48 @@ let with_reconnecting_connection ?config ~first_reads ~second_reads f =
   in
   f ~sw connection
 
+let with_reconnecting_connection_traced ?config ~first_reads ~second_reads f =
+  Eio_mock.Backend.run_full @@ fun env ->
+  let first = Eio_mock.Flow.make "nats-server-first" in
+  Eio_mock.Flow.on_read first first_reads;
+  let second = Eio_mock.Flow.make "nats-server-second" in
+  Eio_mock.Flow.on_read second second_reads;
+  let net = make_net "nats-reconnect-network" in
+  Eio_mock.Net.on_connect net [ `Return first; `Return second ];
+  let trace = Buffer.create 4096 in
+  let debug = Eio.Stdenv.debug env in
+  let tracer =
+    {
+      Eio.Debug.traceln =
+        (fun ?__POS__:_ fmt ->
+          Format.kasprintf
+            (fun message ->
+              Buffer.add_string trace message;
+              Buffer.add_char trace '\n')
+            fmt);
+    }
+  in
+  Eio.Fiber.with_binding debug#traceln tracer @@ fun () ->
+  Eio.Switch.run @@ fun sw ->
+  let connection =
+    expect_ok
+      (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock ?config
+         [ endpoint ])
+  in
+  f ~sw ~trace connection
+
+let contains_substring ~needle value =
+  let needle_length = String.length needle in
+  let limit = String.length value - needle_length in
+  let index = ref 0 in
+  let found = ref false in
+  while (not !found) && !index <= limit do
+    if String.equal (String.sub value !index needle_length) needle then
+      found := true;
+    incr index
+  done;
+  !found
+
 let filter =
   match Nats.Subject.Filter.of_string "orders.*" with
   | Ok value -> value
@@ -1161,6 +1203,133 @@ let () =
                 expect_ok (Nats_eio.Subscription.next subscription)
               in
               equal string "after" (Nats.Message.payload later_delivery.message);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "does not replay subscriptions that opt out of reconnect" (fun () ->
+          let queued, queued_u = Eio.Promise.create () in
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let later, later_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_reconnecting_connection_traced
+            ~first_reads:[ `Return info_wire; `Await queued; `Await disconnect ]
+            ~second_reads:[ `Return info_wire; `Await later; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let events = Nats_eio.Connection.events connection in
+              let ordinary =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              let ephemeral =
+                expect_ok
+                  (Nats_eio.Connection.subscribe ~replay_on_reconnect:false
+                     connection filter)
+              in
+              Eio.Promise.resolve queued_u
+                (Ok "MSG orders.created 2 6\r\nbefore\r\n");
+              yield_n 5;
+              let queued_delivery =
+                expect_ok (Nats_eio.Subscription.next ephemeral)
+              in
+              equal string "before"
+                (Nats.Message.payload queued_delivery.message);
+              let ephemeral_result, ephemeral_result_u =
+                Eio.Promise.create ()
+              in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve ephemeral_result_u
+                    (Nats_eio.Subscription.next ephemeral));
+              yield_n 5;
+              let trace_before_disconnect = Buffer.length trace in
+              Eio.Promise.resolve disconnect_u (Error End_of_file);
+              (match Eio.Promise.await ephemeral_result with
+              | Error Nats_eio.Error.Disconnected -> ()
+              | Ok _ -> fail "non-replaying subscription received a delivery"
+              | Error error ->
+                  fail
+                    (Format.asprintf
+                       "expected non-replaying subscription disconnect, got %a"
+                       Nats_eio.Error.pp error));
+              (match expect_core_event (Nats_eio.Event_stream.next events) with
+              | Nats.Event.Info _ -> ()
+              | event ->
+                  fail
+                    (Format.asprintf "expected initial INFO, got %a"
+                       Nats.Event.pp event));
+              (match expect_core_event (Nats_eio.Event_stream.next events) with
+              | Nats.Event.Connected -> ()
+              | event ->
+                  fail
+                    (Format.asprintf "expected initial CONNECTED, got %a"
+                       Nats.Event.pp event));
+              (match expect_core_event (Nats_eio.Event_stream.next events) with
+              | Nats.Event.Closed -> ()
+              | event ->
+                  fail
+                    (Format.asprintf "expected disconnect CLOSED, got %a"
+                       Nats.Event.pp event));
+              (match Nats_eio.Event_stream.next events with
+              | Ok Nats_eio.Event.Disconnected -> ()
+              | Ok event ->
+                  fail
+                    (Format.asprintf "expected disconnect event, got %a"
+                       Nats_eio.Event.pp event)
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected reconnect lifecycle, got %a"
+                       Nats_eio.Error.pp error));
+              (match expect_core_event (Nats_eio.Event_stream.next events) with
+              | Nats.Event.Info _ -> ()
+              | event ->
+                  fail
+                    (Format.asprintf "expected reconnect INFO, got %a"
+                       Nats.Event.pp event));
+              (match expect_core_event (Nats_eio.Event_stream.next events) with
+              | Nats.Event.Connected -> ()
+              | event ->
+                  fail
+                    (Format.asprintf "expected reconnect CONNECTED, got %a"
+                       Nats.Event.pp event));
+              (match Nats_eio.Event_stream.next events with
+              | Ok Nats_eio.Event.Reconnected -> ()
+              | Ok event ->
+                  fail
+                    (Format.asprintf
+                       "expected opt-out reconnected event, got %a"
+                       Nats_eio.Event.pp event)
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected opt-out reconnect, got %a"
+                       Nats_eio.Error.pp error));
+              let reconnect_trace =
+                let trace = Buffer.contents trace in
+                String.sub trace trace_before_disconnect
+                  (String.length trace - trace_before_disconnect)
+              in
+              if
+                contains_substring
+                  ~needle:"wrote \"SUB orders.* 2\\r\\n\""
+                  reconnect_trace
+              then fail "non-replaying subscription was restored on the wire";
+              if
+                not
+                  (contains_substring
+                     ~needle:"wrote \"SUB orders.* 1\\r\\n\""
+                     reconnect_trace)
+              then fail "ordinary subscription was not restored on the wire";
+              Eio.Promise.resolve later_u
+                (Ok "MSG orders.created 1 5\r\nafter\r\n");
+              let ordinary_delivery =
+                expect_ok (Nats_eio.Subscription.next ordinary)
+              in
+              equal string "after"
+                (Nats.Message.payload ordinary_delivery.message);
+              (match Nats_eio.Subscription.next ephemeral with
+              | Error Nats_eio.Error.Disconnected -> ()
+              | Ok _ -> fail "closed non-replaying subscription was replayed"
+              | Error error ->
+                  fail
+                    (Format.asprintf
+                       "expected terminal non-replaying subscription, got %a"
+                       Nats_eio.Error.pp error));
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "retries a failed redial before restoring subscriptions" (fun () ->
