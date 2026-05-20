@@ -110,8 +110,15 @@ val publish :
 val subscribe :
   t ->
   ?queue_group:Nats.Queue_group.t ->
+  ?replay_on_reconnect:bool ->
   Nats.Subject.Filter.t ->
   (Subscription.t, Error.t) result
+(** [subscribe ~replay_on_reconnect:false filter] creates an ephemeral
+    subscription, such as a pull-reply inbox, that is terminated with
+    [Disconnected] rather than restored after a transport loss. The default is
+    [true], preserving ordinary subscription replay. A blocked subscription
+    read and an in-flight drain receive [Disconnected]; already queued
+    deliveries remain available before the terminal marker. *)
 
 val request :
   ?timeout:Mtime.Span.t ->

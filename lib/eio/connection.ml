@@ -242,6 +242,7 @@ module Subscription = struct
     mutable drain_result : (unit, Error.t) result option;
     unsubscribe_request : unit -> (unit, Error.t) result;
     auto_unsubscribe_request : max_messages:int -> (unit, Error.t) result;
+    replay_on_reconnect : bool;
     drain_request :
       timeout:Mtime.Span.t option ->
       promise:(unit, Error.t) result Eio.Promise.t ->
@@ -252,7 +253,7 @@ module Subscription = struct
   }
 
   let create ~sid ~capacity ~unsubscribe_request ~auto_unsubscribe_request
-      ~drain_request ~cancel_drain_request ~wait =
+      ~replay_on_reconnect ~drain_request ~cancel_drain_request ~wait =
     {
       sid;
       queue =
@@ -267,12 +268,14 @@ module Subscription = struct
       drain_result = None;
       unsubscribe_request;
       auto_unsubscribe_request;
+      replay_on_reconnect;
       drain_request;
       cancel_drain_request;
       wait;
     }
 
   let sid t = t.sid
+  let replay_on_reconnect t = t.replay_on_reconnect
 
   let push t (delivery : delivery) =
     if (not t.active) || Option.is_some t.terminal then false
@@ -416,6 +419,7 @@ and command =
   | Subscribe of {
       subject : Nats.Subject.Filter.t;
       queue_group : Nats.Queue_group.t option;
+      replay_on_reconnect : bool;
       resolver : (Subscription.t, Error.t) result Eio.Promise.u;
     }
   | Auto_unsubscribe of {
@@ -1227,6 +1231,17 @@ let retry_reconnect t error =
 
 let recover_transport t initial_error =
   let request_ids = request_sids t in
+  let non_reconnecting_sids =
+    Hashtbl.fold
+      (fun sid subscription acc ->
+        if Subscription.replay_on_reconnect subscription then acc else sid :: acc)
+      t.subscriptions []
+  in
+  List.iter
+    (fun sid ->
+      close_subscription t sid Error.Disconnected;
+      t.state <- Nats.Client.forget_subscription t.state sid)
+    non_reconnecting_sids;
   fail_active_request_setup t Error.Disconnected;
   fail_requests t Error.Disconnected;
   fail_subscription_drains t Error.Disconnected;
@@ -1268,7 +1283,7 @@ let apply_outgoing t command =
           | Ok () ->
               resolve_unit resolver (Ok ());
               Ok ()))
-  | Subscribe { subject; queue_group; resolver } -> (
+  | Subscribe { subject; queue_group; replay_on_reconnect; resolver } -> (
       match
         Nats.Client.outgoing t.state
           (Nats.Client.Subscribe { subject; queue_group })
@@ -1314,6 +1329,7 @@ let apply_outgoing t command =
                 Subscription.create ~sid
                   ~capacity:t.config.subscription_capacity
                   ~unsubscribe_request
+                  ~replay_on_reconnect
                   ~auto_unsubscribe_request:(fun ~max_messages ->
                     if t.closed then Error Error.Closed
                     else if
@@ -2191,9 +2207,10 @@ let publish_msg t message =
 let publish t ?reply_to ?(headers = Nats.Header.empty) subject payload =
   publish_msg t (Nats.Message.v ~subject ?reply_to ~headers payload)
 
-let subscribe t ?queue_group subject =
+let subscribe t ?queue_group ?(replay_on_reconnect = true) subject =
   let promise, resolver = Eio.Promise.create () in
-  send t (Subscribe { subject; queue_group; resolver }) promise
+  send t (Subscribe { subject; queue_group; replay_on_reconnect; resolver })
+    promise
 
 let validate_timeout name timeout =
   if Mtime.Span.compare timeout Mtime.Span.zero > 0 then Ok timeout
