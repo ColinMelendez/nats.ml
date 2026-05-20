@@ -336,20 +336,30 @@ module Subscription = struct
         waiter.done_seen <- true;
         if waiter.server_flushed then complete_drain t waiter (Ok ())
 
+  let terminal_error t =
+    match t.terminal with Some error -> Error error | None -> assert false
+
+  let handle_item t = function
+    | Message delivery -> Ok delivery
+    | Done error ->
+        t.done_seen <- true;
+        (match t.drain_waiter with
+        | None -> ()
+        | Some waiter ->
+            waiter.done_seen <- true;
+            if waiter.server_flushed then complete_drain t waiter (Ok ()));
+        Error error
+
   let next t =
-    if t.done_seen then
-      match t.terminal with Some error -> Error error | None -> assert false
+    if t.done_seen then terminal_error t
+    else handle_item t (Eio.Stream.take t.queue)
+
+  let next_nonblocking t =
+    if t.done_seen then Some (terminal_error t)
     else
-      match Eio.Stream.take t.queue with
-      | Message delivery -> Ok delivery
-      | Done error ->
-          t.done_seen <- true;
-          (match t.drain_waiter with
-          | None -> ()
-          | Some waiter ->
-              waiter.done_seen <- true;
-              if waiter.server_flushed then complete_drain t waiter (Ok ()));
-          Error error
+      match Eio.Stream.take_nonblocking t.queue with
+      | None -> None
+      | Some item -> Some (handle_item t item)
 
   let next_with_timeout ~timeout t =
     if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then

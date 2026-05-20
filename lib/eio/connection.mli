@@ -58,6 +58,11 @@ module Subscription : sig
   (** [next] waits until a delivery or a terminal subscription error is
       available. *)
 
+  val next_nonblocking : t -> (delivery, Error.t) result option
+  (** [next_nonblocking subscription] consumes one queued delivery without
+      waiting. It returns [None] when the queue is empty and
+      [Some (Error error)] for a queued terminal subscription error. *)
+
   val next_with_timeout : timeout:Mtime.Span.t -> t -> (delivery, Error.t) result
   (** [next_with_timeout ~timeout subscription] waits at most [timeout] for a
       delivery. A non-positive timeout is rejected with [Invalid_timeout

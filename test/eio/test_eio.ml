@@ -194,6 +194,44 @@ let () =
               expect_ok (Eio.Promise.await flush_result);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "reads queued subscription deliveries without blocking" (fun () ->
+          let deliver, deliver_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let message = "MSG orders.created 1 5\r\nhello\r\n" in
+          with_connection
+            ~reads:[ `Return info_wire; `Await deliver; `Await hold ]
+            (fun ~sw:_ connection ->
+              let subscription =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              (match Nats_eio.Subscription.next_nonblocking subscription with
+              | None -> ()
+              | Some (Ok _) ->
+                  fail "empty subscription returned a delivery"
+              | Some (Error error) ->
+                  fail
+                    (Format.asprintf "empty subscription returned %a"
+                       Nats_eio.Error.pp error));
+              Eio.Promise.resolve deliver_u (Ok message);
+              yield_n 5;
+              (match Nats_eio.Subscription.next_nonblocking subscription with
+              | Some (Ok delivery) ->
+                  equal string "hello" (Nats.Message.payload delivery.message)
+              | None -> fail "queued subscription delivery was not available"
+              | Some (Error error) ->
+                  fail
+                    (Format.asprintf "queued subscription returned %a"
+                       Nats_eio.Error.pp error));
+              (match Nats_eio.Subscription.next_nonblocking subscription with
+              | None -> ()
+              | Some (Ok _) ->
+                  fail "subscription returned an unexpected second delivery"
+              | Some (Error error) ->
+                  fail
+                    (Format.asprintf "drained subscription returned %a"
+                       Nats_eio.Error.pp error));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "derives nonce credentials before the Eio handshake completes"
         (fun () ->
           let signed, signed_u = Eio.Promise.create () in
