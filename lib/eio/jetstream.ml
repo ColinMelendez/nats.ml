@@ -1659,32 +1659,54 @@ module Consumer = struct
       done;
       !found
 
-  let status_result status =
+  type status_classification =
+    | Status_idle_heartbeat
+    | Status_request_expired
+    | Status_batch_completed
+    | Status_max_bytes
+    | Status_consumer_deleted
+    | Status_conflict
+    | Status_unexpected
+
+  let classify_status status =
     let code = status.Nats.Op.code in
     let description = status.Nats.Op.description in
     let normalized = String.lowercase_ascii description in
-    if Int.equal code 408 then Ok ()
-    else if contains ~needle:"consumer deleted" normalized then
-      Error Error.Consumer_deleted
+    if contains ~needle:"consumer deleted" normalized then
+      Status_consumer_deleted
+    else if Int.equal code 100 && contains ~needle:"idle heartbeat" normalized
+    then Status_idle_heartbeat
+    else if Int.equal code 408 then Status_request_expired
     else if
       Int.equal code 409
-      && (contains ~needle:"message size exceeds maxbytes" normalized
-         || contains ~needle:"batch completed" normalized)
-    then Ok ()
-    else if Int.equal code 409 then Error (Error.Conflict { code; description })
-    else Error (Error.Unexpected_status { code; description })
+      && contains ~needle:"message size exceeds maxbytes" normalized
+    then Status_max_bytes
+    else if Int.equal code 409 && contains ~needle:"batch completed" normalized
+    then Status_batch_completed
+    else if Int.equal code 409 then Status_conflict
+    else Status_unexpected
+
+  let status_result status =
+    let code = status.Nats.Op.code in
+    let description = status.Nats.Op.description in
+    match classify_status status with
+    | Status_request_expired | Status_batch_completed | Status_max_bytes ->
+        Ok ()
+    | Status_consumer_deleted -> Error Error.Consumer_deleted
+    | Status_conflict -> Error (Error.Conflict { code; description })
+    | Status_idle_heartbeat | Status_unexpected ->
+        Error (Error.Unexpected_status { code; description })
 
   let pull_status_result status =
     let code = status.Nats.Op.code in
     let description = status.Nats.Op.description in
-    let normalized = String.lowercase_ascii description in
-    if Int.equal code 408 then Ok ()
-    else if Int.equal code 409 && contains ~needle:"batch completed" normalized
-    then Ok ()
-    else
-      match status_result status with
-      | Ok () -> Error (Error.Conflict { code; description })
-      | Error error -> Error error
+    match classify_status status with
+    | Status_request_expired | Status_batch_completed -> Ok ()
+    | Status_max_bytes | Status_conflict ->
+        Error (Error.Conflict { code; description })
+    | Status_consumer_deleted -> Error Error.Consumer_deleted
+    | Status_idle_heartbeat | Status_unexpected ->
+        Error (Error.Unexpected_status { code; description })
 
   let release_subscription subscription =
     match
@@ -1809,25 +1831,26 @@ module Consumer = struct
                                   messages := message :: !messages;
                                   count := !count + 1)
                           | Some status -> (
-                              if Int.equal status.Nats.Op.code 100 then
-                                match idle_heartbeat with
-                                | Some _ ->
-                                    heartbeat_deadline :=
-                                      heartbeat_deadline_at connection
-                                        idle_heartbeat
-                                | None -> (
-                                    match status_result status with
-                                    | Ok () ->
-                                        terminal :=
-                                          Some (Ok (List.rev !messages))
-                                    | Error error ->
-                                        terminal := Some (Error error))
-                              else
-                                match status_result status with
-                                | Ok () ->
-                                    terminal := Some (Ok (List.rev !messages))
-                                | Error error -> terminal := Some (Error error))
-                          )
+                              match classify_status status with
+                              | Status_idle_heartbeat -> (
+                                  match idle_heartbeat with
+                                  | Some _ ->
+                                      heartbeat_deadline :=
+                                        heartbeat_deadline_at connection
+                                          idle_heartbeat
+                                  | None -> (
+                                      match status_result status with
+                                      | Ok () ->
+                                          terminal :=
+                                            Some (Ok (List.rev !messages))
+                                      | Error error ->
+                                          terminal := Some (Error error)))
+                              | _ -> (
+                                  match status_result status with
+                                  | Ok () ->
+                                      terminal := Some (Ok (List.rev !messages))
+                                  | Error error ->
+                                      terminal := Some (Error error))))
                     done;
                     match !terminal with
                     | Some result -> result
@@ -1917,26 +1940,27 @@ module Consumer = struct
     let consume_delivery pull (delivery : Connection.Subscription.delivery) =
       match delivery.status with
       | Some status -> (
-          if Int.equal status.Nats.Op.code 100 then
-            match pull.idle_heartbeat with
-            | Some _ ->
-                pull.heartbeat_deadline <-
-                  heartbeat_deadline_at pull.connection pull.idle_heartbeat;
-                Ok None
-            | None -> (
-                match pull_status_result status with
-                | Ok () ->
-                    pull.remaining <- 0;
-                    pull.heartbeat_deadline <- None;
-                    Ok None
-                | Error error -> Error error)
-          else
-            match pull_status_result status with
-            | Ok () ->
-                pull.remaining <- 0;
-                pull.heartbeat_deadline <- None;
-                Ok None
-            | Error error -> Error error)
+          match classify_status status with
+          | Status_idle_heartbeat -> (
+              match pull.idle_heartbeat with
+              | Some _ ->
+                  pull.heartbeat_deadline <-
+                    heartbeat_deadline_at pull.connection pull.idle_heartbeat;
+                  Ok None
+              | None -> (
+                  match pull_status_result status with
+                  | Ok () ->
+                      pull.remaining <- 0;
+                      pull.heartbeat_deadline <- None;
+                      Ok None
+                  | Error error -> Error error))
+          | _ -> (
+              match pull_status_result status with
+              | Ok () ->
+                  pull.remaining <- 0;
+                  pull.heartbeat_deadline <- None;
+                  Ok None
+              | Error error -> Error error))
       | None -> (
           match
             Msg.of_message ~jetstream:pull.consumer.jetstream
