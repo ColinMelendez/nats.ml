@@ -174,6 +174,103 @@ let () =
               | Ok _ -> fail "expected CONNECT"
               | Error error -> fail_with Nats.Codec.pp_error error)
           | _ -> fail "expected one CONNECT output");
+      test "gates commands by phase and preserves queue subscription identity"
+        (fun () ->
+          let subject = Nats.Subject.literal "orders.created" in
+          let message = Nats.Message.v ~subject "payload" in
+          let filter =
+            match Nats.Subject.Filter.of_string "orders.*" with
+            | Ok value -> value
+            | Error error -> fail_with Nats.Subject.pp_error error
+          in
+          let queue_group =
+            match Nats.Queue_group.of_string "workers" with
+            | Ok value -> value
+            | Error error -> fail_with Nats.Subject.pp_error error
+          in
+          let client = Nats.Client.v Nats.Config.default in
+          expect_error
+            (Nats.Client.outgoing client (Nats.Client.Publish message))
+            (function Nats.Error.Not_connected -> true | _ -> false);
+          expect_error
+            (Nats.Client.outgoing client
+               (Nats.Client.Subscribe { subject = filter; queue_group = None }))
+            (function Nats.Error.Not_connected -> true | _ -> false);
+          expect_error
+            (Nats.Client.outgoing client Nats.Client.Flush)
+            (function Nats.Error.Not_connected -> true | _ -> false);
+          expect_error
+            (Nats.Client.outgoing client
+               (Nats.Client.Connect
+                  {
+                    credentials = Nats.Client.Connect.v ();
+                    tls_required = false;
+                  }))
+            (function Nats.Error.Info_not_received -> true | _ -> false);
+          let info = client_at_info () in
+          expect_error
+            (Nats.Client.outgoing info.state (Nats.Client.Publish message))
+            (function Nats.Error.Not_connected -> true | _ -> false);
+          let connected =
+            expect_client
+              (Nats.Client.outgoing info.state
+                 (Nats.Client.Connect
+                    {
+                      credentials = Nats.Client.Connect.v ();
+                      tls_required = false;
+                    }))
+          in
+          expect_error
+            (Nats.Client.outgoing connected.state
+               (Nats.Client.Connect
+                  {
+                    credentials = Nats.Client.Connect.v ();
+                    tls_required = false;
+                  }))
+            (function Nats.Error.Already_connected -> true | _ -> false);
+          let subscribed =
+            expect_client
+              (Nats.Client.outgoing connected.state
+                 (Nats.Client.Subscribe
+                    { subject = filter; queue_group = Some queue_group }))
+          in
+          (match subscribed.output with
+          | [ wire ] -> (
+              match operation wire with
+              | Nats.Op.Sub { subject; queue_group = Some group; sid = 1 } ->
+                  equal string "orders.*" (Nats.Subject.Filter.to_string subject);
+                  equal string "workers" (Nats.Queue_group.to_string group)
+              | _ -> fail "expected a queue-group SUB")
+          | _ -> fail "expected one queue-group SUB");
+          match Nats.Client.subscriptions subscribed.state with
+          | [ { sid = 1; queue_group = Some group; _ } ] ->
+              equal string "workers" (Nats.Queue_group.to_string group)
+          | _ -> fail "expected queue-group replay metadata");
+      test "reports control events and ignores unknown subscription ids" (fun () ->
+          let connected = connected_client () in
+          let acknowledged = incoming connected.state "+OK\r\n" in
+          (match acknowledged.events with
+          | [ Nats.Event.Protocol_notice Nats.Event.Ok ] -> ()
+          | _ -> fail "expected an OK protocol notice");
+          let failed = incoming acknowledged.state "-ERR 'permissions violation'\r\n" in
+          (match failed.events with
+          | [ Nats.Event.Server_error { message = "permissions violation" } ] ->
+              ()
+          | _ -> fail "expected a normalized server error");
+          let pinged = incoming failed.state "PING\r\n" in
+          equal string "PONG\r\n"
+            (match pinged.output with
+            | [ output ] -> output
+            | _ -> fail "expected a PONG response");
+          let updated = incoming pinged.state info_wire in
+          (match updated.events with
+          | [ Nats.Event.Info _ ] -> ()
+          | _ -> fail "expected an asynchronous INFO event");
+          let unknown = incoming updated.state "MSG unknown 41 1\r\nx\r\n" in
+          equal int 0 (List.length unknown.deliveries);
+          equal int
+            (List.length (Nats.Client.subscriptions updated.state))
+            (List.length (Nats.Client.subscriptions unknown.state)));
       test "incomplete input is an idle transition and leaves the reader"
         (fun () ->
           let client = Nats.Client.v Nats.Config.default in
