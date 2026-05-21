@@ -440,4 +440,63 @@ let () =
           | Error (Nats.Codec.Packet Nats.Packet.Malformed_line) -> ()
           | _ -> fail "expected a malformed-line error");
           equal int 0 (Bytesrw.Bytes.Reader.pos reader));
+      test "distinguishes incomplete lines, EOF, and incomplete payloads"
+        (fun () ->
+          let incomplete_line = Bytesrw.Bytes.Reader.of_string "PING" in
+          (match Nats.Packet.read incomplete_line with
+          | Error Nats.Packet.Need_more -> ()
+          | _ -> fail "expected more input for an incomplete line");
+          equal int 0 (Bytesrw.Bytes.Reader.pos incomplete_line);
+          (match
+             Nats.Packet.read ~eod:true (Bytesrw.Bytes.Reader.of_string "")
+           with
+          | Error Nats.Packet.End_of_input -> ()
+          | _ -> fail "expected end of input for an empty reader");
+          let incomplete_payload =
+            Bytesrw.Bytes.Reader.of_string "PUB orders.created 5\r\nhello"
+          in
+          match Nats.Packet.read incomplete_payload with
+          | Error Nats.Packet.Need_more ->
+              equal int 0 (Bytesrw.Bytes.Reader.pos incomplete_payload)
+          | _ -> fail "expected more input for an incomplete payload");
+      test "checks packet limits before copying a body" (fun () ->
+          let line_limits =
+            { Nats.Packet.default_limits with max_line_bytes = 3 }
+          in
+          (match
+             Nats.Packet.read ~limits:line_limits
+               (Bytesrw.Bytes.Reader.of_string "PING\r\n")
+           with
+          | Error (Nats.Packet.Line_too_long { limit = 3 }) -> ()
+          | _ -> fail "expected a control-line limit error");
+          let header_limits =
+            { Nats.Packet.default_limits with max_header_bytes = 9 }
+          in
+          (match
+             Nats.Packet.read ~limits:header_limits
+               (Bytesrw.Bytes.Reader.of_string "HMSG reply 1 10 10\r\n")
+           with
+          | Error (Nats.Packet.Headers_too_large { size = 10; limit = 9 }) -> ()
+          | _ -> fail "expected a header limit error");
+          let packet_limits =
+            { Nats.Packet.default_limits with max_packet_bytes = 10 }
+          in
+          match
+            Nats.Packet.read ~limits:packet_limits
+              (Bytesrw.Bytes.Reader.of_string "PUB foo 100\r\n")
+          with
+          | Error (Nats.Packet.Packet_too_large { limit = 10; _ }) -> ()
+          | _ -> fail "expected a packet limit error");
+      test "rejects invalid length pairs and payload terminators" (fun () ->
+          (match
+             Nats.Packet.read ~eod:true
+               (Bytesrw.Bytes.Reader.of_string "HMSG reply 1 11 10\r\n")
+           with
+          | Error (Nats.Packet.Invalid_lengths { keyword = "HMSG" }) -> ()
+          | _ -> fail "expected an invalid HMSG length pair");
+          let reader = Bytesrw.Bytes.Reader.of_string "PUB foo 3\r\nabcXX" in
+          (match Nats.Packet.read ~eod:true reader with
+          | Error Nats.Packet.Invalid_terminator -> ()
+          | _ -> fail "expected a repeated invalid terminator error");
+          equal int 0 (Bytesrw.Bytes.Reader.pos reader));
     ]
