@@ -23,19 +23,26 @@ let expect_jetstream_ok = function
 let expect_jetstream_error result predicate =
   match result with
   | Ok _ -> fail "expected a JetStream error"
-  | Error error -> equal bool true (predicate error)
+  | Error error ->
+      if not (predicate error) then
+        fail
+          (Format.asprintf "unexpected JetStream error: %a"
+             Nats_eio.Jetstream.Error.pp error)
 
 let operation_wire operation =
   match Nats.Codec.encode operation with
   | Ok wire -> wire
   | Error error -> fail (Format.asprintf "%a" Nats.Codec.pp_error error)
 
-let status_wire ~code ~description =
+let status_wire_with_sid ~sid ~code ~description =
   let message =
     Nats.Message.v ~subject:(Nats.Subject.literal "_INBOX.reply") ""
   in
   operation_wire
-    (Nats.Op.Hmsg { sid = 1; message; status = Some { code; description } })
+    (Nats.Op.Hmsg { sid; message; status = Some { code; description } })
+
+let status_wire ~code ~description =
+  status_wire_with_sid ~sid:1 ~code ~description
 
 let delivery_wire payload =
   let message =
@@ -45,6 +52,18 @@ let delivery_wire payload =
       payload
   in
   operation_wire (Nats.Op.Hmsg { sid = 1; message; status = None })
+
+let delivery_without_ack_wire payload =
+  let message =
+    Nats.Message.v ~subject:(Nats.Subject.literal "orders.created") payload
+  in
+  operation_wire (Nats.Op.Hmsg { sid = 1; message; status = None })
+
+let ack_response_wire ~sid =
+  let message =
+    Nats.Message.v ~subject:(Nats.Subject.literal "_INBOX.reply") "+ACK"
+  in
+  operation_wire (Nats.Op.Hmsg { sid; message; status = None })
 
 let with_connection ?config ~reads f =
   Eio_mock.Backend.run_full @@ fun env ->
@@ -123,6 +142,133 @@ let () =
               expect_jetstream_error (Eio.Promise.await result) (function
                 | Nats_eio.Jetstream.Error.Consumer_deleted -> true
                 | _ -> false);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "ack_sync waits for the server acknowledgement" (fun () ->
+          let delivery, delivery_u = Eio.Promise.create () in
+          let ack_response, ack_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:
+              [
+                `Return info_wire;
+                `Await delivery;
+                `Await ack_response;
+                `Await hold;
+              ]
+            (fun ~sw connection ->
+              let pull =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Consumer.Pull.v ~sw (consumer connection))
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.Pull.next pull));
+              yield_n 5;
+              Eio.Promise.resolve delivery_u (Ok (delivery_wire "payload"));
+              let message = expect_jetstream_ok (Eio.Promise.await result) in
+              let ack_result, ack_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve ack_result_u
+                    (Nats_eio.Jetstream.Msg.ack_sync message));
+              yield_n 5;
+              Eio.Promise.resolve ack_response_u (Ok (ack_response_wire ~sid:2));
+              expect_jetstream_ok (Eio.Promise.await ack_result);
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Pull.close pull);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "ack_sync reports no responders" (fun () ->
+          let delivery, delivery_u = Eio.Promise.create () in
+          let ack_response, ack_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:
+              [
+                `Return info_wire;
+                `Await delivery;
+                `Await ack_response;
+                `Await hold;
+              ]
+            (fun ~sw connection ->
+              let pull =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Consumer.Pull.v ~sw (consumer connection))
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.Pull.next pull));
+              yield_n 5;
+              Eio.Promise.resolve delivery_u (Ok (delivery_wire "payload"));
+              let message = expect_jetstream_ok (Eio.Promise.await result) in
+              let ack_result, ack_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve ack_result_u
+                    (Nats_eio.Jetstream.Msg.ack_sync message));
+              yield_n 5;
+              Eio.Promise.resolve ack_response_u
+                (Ok
+                   (status_wire_with_sid ~sid:2 ~code:503
+                      ~description:"No Responders"));
+              expect_jetstream_error (Eio.Promise.await ack_result) (function
+                | Nats_eio.Jetstream.Error.Connection
+                    Nats_eio.Error.No_responders ->
+                    true
+                | _ -> false);
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Pull.close pull);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "ack_sync timeout is structured" (fun () ->
+          let delivery, delivery_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await delivery; `Await hold ]
+            (fun ~sw connection ->
+              let pull =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Consumer.Pull.v ~sw (consumer connection))
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.Pull.next pull));
+              yield_n 5;
+              Eio.Promise.resolve delivery_u (Ok (delivery_wire "payload"));
+              let message = expect_jetstream_ok (Eio.Promise.await result) in
+              expect_jetstream_error
+                (Nats_eio.Jetstream.Msg.ack_sync
+                   ~timeout:Mtime.Span.(1 * ms)
+                   message)
+                (function
+                  | Nats_eio.Jetstream.Error.Connection Nats_eio.Error.Timeout
+                    ->
+                      true
+                  | _ -> false);
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Pull.close pull);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "delivery without an acknowledgement reply is rejected" (fun () ->
+          let delivery, delivery_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await delivery; `Await hold ]
+            (fun ~sw connection ->
+              let pull =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Consumer.Pull.v ~sw (consumer connection))
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.Pull.next pull));
+              yield_n 5;
+              Eio.Promise.resolve delivery_u
+                (Ok (delivery_without_ack_wire "payload"));
+              expect_jetstream_error (Eio.Promise.await result) (function
+                | Nats_eio.Jetstream.Error.Missing_ack_reply -> true
+                | _ -> false);
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Pull.close pull);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "queued heartbeat control is processed before deletion" (fun () ->

@@ -191,6 +191,11 @@ module Msg : sig
   val consumer_sequence : t -> int64
   val num_pending : t -> int64
   val ack : t -> (unit, Error.t) result
+  (** [ack_sync ?timeout message] sends [+ACK] and waits for the server to
+      acknowledge receiving it. [timeout] defaults to the connection request
+      timeout. A missing response returns [Error (Connection Timeout)] and a
+      server without a responder returns [Error (Connection No_responders)]. *)
+  val ack_sync : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
   val nak : ?delay:Mtime.Span.t -> t -> (unit, Error.t) result
   val term : ?reason:string -> t -> (unit, Error.t) result
   val in_progress : t -> (unit, Error.t) result

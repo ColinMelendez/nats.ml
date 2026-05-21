@@ -937,6 +937,14 @@ module Msg = struct
 
   let ack value = respond value "+ACK"
 
+  let ack_sync ?timeout value =
+    match
+      Connection.request ?timeout value.jetstream.connection value.ack_subject
+        "+ACK"
+    with
+    | Ok _ -> Ok ()
+    | Error error -> Error (Error.Connection error)
+
   let nak ?delay value =
     match delay with
     | None -> respond value "-NAK"
