@@ -14,6 +14,7 @@
   bytesrw
   jsont
   mtime
+  (alcobar :with-test)
   (windtrap :with-test)))
 
 (package

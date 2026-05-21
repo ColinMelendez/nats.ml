@@ -1,0 +1,19 @@
+(version 0.3.1)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs} @install))))))
+
+(depends
+ (all_platforms
+  (dune ocaml alcotest cmdliner afl-persistent)))
+
+(source
+ (fetch
+  (url
+   https://github.com/samoht/alcobar/releases/download/v0.3.1/alcobar-0.3.1.tbz)
+  (checksum
+   sha512=8b2fdeacef119c001c765c99eb603332a4ad0214e04ca32396935333d6abdd52095a4ec48e86c53c2bd7f8b5872ebbbf5bcea4065c94d5fcf1496897716e0158)))

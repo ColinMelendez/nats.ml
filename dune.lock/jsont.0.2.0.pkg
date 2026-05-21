@@ -10,7 +10,7 @@
      --dev-pkg
      %{pkg-self:dev}
      --with-cmdliner
-     false
+     %{pkg:cmdliner:installed}
      --with-bytesrw
      %{pkg:bytesrw:installed}
      --with-brr
@@ -18,7 +18,7 @@
 
 (depends
  (all_platforms
-  (ocaml ocamlfind ocamlbuild topkg bytesrw)))
+  (ocaml ocamlfind ocamlbuild topkg cmdliner bytesrw)))
 
 (source
  (fetch

@@ -10,7 +10,7 @@
      --dev-pkg
      %{pkg-self:dev}
      --with-cmdliner
-     false
+     %{pkg:cmdliner:installed}
      --with-b0
      false
      --with-conf-libblake3
@@ -28,7 +28,7 @@
 
 (depends
  (all_platforms
-  (ocaml ocamlfind ocamlbuild topkg conf-pkg-config)))
+  (ocaml ocamlfind ocamlbuild topkg conf-pkg-config cmdliner)))
 
 (source
  (fetch
