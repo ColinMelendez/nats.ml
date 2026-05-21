@@ -388,6 +388,80 @@ let () =
             ->
               ()
           | _ -> fail "expected a status without a description");
+      test "encodes and decodes HPUB empty and status-bearing messages"
+        (fun () ->
+          let subject = Nats.Subject.literal "orders.created" in
+          let reply_to = Nats.Subject.literal "_INBOX.reply" in
+          let empty = Nats.Message.v ~subject ~reply_to "" in
+          let empty_operation =
+            Nats.Op.Hpub { message = empty; status = None }
+          in
+          equal string
+            ("HPUB orders.created _INBOX.reply 12 12\r\n"
+           ^ "NATS/1.0\r\n\r\n\r\n")
+            (expect_codec_ok (Nats.Codec.encode empty_operation));
+          (match
+             read_operation
+               "HPUB orders.created _INBOX.reply 12 12\r\n\
+                NATS/1.0\r\n\
+                \r\n\
+                \r\n"
+           with
+          | Nats.Op.Hpub { message; status = None } ->
+              equal bool true (Nats.Message.equal empty message)
+          | _ -> fail "expected an empty HPUB operation");
+          let status = { Nats.Op.code = 202; description = "Accepted" } in
+          let status_operation =
+            Nats.Op.Hpub { message = empty; status = Some status }
+          in
+          equal string
+            ("HPUB orders.created _INBOX.reply 25 25\r\n"
+           ^ "NATS/1.0 202 Accepted\r\n\r\n\r\n")
+            (expect_codec_ok (Nats.Codec.encode status_operation));
+          match
+            read_operation
+              "HPUB orders.created _INBOX.reply 25 25\r\n\
+               NATS/1.0 202 Accepted\r\n\
+               \r\n\
+               \r\n"
+          with
+          | Nats.Op.Hpub
+              { status = Some { code = 202; description = "Accepted" }; _ } ->
+              ()
+          | _ -> fail "expected the HPUB status line");
+      test "keeps HMSG status errors and following operations separate"
+        (fun () ->
+          let reader =
+            Bytesrw.Bytes.Reader.of_string
+              ("HMSG inbox 7 12 12\r\nNATS/1.0\r\n\r\n\r\n"
+             ^ "PING\r\n")
+          in
+          (match Nats.Codec.read reader with
+          | Ok (Nats.Op.Hmsg { sid = 7; status = None; message }) ->
+              equal string "" (Nats.Message.payload message)
+          | _ -> fail "expected the HMSG before PING");
+          (match Nats.Codec.read ~eod:true reader with
+          | Ok Nats.Op.Ping -> ()
+          | _ -> fail "expected PING to remain after HMSG");
+          let subject = Nats.Subject.literal "inbox" in
+          let message = Nats.Message.v ~subject "" in
+          (match
+             Nats.Codec.encode
+               (Nats.Op.Hpub
+                  {
+                    message;
+                    status = Some { code = 99; description = "invalid" };
+                  })
+           with
+          | Error Nats.Codec.Invalid_status -> ()
+          | _ -> fail "expected invalid outgoing status");
+          match
+            Nats.Codec.read ~eod:true
+              (Bytesrw.Bytes.Reader.of_string
+                 "HMSG inbox 1 16 16\r\nNATS/1.0 099\r\n\r\n\r\n")
+          with
+          | Error Nats.Codec.Invalid_status -> ()
+          | _ -> fail "expected invalid incoming status");
       test "reads multiple complete operations from one reader" (fun () ->
           let reader = Bytesrw.Bytes.Reader.of_string "PING\r\nPONG\r\n" in
           (match expect_codec_ok (Nats.Codec.read reader) with
