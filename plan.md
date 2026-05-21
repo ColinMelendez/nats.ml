@@ -76,8 +76,17 @@ consumer management and inventory, one-shot fetch, typed message
 acknowledgements, and a persistent single-owner
 `Consumer.Pull` session with batch accounting, local timeout/resumption,
 server-expiry retries, structured terminal statuses, and switch-owned cleanup.
-KV, Object Store, Services, consumer-failure detection, and the remaining
-push/ordered consumer features remain later work.
+Consumer status classification now detects terminal consumer failure consistently
+across fetch and pull paths. The Eio layer also provides a switch-owned
+single-owner `Consumer.Push` session with delivery-subject and queue-group
+configuration, explicit acknowledgement, local timeout/resumption, and
+fail-closed handling of unsupported status frames. Push consumers configured
+with idle heartbeats or flow control are rejected before subscription until
+those control frames are implemented. KV, Object Store, Services, ordered
+consumers, and the remaining push control features remain later work. Real
+cluster and cross-SDK interop coverage is deliberately deferred to the final
+acceptance phase; current consumer confidence comes from local mock transport
+and pure-boundary tests.
 The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
@@ -446,8 +455,17 @@ request/reply and subscription primitives.
   deadlines, local timeouts preserve the outstanding request, queued control
   deliveries are drained before declaring a miss, and missing heartbeats fail
   the pull session with structured cleanup.
-- Remaining: add consumer-failure detection, then push consumers, ordered
-  consumers, filtering, and flow-control behavior without introducing a second
+- Completed: centralize consumer-failure and status classification across fetch
+  and pull, preserving consumer deletion and conflict errors while keeping
+  request-expiry and batch-completion statuses internal.
+- Completed: add `Consumer.Push` with server-configured delivery subjects and
+  queue groups, switch-owned lifecycle, typed deliveries, explicit
+  acknowledgement, timeout/resumption, and local failure/close contracts.
+  Push sessions reject configured idle heartbeats and flow control before
+  subscribing; ordered recovery and those control-frame handlers are separate
+  follow-up slices.
+- Remaining: add push heartbeat/flow-control handling, ordered consumers,
+  filtering, and broader delivery semantics without introducing a second
   runtime or subscription abstraction.
 
 ### Acceptance tests
@@ -456,13 +474,13 @@ request/reply and subscription primitives.
   filtered stream and consumer inventory, publish ack, duplicate message ids,
   message counts, unknown-config preservation, and cleanup; it runs in
   anonymous and username/password modes.
-- Completed: add typed server-error assertions, consumer management, pull
-  backpressure, local/server-expiry behavior, cancellation/cleanup, and
-  acknowledgement metadata/redelivery coverage against a real JetStream
-  server.
+- Completed locally: add typed server-error assertions, consumer management,
+  pull backpressure, server-expiry behavior, cancellation/cleanup,
+  acknowledgement metadata, consumer-failure detection, and push lifecycle
+  contracts through the Eio mock transport.
 - Completed: heartbeat liveness and local/server timeout interaction.
-- Remaining: consumer-failure handling and server-version gates.
-- Push and ordered consumer behavior once their implementation lands.
+- Remaining: real cluster and cross-SDK interop coverage for consumer behavior,
+  server-version gates, and the final push/ordered acceptance matrix.
 
 ### Gate G4 — JetStream API stabilization
 

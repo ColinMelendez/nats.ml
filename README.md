@@ -43,9 +43,12 @@ and cleanup. The JetStream test uses a per-run stream name; set
 debugging.
 
 The first JetStream layer is available through `Nats_eio.Jetstream`: typed
-stream configuration/info and create/bind/info/delete operations, plus durable
-publish acknowledgements over ordinary Core NATS request/reply. Consumer, KV,
-Object Store, and Services APIs remain later implementation phases.
+stream and consumer management, one-shot fetch, durable publish and message
+acknowledgements, and switch-owned Eio pull/push sessions over ordinary Core
+NATS request/reply. Push sessions currently reject consumers configured with
+idle heartbeats or flow control until those control frames are implemented.
+KV, Object Store, Services, ordered consumers, and real cluster/interop
+coverage remain later implementation phases.
 
 The project uses Dune package management. No compatibility layer for NATS
 Streaming is planned.
