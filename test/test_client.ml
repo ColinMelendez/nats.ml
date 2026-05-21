@@ -524,28 +524,198 @@ let () =
           match (Nats.Client.phase closed.state, closed.events) with
           | Nats.Client.Closed, [ Nats.Event.Closed ] -> ()
           | _ -> fail "expected liveness close");
-      test "drain unsubscribes and leaves final close to the owner" (fun () ->
-          let connected = connected_client () in
-          let filter =
+      test "drain orders UNSUBs, permits flush, and leaves final close to owner"
+        (fun () ->
+          let config =
+            expect_config
+              (Nats.Config.v ~ping_interval:(Some Mtime.Span.s) ())
+          in
+          let client = Nats.Client.v config in
+          let info =
+            expect_client
+              (Nats.Client.incoming ~eod:true client ~now:Mtime.min_stamp
+                 (Bytesrw.Bytes.Reader.of_string info_wire))
+          in
+          let connected =
+            expect_client
+              (Nats.Client.outgoing info.state
+                 (Nats.Client.Connect
+                    {
+                      credentials = Nats.Client.Connect.v ();
+                      tls_required = false;
+                    }))
+          in
+          let first_filter =
             match Nats.Subject.Filter.of_string "orders.*" with
             | Ok value -> value
             | Error error -> fail_with Nats.Subject.pp_error error
           in
-          let subscribed =
+          let second_filter =
+            match Nats.Subject.Filter.of_string "orders.created" with
+            | Ok value -> value
+            | Error error -> fail_with Nats.Subject.pp_error error
+          in
+          let queue_group =
+            match Nats.Queue_group.of_string "workers" with
+            | Ok value -> value
+            | Error error -> fail_with Nats.Subject.pp_error error
+          in
+          let first =
             expect_client
               (Nats.Client.outgoing connected.state
-                 (Nats.Client.Subscribe { subject = filter; queue_group = None }))
+                 (Nats.Client.Subscribe
+                    { subject = first_filter; queue_group = None }))
+          in
+          let second =
+            expect_client
+              (Nats.Client.outgoing first.state
+                 (Nats.Client.Subscribe
+                    {
+                      subject = second_filter;
+                      queue_group = Some queue_group;
+                    }))
           in
           let draining =
             expect_client
-              (Nats.Client.outgoing subscribed.state Nats.Client.Drain)
+              (Nats.Client.outgoing second.state Nats.Client.Drain)
           in
-          equal bool true
-            (match Nats.Client.phase draining.state with
-            | Nats.Client.Draining -> true
-            | _ -> false);
-          equal int 2 (List.length draining.output);
-          match draining.events with
+          (match Nats.Client.phase draining.state with
+          | Nats.Client.Draining -> ()
+          | _ -> fail "expected the draining phase");
+          (match draining.output with
+          | [ first_unsub; second_unsub; ping ] ->
+              equal string "UNSUB 1\r\n" first_unsub;
+              equal string "UNSUB 2\r\n" second_unsub;
+              equal string "PING\r\n" ping
+          | _ -> fail "expected ordered UNSUBs followed by PING");
+          (match draining.events with
           | [ Nats.Event.Draining ] -> ()
           | _ -> fail "expected draining event");
+          equal int 0 (List.length (Nats.Client.subscriptions draining.state));
+          (match Nats.Client.next_timeout draining.state with
+          | None -> ()
+          | Some _ -> fail "draining state retained a liveness deadline");
+          let message =
+            Nats.Message.v ~subject:(Nats.Subject.literal "orders.created") "x"
+          in
+          expect_error
+            (Nats.Client.outgoing draining.state (Nats.Client.Publish message))
+            (function Nats.Error.Draining -> true | _ -> false);
+          expect_error
+            (Nats.Client.outgoing draining.state
+               (Nats.Client.Subscribe
+                  { subject = first_filter; queue_group = None }))
+            (function Nats.Error.Draining -> true | _ -> false);
+          let idle = Nats.Client.timer draining.state ~now:Mtime.min_stamp in
+          equal int 0 (List.length idle.output);
+          let drain_ack = incoming draining.state "PONG\r\n" in
+          (match drain_ack.events with
+          | [ Nats.Event.Flush_completed ] -> ()
+          | _ -> fail "expected the drain flush completion");
+          let flushed =
+            expect_client (Nats.Client.outgoing drain_ack.state Nats.Client.Flush)
+          in
+          equal string "PING\r\n"
+            (match flushed.output with
+            | [ output ] -> output
+            | _ -> fail "expected a flush PING while draining");
+          let flush_ack = incoming flushed.state "PONG\r\n" in
+          (match flush_ack.events with
+          | [ Nats.Event.Flush_completed ] -> ()
+          | _ -> fail "expected the draining flush completion");
+          let closed = expect_client (Nats.Client.outgoing flush_ack.state Nats.Client.Close) in
+          match (Nats.Client.phase closed.state, closed.events) with
+          | Nats.Client.Closed, [ Nats.Event.Closed ] -> ()
+          | _ -> fail "expected the owner-triggered close");
+      test "forgets ephemeral subscriptions before reconnect replay" (fun () ->
+          let config =
+            expect_config
+              (Nats.Config.v ~ping_interval:(Some Mtime.Span.s) ())
+          in
+          let client = Nats.Client.v config in
+          let info =
+            expect_client
+              (Nats.Client.incoming ~eod:true client ~now:Mtime.min_stamp
+                 (Bytesrw.Bytes.Reader.of_string info_wire))
+          in
+          let connected =
+            expect_client
+              (Nats.Client.outgoing info.state
+                 (Nats.Client.Connect
+                    {
+                      credentials = Nats.Client.Connect.v ();
+                      tls_required = false;
+                    }))
+          in
+          let queue_filter =
+            match Nats.Subject.Filter.of_string "orders.*" with
+            | Ok value -> value
+            | Error error -> fail_with Nats.Subject.pp_error error
+          in
+          let inbox_filter =
+            match Nats.Subject.Filter.of_string "_INBOX.reply" with
+            | Ok value -> value
+            | Error error -> fail_with Nats.Subject.pp_error error
+          in
+          let queue_group =
+            match Nats.Queue_group.of_string "workers" with
+            | Ok value -> value
+            | Error error -> fail_with Nats.Subject.pp_error error
+          in
+          let queue_subscription =
+            expect_client
+              (Nats.Client.outgoing connected.state
+                 (Nats.Client.Subscribe
+                    { subject = queue_filter; queue_group = Some queue_group }))
+          in
+          let inbox_subscription =
+            expect_client
+              (Nats.Client.outgoing queue_subscription.state
+                 (Nats.Client.Subscribe
+                    { subject = inbox_filter; queue_group = None }))
+          in
+          let limited =
+            expect_client
+              (Nats.Client.outgoing inbox_subscription.state
+                 (Nats.Client.Auto_unsubscribe { sid = 1; max_messages = 3 }))
+          in
+          let forgotten = Nats.Client.forget_subscription limited.state 2 in
+          equal int 1 (List.length (Nats.Client.subscriptions forgotten));
+          let reconnecting = Nats.Client.prepare_reconnect forgotten in
+          (match Nats.Client.phase reconnecting with
+          | Nats.Client.Awaiting_info -> ()
+          | _ -> fail "expected reconnect negotiation");
+          (match Nats.Client.next_timeout reconnecting with
+          | None -> ()
+          | Some _ -> fail "reconnect retained the old liveness deadline");
+          (match Nats.Client.subscriptions reconnecting with
+          | [ { sid = 1; queue_group = Some group; remaining = Some 3; _ } ] ->
+              equal string "workers" (Nats.Queue_group.to_string group)
+          | _ -> fail "unexpected replay metadata after forgetting inbox");
+          let received = incoming reconnecting info_wire in
+          let reconnected =
+            expect_client
+              (Nats.Client.outgoing received.state
+                 (Nats.Client.Connect
+                    {
+                      credentials = Nats.Client.Connect.v ();
+                      tls_required = false;
+                    }))
+          in
+          (match reconnected.output with
+          | [ connect; subscribe; unsubscribe ] ->
+              (match operation connect with
+              | Nats.Op.Connect _ -> ()
+              | _ -> fail "expected replay CONNECT");
+              (match operation subscribe with
+              | Nats.Op.Sub { sid = 1; queue_group = Some group; _ } ->
+                  equal string "workers" (Nats.Queue_group.to_string group)
+              | _ -> fail "expected queue-group replay");
+              (match operation unsubscribe with
+              | Nats.Op.Unsub { sid = 1; max_messages = Some 3 } -> ()
+              | _ -> fail "expected replay auto-unsubscribe")
+          | _ -> fail "forgotten subscription was replayed");
+          match Nats.Client.subscriptions reconnected.state with
+          | [ { sid = 1; remaining = Some 3; _ } ] -> ()
+          | _ -> fail "replay changed the remaining delivery intent");
     ]
