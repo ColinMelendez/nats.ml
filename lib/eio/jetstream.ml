@@ -38,11 +38,14 @@ module Error = struct
     | Missing_heartbeat
     | Missing_ack_reply
     | Invalid_ack_reply of string
+    | Not_push_consumer
+    | Unsupported_push_option of { field : string; value : string }
     | Consumer_deleted
     | Conflict of { code : int; description : string }
     | Unexpected_status of { code : int; description : string }
     | Incomplete_list of { kind : list_kind; missing : string list }
     | Pull_closed
+    | Push_closed
 
   let pp_config ppf = function
     | Empty_name -> Format.pp_print_string ppf "stream name is empty"
@@ -124,6 +127,11 @@ module Error = struct
     | Invalid_ack_reply subject ->
         Format.fprintf ppf "invalid JetStream acknowledgement subject %S"
           subject
+    | Not_push_consumer ->
+        Format.pp_print_string ppf "JetStream consumer has no delivery subject"
+    | Unsupported_push_option { field; value } ->
+        Format.fprintf ppf "JetStream push consumer does not support %s=%S"
+          field value
     | Consumer_deleted ->
         Format.pp_print_string ppf "JetStream consumer was deleted"
     | Conflict { code; description } ->
@@ -142,6 +150,8 @@ module Error = struct
               (String.concat ", " missing))
     | Pull_closed ->
         Format.pp_print_string ppf "JetStream pull consumer is closed"
+    | Push_closed ->
+        Format.pp_print_string ppf "JetStream push consumer is closed"
 end
 
 type config_error = Error.config
@@ -978,6 +988,10 @@ module Consumer = struct
     type t = {
       durable_name : string option;
       description : string option;
+      deliver_subject : Nats.Subject.t option;
+      deliver_group : Nats.Queue_group.t option;
+      idle_heartbeat : Mtime.Span.t option;
+      flow_control : bool option;
       deliver_policy : deliver_policy;
       ack_policy : ack_policy;
       ack_wait : Mtime.Span.t option;
@@ -1051,17 +1065,27 @@ module Consumer = struct
             (Error.Invalid_consumer_policy { field = "opt_start_time"; value })
       | _ -> Ok ()
 
-    let v ?durable_name ?description ?(deliver_policy = All)
+    let v ?durable_name ?description ?deliver_subject ?deliver_group
+        ?idle_heartbeat ?flow_control ?(deliver_policy = All)
         ?(ack_policy = Explicit) ?ack_wait ?max_deliver ?filter_subject
         ?(replay_policy = Instant) ?max_ack_pending ?max_waiting ?max_batch
         ?max_expires ?max_bytes ?headers_only ?inactive_threshold ?mem_storage
         () =
       let max_expires = normalize_span max_expires in
       let inactive_threshold = normalize_span inactive_threshold in
+      let idle_heartbeat = normalize_span idle_heartbeat in
       let ( let* ) value f =
         match value with Error error -> Error error | Ok value -> f value
       in
       let* () = validate_name durable_name in
+      let* () =
+        match (deliver_subject, deliver_group) with
+        | None, Some _ ->
+            Error
+              (Error.Invalid_consumer_policy
+                 { field = "deliver_group"; value = "requires deliver_subject" })
+        | _ -> Ok ()
+      in
       let* () = validate_deliver_policy deliver_policy in
       let* () =
         validate_span
@@ -1078,6 +1102,11 @@ module Consumer = struct
           (Error.Invalid_consumer_span { field = "inactive_threshold" })
           inactive_threshold
       in
+      let* () =
+        validate_span
+          (Error.Invalid_consumer_span { field = "idle_heartbeat" })
+          idle_heartbeat
+      in
       let* () = validate_limit "max_deliver" max_deliver in
       let* () = validate_limit "max_ack_pending" max_ack_pending in
       let* () = validate_limit "max_waiting" max_waiting in
@@ -1087,6 +1116,10 @@ module Consumer = struct
         {
           durable_name;
           description;
+          deliver_subject;
+          deliver_group;
+          idle_heartbeat;
+          flow_control;
           deliver_policy;
           ack_policy;
           ack_wait;
@@ -1105,6 +1138,10 @@ module Consumer = struct
 
     let durable_name value = value.durable_name
     let description value = value.description
+    let deliver_subject value = value.deliver_subject
+    let deliver_group value = value.deliver_group
+    let idle_heartbeat value = value.idle_heartbeat
+    let flow_control value = value.flow_control
     let deliver_policy value = value.deliver_policy
     let ack_policy value = value.ack_policy
     let ack_wait value = value.ack_wait
@@ -1124,6 +1161,10 @@ module Consumer = struct
   type wire_config = {
     durable_name : string option;
     description : string option;
+    deliver_subject : string option;
+    deliver_group : string option;
+    idle_heartbeat : int64 option;
+    flow_control : bool option;
     deliver_policy : string;
     opt_start_seq : int64 option;
     opt_start_time : string option;
@@ -1159,6 +1200,10 @@ module Consumer = struct
       (fun
         durable_name
         description
+        deliver_subject
+        deliver_group
+        idle_heartbeat
+        flow_control
         deliver_policy
         opt_start_seq
         opt_start_time
@@ -1180,6 +1225,10 @@ module Consumer = struct
         {
           durable_name;
           description;
+          deliver_subject;
+          deliver_group;
+          idle_heartbeat;
+          flow_control;
           deliver_policy;
           opt_start_seq;
           opt_start_time;
@@ -1202,6 +1251,14 @@ module Consumer = struct
         value.durable_name)
     |> Jsont.Object.opt_mem "description" Jsont.string ~enc:(fun value ->
         value.description)
+    |> Jsont.Object.opt_mem "deliver_subject" Jsont.string ~enc:(fun value ->
+        value.deliver_subject)
+    |> Jsont.Object.opt_mem "deliver_group" Jsont.string ~enc:(fun value ->
+        value.deliver_group)
+    |> Jsont.Object.opt_mem "idle_heartbeat" Jsont.int64 ~enc:(fun value ->
+        value.idle_heartbeat)
+    |> Jsont.Object.opt_mem "flow_control" Jsont.bool ~enc:(fun value ->
+        value.flow_control)
     |> Jsont.Object.mem "deliver_policy" Jsont.string ~enc:(fun value ->
         value.deliver_policy)
     |> Jsont.Object.opt_mem "opt_start_seq" Jsont.int64 ~enc:(fun value ->
@@ -1264,6 +1321,13 @@ module Consumer = struct
     {
       durable_name = Config.durable_name value;
       description = Config.description value;
+      deliver_subject =
+        Option.map Nats.Subject.to_string (Config.deliver_subject value);
+      deliver_group =
+        Option.map Nats.Queue_group.to_string (Config.deliver_group value);
+      idle_heartbeat =
+        Option.map Mtime.Span.to_uint64_ns (Config.idle_heartbeat value);
+      flow_control = Config.flow_control value;
       deliver_policy;
       opt_start_seq;
       opt_start_time;
@@ -1317,35 +1381,67 @@ module Consumer = struct
           | Ok subject -> Ok (Some subject)
           | Error error -> Error (Error.Invalid_subject error))
     in
+    let deliver_subject =
+      match value.deliver_subject with
+      | None | Some "" -> Ok None
+      | Some subject -> (
+          match Nats.Subject.of_string subject with
+          | Ok subject -> Ok (Some subject)
+          | Error error -> Error (Error.Invalid_subject error))
+    in
+    let deliver_group =
+      match value.deliver_group with
+      | None | Some "" -> Ok None
+      | Some group -> (
+          match Nats.Queue_group.of_string group with
+          | Ok group -> Ok (Some group)
+          | Error error -> Error (Error.Invalid_subject error))
+    in
+    let idle_heartbeat =
+      Option.map Mtime.Span.of_uint64_ns value.idle_heartbeat
+    in
     match deliver_policy with
     | Error error -> Error error
     | Ok deliver_policy -> (
         match filter_subject with
         | Error error -> Error error
         | Ok filter_subject -> (
-            let ack_wait = Option.map Mtime.Span.of_uint64_ns value.ack_wait in
-            let max_expires =
-              Option.map Mtime.Span.of_uint64_ns value.max_expires
-            in
-            let inactive_threshold =
-              Option.map Mtime.Span.of_uint64_ns value.inactive_threshold
-            in
-            let max_deliver = normalize_limit value.max_deliver in
-            let max_ack_pending = normalize_limit value.max_ack_pending in
-            let max_waiting = normalize_limit value.max_waiting in
-            let max_batch = normalize_limit value.max_batch in
-            let max_bytes = normalize_limit value.max_bytes in
-            match
-              Config.v ?durable_name:value.durable_name
-                ?description:value.description ~deliver_policy
-                ~ack_policy:value.ack_policy ?ack_wait ?max_deliver
-                ?filter_subject ~replay_policy:value.replay_policy
-                ?max_ack_pending ?max_waiting ?max_batch ?max_expires ?max_bytes
-                ?headers_only:value.headers_only ?inactive_threshold
-                ?mem_storage:value.mem_storage ()
-            with
-            | Ok config -> Ok (config, value.unknown)
-            | Error error -> Error (Error.Invalid_config error)))
+            match deliver_subject with
+            | Error error -> Error error
+            | Ok deliver_subject -> (
+                match deliver_group with
+                | Error error -> Error error
+                | Ok deliver_group -> (
+                    let ack_wait =
+                      Option.map Mtime.Span.of_uint64_ns value.ack_wait
+                    in
+                    let max_expires =
+                      Option.map Mtime.Span.of_uint64_ns value.max_expires
+                    in
+                    let inactive_threshold =
+                      Option.map Mtime.Span.of_uint64_ns
+                        value.inactive_threshold
+                    in
+                    let max_deliver = normalize_limit value.max_deliver in
+                    let max_ack_pending =
+                      normalize_limit value.max_ack_pending
+                    in
+                    let max_waiting = normalize_limit value.max_waiting in
+                    let max_batch = normalize_limit value.max_batch in
+                    let max_bytes = normalize_limit value.max_bytes in
+                    match
+                      Config.v ?durable_name:value.durable_name
+                        ?description:value.description ?deliver_subject
+                        ?deliver_group ?idle_heartbeat
+                        ?flow_control:value.flow_control ~deliver_policy
+                        ~ack_policy:value.ack_policy ?ack_wait ?max_deliver
+                        ?filter_subject ~replay_policy:value.replay_policy
+                        ?max_ack_pending ?max_waiting ?max_batch ?max_expires
+                        ?max_bytes ?headers_only:value.headers_only
+                        ?inactive_threshold ?mem_storage:value.mem_storage ()
+                    with
+                    | Ok config -> Ok (config, value.unknown)
+                    | Error error -> Error (Error.Invalid_config error)))))
 
   type wire_sequence = {
     consumer_sequence : int64 option;
@@ -1715,6 +1811,16 @@ module Consumer = struct
     | Status_consumer_deleted -> Error Error.Consumer_deleted
     | Status_idle_heartbeat | Status_unexpected ->
         Error (Error.Unexpected_status { code; description })
+
+  let push_status_error status =
+    let code = status.Nats.Op.code in
+    let description = status.Nats.Op.description in
+    match classify_status status with
+    | Status_consumer_deleted -> Error.Consumer_deleted
+    | Status_max_bytes | Status_conflict -> Error.Conflict { code; description }
+    | Status_idle_heartbeat | Status_request_expired | Status_batch_completed
+    | Status_unexpected ->
+        Error.Unexpected_status { code; description }
 
   let release_subscription subscription =
     match
@@ -2187,6 +2293,153 @@ module Consumer = struct
         | Ok response ->
             info_of_response ~stream:consumer.stream
               ~expected_name:consumer.name response)
+
+  module Push = struct
+    type consumer = t
+    type state = Open | Closed | Failed of Error.t
+
+    type t = {
+      consumer : consumer;
+      subscription : Connection.Subscription.t;
+      mutable state : state;
+      mutable hook : Eio.Switch.hook option;
+    }
+
+    let fail push error =
+      match push.state with
+      | Open ->
+          push.state <- Failed error;
+          ignore (release_subscription push.subscription)
+      | Closed | Failed _ -> ()
+
+    let connection_error push error =
+      let error = Error.Connection error in
+      fail push error;
+      Error error
+
+    let subscription_error push error =
+      match (push.state, error) with
+      | Closed, (Core_error.Closed | Core_error.Draining) ->
+          Error Error.Push_closed
+      | _, error -> connection_error push error
+
+    let close push =
+      match push.state with
+      | Closed -> Ok ()
+      | Open | Failed _ -> (
+          push.state <- Closed;
+          Option.iter
+            (fun hook -> ignore (Eio.Switch.try_remove_hook hook))
+            push.hook;
+          push.hook <- None;
+          match release_subscription push.subscription with
+          | None -> Ok ()
+          | Some error -> Error (Error.Connection error))
+
+    let consume_delivery push (delivery : Connection.Subscription.delivery) =
+      match delivery.status with
+      | Some status -> Error (push_status_error status)
+      | None ->
+          Msg.of_message ~jetstream:push.consumer.jetstream
+            ~stream_name:(Stream.name push.consumer.stream)
+            ~consumer_name:push.consumer.name delivery.message
+
+    let next push =
+      match push.state with
+      | Closed -> Error Error.Push_closed
+      | Failed error -> Error error
+      | Open -> (
+          match Connection.Subscription.next push.subscription with
+          | Error error -> subscription_error push error
+          | Ok delivery -> (
+              match consume_delivery push delivery with
+              | Ok message -> Ok message
+              | Error error ->
+                  fail push error;
+                  Error error))
+
+    let next_with_timeout ~timeout push =
+      if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then
+        Error (Error.Connection (Core_error.Invalid_timeout "push"))
+      else
+        match push.state with
+        | Closed -> Error Error.Push_closed
+        | Failed error -> Error error
+        | Open -> (
+            match
+              Connection.Subscription.next_with_timeout ~timeout
+                push.subscription
+            with
+            | Error Core_error.Timeout ->
+                Error (Error.Connection Core_error.Timeout)
+            | Error error -> subscription_error push error
+            | Ok delivery -> (
+                match consume_delivery push delivery with
+                | Ok message -> Ok message
+                | Error error ->
+                    fail push error;
+                    Error error))
+
+    let iter push ~f =
+      let result = ref None in
+      while Option.is_none !result do
+        match next push with
+        | Ok message -> f message
+        | Error Error.Push_closed -> result := Some (Ok ())
+        | Error error -> result := Some (Error error)
+      done;
+      match !result with Some result -> result | None -> assert false
+
+    let v ~sw consumer =
+      match info consumer with
+      | Error error -> Error error
+      | Ok info -> (
+          let config = Info.config info in
+          match Config.deliver_subject config with
+          | None -> Error Error.Not_push_consumer
+          | Some subject -> (
+              let unsupported =
+                match Config.idle_heartbeat config with
+                | Some heartbeat ->
+                    Some
+                      (Error.Unsupported_push_option
+                         {
+                           field = "idle_heartbeat";
+                           value =
+                             Int64.to_string (Mtime.Span.to_uint64_ns heartbeat);
+                         })
+                | None -> (
+                    match Config.flow_control config with
+                    | Some true ->
+                        Some
+                          (Error.Unsupported_push_option
+                             { field = "flow_control"; value = "true" })
+                    | None | Some false -> None)
+              in
+              match unsupported with
+              | Some error -> Error error
+              | None -> (
+                  let connection = consumer.jetstream.connection in
+                  let filter =
+                    Nats.Subject.Filter.literal (Nats.Subject.to_string subject)
+                  in
+                  match
+                    Connection.subscribe connection
+                      ?queue_group:(Config.deliver_group config)
+                      filter
+                  with
+                  | Error error -> Error (Error.Connection error)
+                  | Ok subscription ->
+                      let push =
+                        { consumer; subscription; state = Open; hook = None }
+                      in
+                      let hook =
+                        Eio.Switch.on_release_cancellable sw (fun () ->
+                            ignore (close push))
+                      in
+                      push.hook <- Some hook;
+                      Ok push)))
+  end
 
   let list (stream : stream) =
     let offset = ref 0 in
