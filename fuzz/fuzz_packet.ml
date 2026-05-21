@@ -19,6 +19,9 @@ let test_read input =
   match result with
   | Error error -> render_packet_error error
   | Ok packet -> (
+      ignore
+        (no_exception "Packet.pp" (fun () ->
+             Format.asprintf "%a" Nats.Packet.pp packet));
       let wire =
         no_exception "Packet.to_string" (fun () -> Nats.Packet.to_string packet)
       in
