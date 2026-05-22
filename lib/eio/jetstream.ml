@@ -45,6 +45,7 @@ module Error = struct
     | Incomplete_list of { kind : list_kind; missing : string list }
     | Pull_closed
     | Push_closed
+    | Ordered_closed
 
   let pp_config ppf = function
     | Empty_name -> Format.pp_print_string ppf "stream name is empty"
@@ -148,6 +149,8 @@ module Error = struct
         Format.pp_print_string ppf "JetStream pull consumer is closed"
     | Push_closed ->
         Format.pp_print_string ppf "JetStream push consumer is closed"
+    | Ordered_closed ->
+        Format.pp_print_string ppf "JetStream ordered consumer is closed"
 end
 
 type config_error = Error.config
@@ -2250,7 +2253,7 @@ module Consumer = struct
   let name value = value.name
   let stream value = value.stream
 
-  let create (stream : Stream.t) config =
+  let create ?timeout (stream : Stream.t) config =
     let jetstream = stream.jetstream in
     let stream_name = Stream.name stream in
     let subject =
@@ -2263,7 +2266,9 @@ module Consumer = struct
     match encode create_request_codec request with
     | Error error -> Error error
     | Ok payload -> (
-        match request_msg jetstream (Nats.Message.v ~subject payload) with
+        match
+          request_msg ?timeout jetstream (Nats.Message.v ~subject payload)
+        with
         | Error error -> Error error
         | Ok message -> (
             match decode_response message with
@@ -2282,12 +2287,14 @@ module Consumer = struct
                     | Ok _ -> Ok { jetstream; stream; name }
                     | Error error -> Error error))))
 
-  let info consumer =
+  let info ?timeout consumer =
     let subject =
       api_subject consumer.jetstream
         [ "CONSUMER"; "INFO"; Stream.name consumer.stream; consumer.name ]
     in
-    match request_msg consumer.jetstream (Nats.Message.v ~subject "") with
+    match
+      request_msg ?timeout consumer.jetstream (Nats.Message.v ~subject "")
+    with
     | Error error -> Error error
     | Ok message -> (
         match decode_response message with
@@ -2295,6 +2302,20 @@ module Consumer = struct
         | Ok response ->
             info_of_response ~stream:consumer.stream
               ~expected_name:consumer.name response)
+
+  let delete ?timeout consumer =
+    let subject =
+      api_subject consumer.jetstream
+        [ "CONSUMER"; "DELETE"; Stream.name consumer.stream; consumer.name ]
+    in
+    match
+      request_msg ?timeout consumer.jetstream (Nats.Message.v ~subject "")
+    with
+    | Error error -> Error error
+    | Ok message -> (
+        match decode_response message with
+        | Ok _ -> Ok ()
+        | Error error -> Error error)
 
   module Push = struct
     type consumer = t
@@ -2516,6 +2537,295 @@ module Consumer = struct
                   Ok push))
   end
 
+  module Ordered = struct
+    type stream = Stream.t
+    type consumer = t
+    type state = Open | Closed | Failed of Error.t
+
+    type t = {
+      stream : stream;
+      connection : Connection.t;
+      sw : Eio.Switch.t;
+      batch : int;
+      expires : Mtime.Span.t;
+      idle_heartbeat : Mtime.Span.t;
+      max_bytes : int option;
+      initial_deliver_policy : Config.deliver_policy;
+      filter_subject : Nats.Subject.Filter.t option;
+      mutable consumer : consumer option;
+      mutable pull : Pull.t option;
+      mutable consumer_sequence : int64;
+      mutable stream_sequence : int64 option;
+      mutable state : state;
+      mutable hook : Eio.Switch.hook option;
+    }
+
+    let default_expires = Mtime.Span.(30 * s)
+    let default_idle_heartbeat = Mtime.Span.(5 * s)
+    let inactive_threshold = Mtime.Span.(5 * min)
+    let timeout_error = Error.Connection Core_error.Timeout
+
+    let fail ordered error =
+      match ordered.state with
+      | Open ->
+          ordered.state <- Failed error;
+          Option.iter
+            (fun pull -> ignore (Pull.close pull))
+            ordered.pull;
+          ordered.pull <- None
+      | Closed | Failed _ -> ()
+
+    let remaining_timeout ordered deadline =
+      match deadline with
+      | None -> Ok None
+      | Some deadline ->
+          let now = Connection.now ordered.connection in
+          if Mtime.compare now deadline >= 0 then Error timeout_error
+          else Ok (Some (Mtime.span now deadline))
+
+    let stop_current_pull ordered =
+      match ordered.pull with
+      | None -> ()
+      | Some pull ->
+          ordered.pull <- None;
+          ignore (Pull.close pull)
+
+    let delete_current_consumer ordered ?timeout () =
+      match ordered.consumer with
+      | None -> ()
+      | Some consumer ->
+          ordered.consumer <- None;
+          ignore (delete ?timeout consumer)
+
+    let stop_current ordered ?deadline () =
+      stop_current_pull ordered;
+      let timeout =
+        match deadline with
+        | None -> Ok None
+        | Some deadline -> remaining_timeout ordered (Some deadline)
+      in
+      match timeout with
+      | Error _ -> ordered.consumer <- None
+      | Ok timeout -> delete_current_consumer ordered ?timeout ()
+
+    let next_stream_sequence sequence =
+      if Int64.equal sequence Int64.max_int then Int64.max_int
+      else Int64.add sequence 1L
+
+    let consumer_config ordered =
+      let deliver_policy =
+        match ordered.stream_sequence with
+        | None -> ordered.initial_deliver_policy
+        | Some sequence ->
+            Config.By_start_sequence (next_stream_sequence sequence)
+      in
+      match
+        Config.v ~deliver_policy ~ack_policy:Config.No_ack
+          ?filter_subject:ordered.filter_subject
+          ~inactive_threshold ~mem_storage:true ()
+      with
+      | Ok config -> Ok config
+      | Error error -> Error (Error.Invalid_config error)
+
+    let create_generation ordered ~deadline =
+      match ordered.state with
+      | Closed -> Error Error.Ordered_closed
+      | Failed error -> Error error
+      | Open -> (
+          match consumer_config ordered with
+          | Error error ->
+              fail ordered error;
+              Error error
+          | Ok config -> (
+              match remaining_timeout ordered deadline with
+              | Error error ->
+                  fail ordered error;
+                  Error error
+              | Ok timeout -> (
+                  match create ?timeout ordered.stream config with
+                  | Error error ->
+                      fail ordered error;
+                      Error error
+                  | Ok consumer -> (
+                      ordered.consumer <- Some consumer;
+                      match remaining_timeout ordered deadline with
+                      | Error error ->
+                          delete_current_consumer ordered ();
+                          fail ordered error;
+                          Error error
+                      | Ok _ -> (
+                          match
+                            Pull.v ~sw:ordered.sw ~batch:ordered.batch
+                              ~expires:ordered.expires
+                              ~idle_heartbeat:ordered.idle_heartbeat
+                              ?max_bytes:ordered.max_bytes consumer
+                          with
+                          | Error error ->
+                              delete_current_consumer ordered ();
+                              fail ordered error;
+                              Error error
+                          | Ok pull ->
+                              ordered.pull <- Some pull;
+                              ordered.consumer_sequence <- 0L;
+                              Ok ())))))
+
+    let recreate ordered ~deadline =
+      stop_current ordered ?deadline ();
+      create_generation ordered ~deadline
+
+    let recoverable = function
+      | Error.Missing_heartbeat | Error.Consumer_deleted -> true
+      | Error.Connection (Core_error.Disconnected | Core_error.No_responders) ->
+          true
+      | _ -> false
+
+    let timed_out = function
+      | Error.Connection Core_error.Timeout -> true
+      | _ -> false
+
+    let accept_message ordered message =
+      let expected = next_stream_sequence ordered.consumer_sequence in
+      if Int64.equal (Msg.consumer_sequence message) expected then (
+        ordered.consumer_sequence <- Msg.consumer_sequence message;
+        ordered.stream_sequence <- Some (Msg.stream_sequence message);
+        Ok true)
+      else Ok false
+
+    let next_from_pull ordered ~deadline pull =
+      match deadline with
+      | None -> Pull.next pull
+      | Some deadline -> (
+          match remaining_timeout ordered (Some deadline) with
+          | Error error -> Error error
+          | Ok (Some timeout) ->
+              Pull.next_with_timeout ~timeout pull
+          | Ok None -> assert false)
+
+    let next_loop ordered ~deadline =
+      let result = ref None in
+      while Option.is_none !result do
+        match ordered.state with
+        | Closed -> result := Some (Error Error.Ordered_closed)
+        | Failed error -> result := Some (Error error)
+        | Open -> (
+            match ordered.pull with
+            | None -> (
+                match recreate ordered ~deadline with
+                | Ok () -> ()
+                | Error error -> result := Some (Error error))
+            | Some pull -> (
+                match next_from_pull ordered ~deadline pull with
+                | Ok message -> (
+                    match accept_message ordered message with
+                    | Error error ->
+                        fail ordered error;
+                        result := Some (Error error)
+                    | Ok true -> result := Some (Ok message)
+                    | Ok false -> (
+                        match recreate ordered ~deadline with
+                        | Ok () -> ()
+                        | Error error -> result := Some (Error error)))
+                | Error error when recoverable error -> (
+                    match recreate ordered ~deadline with
+                    | Ok () -> ()
+                    | Error recreate_error -> result := Some (Error recreate_error))
+                | Error error ->
+                    if not (timed_out error) then fail ordered error;
+                    result := Some (Error error)))
+      done;
+      match !result with Some result -> result | None -> assert false
+
+    let close ordered =
+      match ordered.state with
+      | Closed -> Ok ()
+      | Open | Failed _ ->
+          ordered.state <- Closed;
+          Option.iter
+            (fun hook -> ignore (Eio.Switch.try_remove_hook hook))
+            ordered.hook;
+          ordered.hook <- None;
+          let pull_result =
+            match ordered.pull with
+            | None -> Ok ()
+            | Some pull ->
+                ordered.pull <- None;
+                Pull.close pull
+          in
+          let delete_result =
+            match ordered.consumer with
+            | None -> Ok ()
+            | Some consumer ->
+                ordered.consumer <- None;
+                delete consumer
+          in
+          (match pull_result with Error error -> Error error | Ok () -> delete_result)
+
+    let v ~sw ?batch ?expires ?idle_heartbeat ?max_bytes ?(deliver_policy = Config.All)
+        ?filter_subject (stream : stream) =
+      let batch = Option.value batch ~default:1 in
+      let expires = Option.value expires ~default:default_expires in
+      let idle_heartbeat =
+        Option.value idle_heartbeat ~default:default_idle_heartbeat
+      in
+      match
+        validate_fetch ~batch ~expires ~max_bytes
+          ~idle_heartbeat:(Some idle_heartbeat)
+      with
+      | Error error -> Error error
+      | Ok () ->
+          let ordered =
+            {
+              stream;
+              connection = stream.jetstream.connection;
+              sw;
+              batch;
+              expires;
+              idle_heartbeat;
+              max_bytes;
+              initial_deliver_policy = deliver_policy;
+              filter_subject;
+              consumer = None;
+              pull = None;
+              consumer_sequence = 0L;
+              stream_sequence = None;
+              state = Open;
+              hook = None;
+            }
+          in
+          match create_generation ordered ~deadline:None with
+          | Error error -> Error error
+          | Ok () ->
+              let hook =
+                Eio.Switch.on_release_cancellable sw (fun () ->
+                    Eio.Cancel.protect (fun () -> ignore (close ordered)))
+              in
+              ordered.hook <- Some hook;
+              Ok ordered
+
+    let next ordered = next_loop ordered ~deadline:None
+
+    let next_with_timeout ~timeout ordered =
+      if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then
+        Error (Error.Connection (Core_error.Invalid_timeout "ordered"))
+      else
+        let deadline =
+          match Mtime.add_span (Connection.now ordered.connection) timeout with
+          | Some deadline -> deadline
+          | None -> Mtime.max_stamp
+        in
+        next_loop ordered ~deadline:(Some deadline)
+
+    let iter ordered ~f =
+      let result = ref None in
+      while Option.is_none !result do
+        match next ordered with
+        | Ok message -> f message
+        | Error Error.Ordered_closed -> result := Some (Ok ())
+        | Error error -> result := Some (Error error)
+      done;
+      match !result with Some result -> result | None -> assert false
+  end
+
   let list (stream : stream) =
     let offset = ref 0 in
     let infos = ref [] in
@@ -2598,17 +2908,6 @@ module Consumer = struct
     done;
     match !result with Some result -> result | None -> assert false
 
-  let delete consumer =
-    let subject =
-      api_subject consumer.jetstream
-        [ "CONSUMER"; "DELETE"; Stream.name consumer.stream; consumer.name ]
-    in
-    match request_msg consumer.jetstream (Nats.Message.v ~subject "") with
-    | Error error -> Error error
-    | Ok message -> (
-        match decode_response message with
-        | Ok _ -> Ok ()
-        | Error error -> Error error)
 end
 
 module Publish_ack = struct

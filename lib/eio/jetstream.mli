@@ -45,6 +45,7 @@ module Error : sig
     | Incomplete_list of { kind : list_kind; missing : string list }
     | Pull_closed
     | Push_closed
+    | Ordered_closed
 
   val pp_config : Format.formatter -> config -> unit
   val pp_api : Format.formatter -> api -> unit
@@ -184,9 +185,10 @@ module Msg : sig
   val stream : t -> string
   val consumer : t -> string
   val domain : t -> string option
+
   val timestamp : t -> int64
-  (** [timestamp message] is the server's Unix-epoch timestamp in
-      nanoseconds. *)
+  (** [timestamp message] is the server's Unix-epoch timestamp in nanoseconds.
+  *)
 
   val num_delivered : t -> int64
   val stream_sequence : t -> int64
@@ -293,9 +295,10 @@ module Consumer : sig
   (** [bind stream ~name] creates a local handle without contacting the server.
   *)
 
-  val create : stream -> Config.t -> (t, Error.t) result
-  (** [create stream config] creates a server-side consumer and returns its
-      name. *)
+  val create :
+    ?timeout:Mtime.Span.t -> stream -> Config.t -> (t, Error.t) result
+  (** [create ?timeout stream config] creates a server-side consumer and
+      returns its name. *)
 
   val list : stream -> (Info.t list, Error.t) result
   (** [list stream] returns detailed information for all consumers on [stream].
@@ -407,8 +410,52 @@ module Consumer : sig
     (** [close push] stops the subscription and is idempotent. *)
   end
 
-  val info : t -> (Info.t, Error.t) result
-  val delete : t -> (unit, Error.t) result
+  module Ordered : sig
+    type stream = Stream.t
+    type t
+
+    val v :
+      sw:Eio.Switch.t ->
+      ?batch:int ->
+      ?expires:Mtime.Span.t ->
+      ?idle_heartbeat:Mtime.Span.t ->
+      ?max_bytes:int ->
+      ?deliver_policy:Config.deliver_policy ->
+      ?filter_subject:Nats.Subject.Filter.t ->
+      stream -> (t, Error.t) result
+    (** [v ~sw stream] creates a client-managed ephemeral pull consumer. The
+        initial delivery policy defaults to [All]. Ordered sessions always use
+        [No_ack], memory storage, and a five-minute inactive threshold; they
+        request idle heartbeats (five seconds by default) to detect a lost
+        consumer. The session owns its pull subscription and recreates the
+        ephemeral consumer after a consumer-sequence gap, a missing heartbeat,
+        consumer deletion, or a non-replayed transport disconnect. Recreated
+        consumers resume at the next stream sequence. *)
+
+    val next : t -> (Msg.t, Error.t) result
+    (** [next ordered] returns the next message in consumer order. A call may
+        perform consumer deletion and recreation before returning. Stream
+        sequence numbers may skip when a filter is used; consumer sequence
+        numbers must remain consecutive. *)
+
+    val next_with_timeout : timeout:Mtime.Span.t -> t -> (Msg.t, Error.t) result
+    (** [next_with_timeout ~timeout ordered] uses an absolute caller deadline
+        across waiting and ordered-consumer recreation. A normal timeout leaves
+        the current session open; a timeout after the old consumer has been
+        torn down fails the session. *)
+
+    val iter : t -> f:(Msg.t -> unit) -> (unit, Error.t) result
+    (** [iter ordered ~f] invokes [f] for each ordered message until the
+        session is closed or fails. Messages are not acknowledged. *)
+
+    val close : t -> (unit, Error.t) result
+    (** [close ordered] stops the pull session, best-effort deletes its current
+        ephemeral consumer, and is idempotent. Explicit closure returns
+        [Ordered_closed] from subsequent reads. *)
+  end
+
+  val info : ?timeout:Mtime.Span.t -> t -> (Info.t, Error.t) result
+  val delete : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
 end
 
 module Publish_ack : sig
