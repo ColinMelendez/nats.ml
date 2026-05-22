@@ -659,8 +659,10 @@ These modules should be layered over `Connection.request` and
   consume idle-heartbeat status frames, answer flow-control requests (including
   stalled-heartbeat replies), and fail with structured missing-heartbeat
   errors. Ordered sessions validate consumer sequence continuity and resume from
-  the next stream sequence after recovery. Push reconnect restoration and other
-  advanced consumer behavior remain planned extensions.
+  the next stream sequence after recovery. Push sessions restore replayable
+  delivery subscriptions after reconnect, recheck durable consumers, and
+  recreate ephemeral consumers when the server reports consumer-not-found.
+  Other advanced consumer behavior remains a planned extension.
 - `Nats_eio.Key_value` provides bucket creation/opening, get/put, create/update
   compare-and-set, delete/purge, revision/history, TTL, keys, status, and
   cancellable watches. Watch entries preserve bucket, key, value, revision,
@@ -699,8 +701,8 @@ updates preserve unknown server configuration through an INFO/read-modify-write
 cycle; list operations consume server pagination and fail explicitly on an
 incomplete page. The management prefix is configurable for JetStream domains,
 while application subjects remain ordinary Core NATS subjects. KV, Object
-Store, Services, push reconnect restoration, and other advanced flow-control
-features remain later layers over the same connection.
+Store, Services, and other advanced flow-control features remain later layers
+over the same connection.
 
 ## 6. Testing and interoperability
 

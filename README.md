@@ -45,12 +45,12 @@ debugging.
 The first JetStream layer is available through `Nats_eio.Jetstream`: typed
 stream and consumer management, one-shot fetch, durable publish and message
 acknowledgements, and switch-owned Eio pull/push sessions over ordinary Core
-NATS request/reply. Push sessions consume idle heartbeats and answer
-flow-control requests, including stalled-heartbeat replies. Ordered sessions
-use client-managed ephemeral pull consumers, validate consecutive consumer
-sequences, and resume from the next stream sequence after recovery. KV, Object
-Store, Services, push reconnect restoration, and real cluster/interop coverage
-remain later implementation phases.
+NATS request/reply. Push sessions consume idle heartbeats, answer flow-control
+requests including stalled-heartbeat replies, and restore replayable delivery
+subscriptions across reconnects. Ordered sessions use client-managed
+ephemeral pull consumers, validate consecutive consumer sequences, and resume
+from the next stream sequence after recovery. KV, Object Store, Services, and
+real cluster/interop coverage remain later implementation phases.
 
 The project uses Dune package management. No compatibility layer for NATS
 Streaming is planned.

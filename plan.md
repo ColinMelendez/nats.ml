@@ -86,11 +86,12 @@ absolute caller timeouts across control traffic. Ordered sessions now use
 client-managed ephemeral pull consumers, force no-ack memory-backed
 configuration, validate consumer sequence continuity, and recreate consumers
 after gaps, liveness loss, deletion, or non-replayed disconnects while resuming
-from the next stream sequence. KV, Object Store, Services, and reconnect
-restoration for push sessions remain later work. Real cluster and cross-SDK
-interop coverage is deliberately deferred to the final acceptance phase;
-current consumer confidence comes from local mock transport and pure-boundary
-tests.
+from the next stream sequence. KV, Object Store, and Services remain later
+work. Push reconnect restoration is implemented through replayable subscription
+recovery, including durable confirmation and ephemeral recreation. Real cluster
+and cross-SDK interop coverage is deliberately deferred to the final acceptance
+phase; current consumer confidence comes from local mock transport and
+pure-boundary tests.
 The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
@@ -468,13 +469,18 @@ request/reply and subscription primitives.
   Push sessions consume idle heartbeats, answer flow-control requests including
   stalled-heartbeat replies, and fail with structured missing-heartbeat errors
   after two configured intervals.
+- Completed locally: restore replayable Push subscriptions after reconnect.
+  Subscription-local recovery generations suspend heartbeat liveness during
+  transport recovery; durable consumers are rechecked, ephemeral consumers
+  are recreated when the server reports error code 10014, and absolute caller
+  timeouts remain bounded across restoration.
 - Completed locally: add `Consumer.Ordered` as a sibling pull session. It
   creates ephemeral no-ack memory consumers, checks consumer sequence
   continuity rather than stream sequence continuity, resumes at the next
   stream sequence after recovery, and preserves absolute caller deadlines
   across recovery attempts.
-- Remaining: add reconnect restoration for push sessions and broader delivery
-  semantics without introducing a second runtime or subscription abstraction.
+- Remaining: add broader delivery semantics without introducing a second
+  runtime or subscription abstraction.
 
 ### Acceptance tests
 
@@ -491,6 +497,9 @@ request/reply and subscription primitives.
   gaps, consumer-sequence recovery, missing-heartbeat recovery, deletion
   recovery, timeout preservation, and switch/explicit cleanup through the Eio
   mock transport.
+- Completed locally: cover Push durable restoration, ephemeral recreation,
+  heartbeat suspension, timeout preservation, and independent lifecycle-event
+  delivery across reconnect through the Eio mock transport.
 - Remaining: real cluster and cross-SDK interop coverage for consumer behavior,
   server-version gates, and the final ordered/push acceptance matrix.
 
