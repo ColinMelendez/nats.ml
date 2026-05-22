@@ -39,7 +39,6 @@ module Error : sig
     | Missing_ack_reply
     | Invalid_ack_reply of string
     | Not_push_consumer
-    | Unsupported_push_option of { field : string; value : string }
     | Consumer_deleted
     | Conflict of { code : int; description : string }
     | Unexpected_status of { code : int; description : string }
@@ -375,23 +374,29 @@ module Consumer : sig
     val v : sw:Eio.Switch.t -> consumer -> (t, Error.t) result
     (** [v ~sw consumer] subscribes to the delivery subject configured on a
         push consumer. It reads the server-side configuration and returns
-        [Not_push_consumer] when no delivery subject is configured. Consumers
-        with [idle_heartbeat] or [flow_control] enabled return
-        [Unsupported_push_option] until push control frames are supported. The
-        configured queue group is used for the subscription. The session owns
-        its subscription and closes it when [sw] releases. It is not
-        transparently restored after a transport loss; recreate it after
-        [Error (Connection Disconnected)]. The session is single-owner: do not
-        call [next] or [next_with_timeout] concurrently on one value. *)
+        [Not_push_consumer] when no delivery subject is configured. The
+        configured queue group is used for the subscription. Idle-heartbeat
+        status frames are consumed transparently, and flow-control requests
+        are answered with an empty message. A missing heartbeat fails the
+        session with [Missing_heartbeat]. The session owns its subscription
+        and closes it when [sw] releases. It is not transparently restored
+        after a transport loss; recreate it after [Error (Connection
+        Disconnected)]. The session is single-owner: do not call [next] or
+        [next_with_timeout] concurrently on one value. *)
 
     val next : t -> (Msg.t, Error.t) result
     (** [next push] waits for the next delivered message. Messages are not
-        acknowledged automatically. Status frames fail the handle instead of
-        being treated as data. *)
+        acknowledged automatically. Idle-heartbeat frames are consumed and
+        flow-control requests are answered with an empty message. Other status
+        frames fail the handle instead of being treated as data. A configured
+        heartbeat that is not received within two intervals fails with
+        [Missing_heartbeat]. *)
 
     val next_with_timeout : timeout:Mtime.Span.t -> t -> (Msg.t, Error.t) result
-    (** [next_with_timeout ~timeout push] bounds the wait and leaves an open
-        push handle active after a timeout. *)
+    (** [next_with_timeout ~timeout push] bounds the wait with an absolute
+        caller deadline; control frames do not extend it. A timeout leaves an
+        open push handle active. A missing configured heartbeat fails the
+        handle with [Missing_heartbeat]. *)
 
     val iter : t -> f:(Msg.t -> unit) -> (unit, Error.t) result
     (** [iter push ~f] invokes [f] for each message until the handle is closed

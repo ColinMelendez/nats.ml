@@ -71,6 +71,16 @@ let status_wire_with_sid ~sid ~code ~description =
 let status_wire ~code ~description =
   status_wire_with_sid ~sid:1 ~code ~description
 
+let control_status_wire ~sid ~reply_to ~description =
+  let message =
+    Nats.Message.v
+      ~subject:(Nats.Subject.literal "orders.push")
+      ~reply_to:(Nats.Subject.literal reply_to)
+      ""
+  in
+  operation_wire
+    (Nats.Op.Hmsg { sid; message; status = Some { code = 100; description } })
+
 let delivery_wire_with_sid ~sid payload =
   let message =
     Nats.Message.v
@@ -300,7 +310,114 @@ let () =
                 | _ -> false);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
-      test "push rejects idle-heartbeat consumers before subscribing" (fun () ->
+      test "push consumes heartbeats and answers stalled heartbeats" (fun () ->
+          let info_response, info_response_u = Eio.Promise.create () in
+          let heartbeat, heartbeat_u = Eio.Promise.create () in
+          let stalled_heartbeat, stalled_heartbeat_u = Eio.Promise.create () in
+          let delivery, delivery_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await info_response;
+                `Await heartbeat;
+                `Await stalled_heartbeat;
+                `Await delivery;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.Push.v ~sw
+                       (consumer connection)));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u
+                (Ok push_heartbeat_consumer_info_wire);
+              let push = expect_jetstream_ok (Eio.Promise.await result) in
+              let next_result, next_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve next_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.next push));
+              yield_n 5;
+              Eio.Promise.resolve heartbeat_u
+                (Ok
+                   (status_wire_with_sid ~sid:2 ~code:100
+                      ~description:"Idle Heartbeat"));
+              yield_n 5;
+              Eio.Promise.resolve stalled_heartbeat_u
+                (Ok
+                   (control_status_wire ~sid:2 ~reply_to:"$JS.FC.ORDERS.token"
+                      ~description:"Idle Heartbeat"));
+              yield_n 5;
+              if
+                not
+                  (contains_substring
+                     ~needle:"wrote \"PUB $JS.FC.ORDERS.token 0\\r\\n\""
+                     (Buffer.contents trace))
+              then fail "push did not answer a stalled heartbeat";
+              Eio.Promise.resolve delivery_u
+                (Ok (delivery_wire_with_sid ~sid:2 "after-heartbeat"));
+              let message =
+                expect_jetstream_ok (Eio.Promise.await next_result)
+              in
+              equal string "after-heartbeat"
+                (Nats_eio.Jetstream.Msg.payload message);
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Push.close push);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "push answers flow-control requests" (fun () ->
+          let info_response, info_response_u = Eio.Promise.create () in
+          let flow_control, flow_control_u = Eio.Promise.create () in
+          let delivery, delivery_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await info_response;
+                `Await flow_control;
+                `Await delivery;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.Push.v ~sw
+                       (consumer connection)));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u
+                (Ok push_flow_control_consumer_info_wire);
+              let push = expect_jetstream_ok (Eio.Promise.await result) in
+              let next_result, next_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve next_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.next push));
+              yield_n 5;
+              Eio.Promise.resolve flow_control_u
+                (Ok
+                   (control_status_wire ~sid:2 ~reply_to:"$JS.FC.ORDERS.token"
+                      ~description:"FlowControl Request"));
+              yield_n 5;
+              if
+                not
+                  (contains_substring
+                     ~needle:"wrote \"PUB $JS.FC.ORDERS.token 0\\r\\n\""
+                     (Buffer.contents trace))
+              then fail "push did not answer a flow-control request";
+              Eio.Promise.resolve delivery_u
+                (Ok (delivery_wire_with_sid ~sid:2 "after-flow-control"));
+              let message =
+                expect_jetstream_ok (Eio.Promise.await next_result)
+              in
+              equal string "after-flow-control"
+                (Nats_eio.Jetstream.Msg.payload message);
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Push.close push);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "push reports a missing heartbeat" (fun () ->
           let info_response, info_response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
           with_connection
@@ -314,34 +431,15 @@ let () =
               yield_n 5;
               Eio.Promise.resolve info_response_u
                 (Ok push_heartbeat_consumer_info_wire);
-              expect_jetstream_error (Eio.Promise.await result) (function
-                | Nats_eio.Jetstream.Error.Unsupported_push_option
-                    { field; value } ->
-                    String.equal field "idle_heartbeat"
-                    && String.equal value "1000000"
-                | _ -> false);
-              expect_ok (Nats_eio.Connection.close connection);
-              Eio.Promise.resolve hold_u (Error End_of_file)));
-      test "push rejects flow-control consumers before subscribing" (fun () ->
-          let info_response, info_response_u = Eio.Promise.create () in
-          let hold, hold_u = Eio.Promise.create () in
-          with_connection
-            ~reads:[ `Return info_wire; `Await info_response; `Await hold ]
-            (fun ~sw connection ->
-              let result, result_u = Eio.Promise.create () in
-              Eio.Fiber.fork ~sw (fun () ->
-                  Eio.Promise.resolve result_u
-                    (Nats_eio.Jetstream.Consumer.Push.v ~sw
-                       (consumer connection)));
-              yield_n 5;
-              Eio.Promise.resolve info_response_u
-                (Ok push_flow_control_consumer_info_wire);
-              expect_jetstream_error (Eio.Promise.await result) (function
-                | Nats_eio.Jetstream.Error.Unsupported_push_option
-                    { field; value } ->
-                    String.equal field "flow_control"
-                    && String.equal value "true"
-                | _ -> false);
+              let push = expect_jetstream_ok (Eio.Promise.await result) in
+              expect_jetstream_error
+                (Nats_eio.Jetstream.Consumer.Push.next_with_timeout
+                   ~timeout:Mtime.Span.(10 * ms)
+                   push)
+                (function
+                  | Nats_eio.Jetstream.Error.Missing_heartbeat -> true
+                  | _ -> false);
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Push.close push);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "push timeout leaves its subscription available" (fun () ->

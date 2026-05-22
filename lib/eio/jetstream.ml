@@ -39,7 +39,6 @@ module Error = struct
     | Missing_ack_reply
     | Invalid_ack_reply of string
     | Not_push_consumer
-    | Unsupported_push_option of { field : string; value : string }
     | Consumer_deleted
     | Conflict of { code : int; description : string }
     | Unexpected_status of { code : int; description : string }
@@ -120,7 +119,7 @@ module Error = struct
           "JetStream pull expiry must be at least twice the idle heartbeat"
     | Missing_heartbeat ->
         Format.pp_print_string ppf
-          "JetStream pull idle heartbeat was not received"
+          "JetStream consumer idle heartbeat was not received"
     | Missing_ack_reply ->
         Format.pp_print_string ppf
           "JetStream delivery has no acknowledgement reply"
@@ -129,15 +128,12 @@ module Error = struct
           subject
     | Not_push_consumer ->
         Format.pp_print_string ppf "JetStream consumer has no delivery subject"
-    | Unsupported_push_option { field; value } ->
-        Format.fprintf ppf "JetStream push consumer does not support %s=%S"
-          field value
     | Consumer_deleted ->
         Format.pp_print_string ppf "JetStream consumer was deleted"
     | Conflict { code; description } ->
-        Format.fprintf ppf "JetStream pull conflict %d: %s" code description
+        Format.fprintf ppf "JetStream consumer conflict %d: %s" code description
     | Unexpected_status { code; description } ->
-        Format.fprintf ppf "unexpected JetStream pull status %d: %s" code
+        Format.fprintf ppf "unexpected JetStream consumer status %d: %s" code
           description
     | Incomplete_list { kind; missing } -> (
         let kind =
@@ -1765,6 +1761,7 @@ module Consumer = struct
 
   type status_classification =
     | Status_idle_heartbeat
+    | Status_flow_control
     | Status_request_expired
     | Status_batch_completed
     | Status_max_bytes
@@ -1780,6 +1777,11 @@ module Consumer = struct
       Status_consumer_deleted
     else if Int.equal code 100 && contains ~needle:"idle heartbeat" normalized
     then Status_idle_heartbeat
+    else if
+      Int.equal code 100
+      && (contains ~needle:"flowcontrol" normalized
+         || contains ~needle:"flow control" normalized)
+    then Status_flow_control
     else if Int.equal code 408 then Status_request_expired
     else if
       Int.equal code 409
@@ -1798,7 +1800,7 @@ module Consumer = struct
         Ok ()
     | Status_consumer_deleted -> Error Error.Consumer_deleted
     | Status_conflict -> Error (Error.Conflict { code; description })
-    | Status_idle_heartbeat | Status_unexpected ->
+    | Status_idle_heartbeat | Status_flow_control | Status_unexpected ->
         Error (Error.Unexpected_status { code; description })
 
   let pull_status_result status =
@@ -1809,7 +1811,7 @@ module Consumer = struct
     | Status_max_bytes | Status_conflict ->
         Error (Error.Conflict { code; description })
     | Status_consumer_deleted -> Error Error.Consumer_deleted
-    | Status_idle_heartbeat | Status_unexpected ->
+    | Status_idle_heartbeat | Status_flow_control | Status_unexpected ->
         Error (Error.Unexpected_status { code; description })
 
   let push_status_error status =
@@ -1818,8 +1820,8 @@ module Consumer = struct
     match classify_status status with
     | Status_consumer_deleted -> Error.Consumer_deleted
     | Status_max_bytes | Status_conflict -> Error.Conflict { code; description }
-    | Status_idle_heartbeat | Status_request_expired | Status_batch_completed
-    | Status_unexpected ->
+    | Status_idle_heartbeat | Status_flow_control | Status_request_expired
+    | Status_batch_completed | Status_unexpected ->
         Error.Unexpected_status { code; description }
 
   let release_subscription subscription =
@@ -2300,7 +2302,10 @@ module Consumer = struct
 
     type t = {
       consumer : consumer;
+      connection : Connection.t;
       subscription : Connection.Subscription.t;
+      idle_heartbeat : Mtime.Span.t option;
+      mutable heartbeat_deadline : Mtime.t option;
       mutable state : state;
       mutable hook : Eio.Switch.hook option;
     }
@@ -2336,49 +2341,130 @@ module Consumer = struct
           | None -> Ok ()
           | Some error -> Error (Error.Connection error))
 
+    let heartbeat_missed push =
+      match push.heartbeat_deadline with
+      | Some deadline ->
+          Mtime.compare (Connection.now push.connection) deadline >= 0
+      | None -> false
+
+    let reset_heartbeat push =
+      push.heartbeat_deadline <-
+        heartbeat_deadline_at push.connection push.idle_heartbeat
+
+    let respond_flow_control push subject =
+      match Connection.publish push.connection subject "" with
+      | Ok () -> Ok ()
+      | Error error -> Error (Error.Connection error)
+
     let consume_delivery push (delivery : Connection.Subscription.delivery) =
       match delivery.status with
-      | Some status -> Error (push_status_error status)
-      | None ->
-          Msg.of_message ~jetstream:push.consumer.jetstream
-            ~stream_name:(Stream.name push.consumer.stream)
-            ~consumer_name:push.consumer.name delivery.message
+      | Some status -> (
+          let control_result =
+            match
+              (classify_status status, Nats.Message.reply_to delivery.message)
+            with
+            | Status_idle_heartbeat, None -> Ok ()
+            | Status_idle_heartbeat, Some subject ->
+                respond_flow_control push subject
+            | Status_flow_control, Some subject ->
+                respond_flow_control push subject
+            | Status_flow_control, None -> Error (push_status_error status)
+            | _ -> Error (push_status_error status)
+          in
+          match control_result with
+          | Error error -> Error error
+          | Ok () ->
+              reset_heartbeat push;
+              Ok None)
+      | None -> (
+          match
+            Msg.of_message ~jetstream:push.consumer.jetstream
+              ~stream_name:(Stream.name push.consumer.stream)
+              ~consumer_name:push.consumer.name delivery.message
+          with
+          | Error error -> Error error
+          | Ok message ->
+              reset_heartbeat push;
+              Ok (Some message))
 
-    let next push =
-      match push.state with
-      | Closed -> Error Error.Push_closed
-      | Failed error -> Error error
-      | Open -> (
-          match Connection.Subscription.next push.subscription with
-          | Error error -> subscription_error push error
-          | Ok delivery -> (
-              match consume_delivery push delivery with
-              | Ok message -> Ok message
-              | Error error ->
+    let next_loop push ~deadline =
+      let result = ref None in
+      let handle_delivery delivery =
+        match consume_delivery push delivery with
+        | Ok None -> ()
+        | Ok (Some message) -> result := Some (Ok message)
+        | Error error ->
+            fail push error;
+            result := Some (Error error)
+      in
+      while Option.is_none !result do
+        match push.state with
+        | Closed -> result := Some (Error Error.Push_closed)
+        | Failed error -> result := Some (Error error)
+        | Open -> (
+            match
+              Connection.Subscription.next_nonblocking push.subscription
+            with
+            | Some (Ok delivery) -> handle_delivery delivery
+            | Some (Error error) ->
+                result := Some (subscription_error push error)
+            | None -> (
+                let deadline_reached =
+                  match deadline with
+                  | Some deadline ->
+                      Mtime.compare (Connection.now push.connection) deadline
+                      >= 0
+                  | None -> false
+                in
+                if heartbeat_missed push then (
+                  let error = Error.Missing_heartbeat in
                   fail push error;
-                  Error error))
+                  result := Some (Error error))
+                else if deadline_reached then
+                  result := Some (Error (Error.Connection Core_error.Timeout))
+                else
+                  let wait_deadline =
+                    earliest_deadline deadline push.heartbeat_deadline
+                  in
+                  let wait_result =
+                    match wait_deadline with
+                    | None -> Connection.Subscription.next push.subscription
+                    | Some wait_deadline ->
+                        let now = Connection.now push.connection in
+                        if Mtime.compare now wait_deadline >= 0 then
+                          Error Core_error.Timeout
+                        else
+                          let timeout = Mtime.span now wait_deadline in
+                          Connection.Subscription.next_with_timeout ~timeout
+                            push.subscription
+                  in
+                  match wait_result with
+                  | Error Core_error.Timeout ->
+                      if heartbeat_missed push then (
+                        let error = Error.Missing_heartbeat in
+                        fail push error;
+                        result := Some (Error error))
+                      else
+                        result :=
+                          Some (Error (Error.Connection Core_error.Timeout))
+                  | Error error ->
+                      result := Some (subscription_error push error)
+                  | Ok delivery -> handle_delivery delivery))
+      done;
+      match !result with Some result -> result | None -> assert false
+
+    let next push = next_loop push ~deadline:None
 
     let next_with_timeout ~timeout push =
       if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then
         Error (Error.Connection (Core_error.Invalid_timeout "push"))
       else
-        match push.state with
-        | Closed -> Error Error.Push_closed
-        | Failed error -> Error error
-        | Open -> (
-            match
-              Connection.Subscription.next_with_timeout ~timeout
-                push.subscription
-            with
-            | Error Core_error.Timeout ->
-                Error (Error.Connection Core_error.Timeout)
-            | Error error -> subscription_error push error
-            | Ok delivery -> (
-                match consume_delivery push delivery with
-                | Ok message -> Ok message
-                | Error error ->
-                    fail push error;
-                    Error error))
+        let deadline =
+          match Mtime.add_span (Connection.now push.connection) timeout with
+          | Some deadline -> deadline
+          | None -> Mtime.max_stamp
+        in
+        next_loop push ~deadline:(Some deadline)
 
     let iter push ~f =
       let result = ref None in
@@ -2398,47 +2484,36 @@ module Consumer = struct
           match Config.deliver_subject config with
           | None -> Error Error.Not_push_consumer
           | Some subject -> (
-              let unsupported =
-                match Config.idle_heartbeat config with
-                | Some heartbeat ->
-                    Some
-                      (Error.Unsupported_push_option
-                         {
-                           field = "idle_heartbeat";
-                           value =
-                             Int64.to_string (Mtime.Span.to_uint64_ns heartbeat);
-                         })
-                | None -> (
-                    match Config.flow_control config with
-                    | Some true ->
-                        Some
-                          (Error.Unsupported_push_option
-                             { field = "flow_control"; value = "true" })
-                    | None | Some false -> None)
+              let connection = consumer.jetstream.connection in
+              let filter =
+                Nats.Subject.Filter.literal (Nats.Subject.to_string subject)
               in
-              match unsupported with
-              | Some error -> Error error
-              | None -> (
-                  let connection = consumer.jetstream.connection in
-                  let filter =
-                    Nats.Subject.Filter.literal (Nats.Subject.to_string subject)
+              match
+                Connection.subscribe connection
+                  ?queue_group:(Config.deliver_group config)
+                  filter
+              with
+              | Error error -> Error (Error.Connection error)
+              | Ok subscription ->
+                  let push =
+                    {
+                      consumer;
+                      connection;
+                      subscription;
+                      idle_heartbeat = Config.idle_heartbeat config;
+                      heartbeat_deadline =
+                        heartbeat_deadline_at connection
+                          (Config.idle_heartbeat config);
+                      state = Open;
+                      hook = None;
+                    }
                   in
-                  match
-                    Connection.subscribe connection
-                      ?queue_group:(Config.deliver_group config)
-                      filter
-                  with
-                  | Error error -> Error (Error.Connection error)
-                  | Ok subscription ->
-                      let push =
-                        { consumer; subscription; state = Open; hook = None }
-                      in
-                      let hook =
-                        Eio.Switch.on_release_cancellable sw (fun () ->
-                            ignore (close push))
-                      in
-                      push.hook <- Some hook;
-                      Ok push)))
+                  let hook =
+                    Eio.Switch.on_release_cancellable sw (fun () ->
+                        ignore (close push))
+                  in
+                  push.hook <- Some hook;
+                  Ok push))
   end
 
   let list (stream : stream) =
