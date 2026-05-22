@@ -82,16 +82,19 @@ single-owner `Consumer.Push` session with delivery-subject and queue-group
 configuration, explicit acknowledgement, local timeout/resumption, and
 fail-closed handling of unsupported status frames. Push sessions consume idle
 heartbeats, answer flow-control requests, track heartbeat liveness, and preserve
-absolute caller timeouts across control traffic. Ordered sessions now use
-client-managed ephemeral pull consumers, force no-ack memory-backed
-configuration, validate consumer sequence continuity, and recreate consumers
-after gaps, liveness loss, deletion, or non-replayed disconnects while resuming
-from the next stream sequence. KV, Object Store, and Services remain later
-work. Push reconnect restoration is implemented through replayable subscription
-recovery, including durable confirmation and ephemeral recreation. Real cluster
-and cross-SDK interop coverage is deliberately deferred to the final acceptance
-phase; current consumer confidence comes from local mock transport and
-pure-boundary tests.
+absolute caller timeouts across control traffic. Owned push sessions subscribe
+before creating ephemeral consumers, delete them on close, and resume from the
+next stream sequence after recreation. Ordered sessions now use client-managed
+ephemeral pull consumers, force no-ack memory-backed configuration, validate
+consumer sequence continuity, and recreate consumers after gaps, liveness loss,
+deletion, or non-replayed disconnects while resuming from the next stream
+sequence. KV now provides bucket configuration/status, direct reads, put/create/
+update/delete/purge compare-and-set operations, and typed cancellable watches
+over the owned push path. Explicit key enumeration and broader KV expiry,
+history, and reconnect acceptance remain ahead; Object Store and Services remain
+later work. Real cluster and cross-SDK interop coverage is deliberately deferred
+to the final acceptance phase; current confidence comes from local mock
+transport and pure-boundary tests.
 The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
@@ -513,11 +516,17 @@ semantics before calling the feature complete.
 
 ### Workstream 5A — Key-Value
 
-- Add bucket create/open/status and typed entry/operation/revision values.
-- Implement get, put, create/update compare-and-set, delete, purge, history,
-  keys, TTL, and cancellable watches.
-- Preserve watch ordering and expose bucket/key/value/revision/timestamp/
-  operation without requiring callers to parse JetStream messages.
+- Completed locally: add bucket create/open/bind/status/delete and typed
+  entry/operation/revision values, with validated bucket configuration.
+- Completed locally: implement direct get/get-revision, put, create/update
+  compare-and-set, delete, and purge with structured tombstone and revision
+  errors.
+- Completed locally: implement cancellable `New`, `Last_per_subject`, and
+  `All` watches with exact/wildcard key filters, one ordered `Initial_done`
+  event, metadata-only delivery, and typed put/delete/purge entries.
+- Remaining: add a dedicated key enumeration API, explicit history helpers,
+  server-expiry assertions, and watch ordering/cancellation coverage through
+  reconnect and cross-SDK acceptance.
 
 ### Workstream 5B — Object Store
 
@@ -528,8 +537,11 @@ semantics before calling the feature complete.
 
 ### Acceptance tests
 
-- KV CAS success/failure, revisions, history, TTL, deletes/purges, and watches.
-- Watch cancellation and ordering under reconnect.
+- KV CAS success/failure, revisions, deletes/purges, and watch ordering are
+  covered locally through the Eio mock transport; watch history and TTL expiry
+  assertions remain acceptance work.
+- Watch cancellation and ordering under reconnect remain a real-server and
+  cross-SDK acceptance item.
 - Large Object Store transfer, metadata, listing, linking, sealing, and
   interrupted-transfer cleanup.
 - No direct dependence by these modules on a private socket or private

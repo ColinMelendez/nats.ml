@@ -662,11 +662,15 @@ These modules should be layered over `Connection.request` and
   the next stream sequence after recovery. Push sessions restore replayable
   delivery subscriptions after reconnect, recheck durable consumers, and
   recreate ephemeral consumers when the server reports consumer-not-found.
+  Owned push sessions subscribe before ephemeral creation, delete their
+  consumers on close, and recreate from the next delivered stream sequence.
   Other advanced consumer behavior remains a planned extension.
-- `Nats_eio.Key_value` provides bucket creation/opening, get/put, create/update
-  compare-and-set, delete/purge, revision/history, TTL, keys, status, and
-  cancellable watches. Watch entries preserve bucket, key, value, revision,
-  timestamp, and operation (`put`, `delete`, or `purge`).
+- `Nats_eio.Key_value` provides bucket creation/opening, validated bucket
+  configuration/status, get/get-revision, put, create/update compare-and-set,
+  delete/purge, and cancellable `New`, `Last_per_subject`, and `All` watches.
+  Watch entries preserve bucket, key, value, revision, RFC3339 timestamp, and
+  operation (`put`, `delete`, or `purge`); key enumeration and explicit history
+  helpers remain planned extensions.
 - `Nats_eio.Object_store` provides streaming put/get, metadata, list, watch,
   update, link, and seal. Large objects must be transferred incrementally and
   not assembled into one mandatory in-memory string.
