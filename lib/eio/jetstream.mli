@@ -417,6 +417,13 @@ module Consumer : sig
     type consumer = t
     type t
 
+    val create :
+      sw:Eio.Switch.t -> stream -> Config.t -> (t, Error.t) result
+    (** [create ~sw stream config] subscribes to the configured delivery
+        subject before creating an ephemeral push consumer. The returned
+        session owns that consumer and deletes it when [close] or [sw]
+        releases it. *)
+
     val v : sw:Eio.Switch.t -> consumer -> (t, Error.t) result
     (** [v ~sw consumer] subscribes to the delivery subject configured on a
         push consumer. It reads the server-side configuration and returns
@@ -430,6 +437,9 @@ module Consumer : sig
         with [info], while missing ephemeral consumers are recreated from
         their last configuration. The session is single-owner: do not call
         [next] or [next_with_timeout] concurrently on one value. *)
+
+    val consumer : t -> consumer
+    (** [consumer push] is the current server-side consumer owned by [push]. *)
 
     val next : t -> (Msg.t, Error.t) result
     (** [next push] waits for the next delivered message. Messages are not

@@ -2337,8 +2337,7 @@ module Consumer = struct
                         match
                           earliest_deadline deadline pull.heartbeat_deadline
                         with
-                        | None ->
-                            Connection.Subscription.next pull.subscription
+                        | None -> Connection.Subscription.next pull.subscription
                         | Some wait_deadline ->
                             let now = Connection.now pull.connection in
                             if Mtime.compare now wait_deadline >= 0 then
@@ -2521,11 +2520,15 @@ module Consumer = struct
     type consumer = t
     type state = Open | Closed | Failed of Error.t
 
+    let create_consumer = create
+
     type t = {
       mutable consumer : consumer;
       connection : Connection.t;
       mutable subscription : Connection.Subscription.t;
       mutable config : Config.t;
+      owned : bool;
+      mutable last_stream_sequence : int64 option;
       mutable idle_heartbeat : Mtime.Span.t option;
       mutable recovery_pending : bool;
       mutable heartbeat_deadline : Mtime.t option;
@@ -2560,9 +2563,13 @@ module Consumer = struct
             (fun hook -> ignore (Eio.Switch.try_remove_hook hook))
             push.hook;
           push.hook <- None;
-          match release_subscription push.subscription with
-          | None -> Ok ()
-          | Some error -> Error (Error.Connection error))
+          let subscription_result = release_subscription push.subscription in
+          let consumer_result =
+            if push.owned then delete push.consumer else Ok ()
+          in
+          match subscription_result with
+          | Some error -> Error (Error.Connection error)
+          | None -> consumer_result)
 
     let heartbeat_missed push =
       match push.heartbeat_deadline with
@@ -2588,9 +2595,7 @@ module Consumer = struct
       | Error.Connection Core_error.Timeout -> true
       | _ -> false
 
-    let is_core_timeout = function
-      | Core_error.Timeout -> true
-      | _ -> false
+    let is_core_timeout = function Core_error.Timeout -> true | _ -> false
 
     let is_recoverable = function
       | Error.Connection Core_error.Disconnected -> true
@@ -2601,6 +2606,44 @@ module Consumer = struct
       | Error.Api { err_code = Some 10014; _ } -> true
       | _ -> false
 
+    let next_stream_sequence sequence =
+      if Int64.equal sequence Int64.max_int then Int64.max_int
+      else Int64.add sequence 1L
+
+    let resume_config push =
+      let deliver_policy =
+        match push.last_stream_sequence with
+        | None -> Config.New
+        | Some sequence ->
+            Config.By_start_sequence (next_stream_sequence sequence)
+      in
+      match
+        Config.v
+          ?durable_name:(Config.durable_name push.config)
+          ?description:(Config.description push.config)
+          ?deliver_subject:(Config.deliver_subject push.config)
+          ?deliver_group:(Config.deliver_group push.config)
+          ?idle_heartbeat:(Config.idle_heartbeat push.config)
+          ?flow_control:(Config.flow_control push.config)
+          ~deliver_policy
+          ~ack_policy:(Config.ack_policy push.config)
+          ?ack_wait:(Config.ack_wait push.config)
+          ?max_deliver:(Config.max_deliver push.config)
+          ?filter_subject:(Config.filter_subject push.config)
+          ~replay_policy:(Config.replay_policy push.config)
+          ?max_ack_pending:(Config.max_ack_pending push.config)
+          ?max_waiting:(Config.max_waiting push.config)
+          ?max_batch:(Config.max_batch push.config)
+          ?max_expires:(Config.max_expires push.config)
+          ?max_bytes:(Config.max_bytes push.config)
+          ?headers_only:(Config.headers_only push.config)
+          ?inactive_threshold:(Config.inactive_threshold push.config)
+          ?mem_storage:(Config.mem_storage push.config)
+          ()
+      with
+      | Ok config -> Ok config
+      | Error error -> Error (Error.Invalid_config error)
+
     let option_equal equal first second =
       match (first, second) with
       | None, None -> true
@@ -2608,9 +2651,11 @@ module Consumer = struct
       | None, Some _ | Some _, None -> false
 
     let same_delivery_config first second =
-      option_equal Nats.Subject.equal (Config.deliver_subject first)
+      option_equal Nats.Subject.equal
+        (Config.deliver_subject first)
         (Config.deliver_subject second)
-      && option_equal Nats.Queue_group.equal (Config.deliver_group first)
+      && option_equal Nats.Queue_group.equal
+           (Config.deliver_group first)
            (Config.deliver_group second)
 
     let replace_subscription push config subject =
@@ -2619,31 +2664,32 @@ module Consumer = struct
       in
       match
         Connection.subscribe push.connection
-          ?queue_group:(Config.deliver_group config) filter
+          ?queue_group:(Config.deliver_group config)
+          filter
       with
       | Error error -> Error (Error.Connection error)
-      | Ok subscription ->
+      | Ok subscription -> (
           let old_subscription = push.subscription in
           push.subscription <- subscription;
           match release_subscription old_subscription with
           | None -> Ok ()
-          | Some error -> Error (Error.Connection error)
+          | Some error -> Error (Error.Connection error))
 
     let restore_consumer push ~deadline =
       match remaining_timeout push deadline with
       | Error error -> Error error
       | Ok timeout -> (
           match info ?timeout push.consumer with
-          | Ok info ->
+          | Ok info -> (
               let config = Info.config info in
-              (match Config.deliver_subject config with
+              match Config.deliver_subject config with
               | None -> Error Error.Not_push_consumer
-              | Some subject ->
+              | Some subject -> (
                   let subscription_result =
                     if same_delivery_config push.config config then Ok ()
                     else replace_subscription push config subject
                   in
-                  (match subscription_result with
+                  match subscription_result with
                   | Error error -> Error error
                   | Ok () ->
                       push.config <- config;
@@ -2657,22 +2703,26 @@ module Consumer = struct
               | None -> (
                   match remaining_timeout push deadline with
                   | Error error -> Error error
-                  | Ok timeout ->
-                      match create ?timeout push.consumer.stream push.config with
+                  | Ok timeout -> (
+                      match resume_config push with
                       | Error error -> Error error
-                      | Ok consumer ->
-                          push.consumer <- consumer;
-                          push.recovery_pending <- false;
-                          reset_heartbeat push;
-                          Ok ()))
+                      | Ok config -> (
+                          match create ?timeout push.consumer.stream config with
+                          | Error error -> Error error
+                          | Ok consumer ->
+                              push.consumer <- consumer;
+                              push.config <- config;
+                              push.recovery_pending <- false;
+                              reset_heartbeat push;
+                              Ok ()))))
           | Error error -> Error error)
 
     let recover push ~deadline =
       match Connection.Subscription.recovery push.subscription with
-      | Connection.Subscription.Detached _ ->
+      | Connection.Subscription.Detached _ -> (
           push.heartbeat_deadline <- None;
           let from = Connection.Subscription.recovery push.subscription in
-          (match remaining_timeout push deadline with
+          match remaining_timeout push deadline with
           | Error error -> Error (`Timeout error)
           | Ok timeout -> (
               match
@@ -2684,8 +2734,7 @@ module Consumer = struct
                   Ok `Retry
               | Error error when is_core_timeout error ->
                   Error (`Timeout timeout_error)
-              | Error error ->
-                  Stdlib.Error (`Fatal (Error.Connection error))))
+              | Error error -> Stdlib.Error (`Fatal (Error.Connection error))))
       | Connection.Subscription.Attached _ when push.recovery_pending -> (
           match restore_consumer push ~deadline with
           | Ok () -> Ok `Ready
@@ -2693,6 +2742,34 @@ module Consumer = struct
           | Error error when is_recoverable error -> Ok `Retry
           | Error error -> Stdlib.Error (`Fatal error))
       | Connection.Subscription.Attached _ -> Ok `Ready
+
+    let recreate_consumer push ~deadline =
+      match resume_config push with
+      | Error error -> Error error
+      | Ok config -> (
+          match remaining_timeout push deadline with
+          | Error error -> Error error
+          | Ok timeout -> (
+              let delete_result =
+                match delete ?timeout push.consumer with
+                | Ok () -> Ok ()
+                | Error error when is_missing_consumer error -> Ok ()
+                | Error error -> Error error
+              in
+              match delete_result with
+              | Error error -> Error error
+              | Ok () -> (
+                  match remaining_timeout push deadline with
+                  | Error error -> Error error
+                  | Ok timeout -> (
+                      match create ?timeout push.consumer.stream config with
+                      | Error error -> Error error
+                      | Ok consumer ->
+                          push.consumer <- consumer;
+                          push.config <- config;
+                          push.recovery_pending <- false;
+                          reset_heartbeat push;
+                          Ok ()))))
 
     let respond_flow_control push subject =
       match Connection.publish push.connection subject "" with
@@ -2727,18 +2804,29 @@ module Consumer = struct
           with
           | Error error -> Error error
           | Ok message ->
+              push.last_stream_sequence <- Some (Msg.stream_sequence message);
               reset_heartbeat push;
               Ok (Some message))
 
     let next_loop push ~deadline =
       let result = ref None in
+      let handle_error error =
+        match (push.owned, error) with
+        | true, (Error.Missing_heartbeat | Error.Consumer_deleted) -> (
+            match recreate_consumer push ~deadline with
+            | Ok () -> ()
+            | Error error ->
+                fail push error;
+                result := Some (Error error))
+        | false, _ | true, _ ->
+            fail push error;
+            result := Some (Error error)
+      in
       let handle_delivery delivery =
         match consume_delivery push delivery with
         | Ok None -> ()
         | Ok (Some message) -> result := Some (Ok message)
-        | Error error ->
-            fail push error;
-            result := Some (Error error)
+        | Error error -> handle_error error
       in
       while Option.is_none !result do
         match push.state with
@@ -2766,14 +2854,14 @@ module Consumer = struct
                     let deadline_reached =
                       match deadline with
                       | Some deadline ->
-                          Mtime.compare (Connection.now push.connection) deadline
+                          Mtime.compare
+                            (Connection.now push.connection)
+                            deadline
                           >= 0
                       | None -> false
                     in
-                    if heartbeat_missed push then (
-                      let error = Error.Missing_heartbeat in
-                      fail push error;
-                      result := Some (Error error))
+                    if heartbeat_missed push then
+                      handle_error Error.Missing_heartbeat
                     else if deadline_reached then
                       result :=
                         Some (Error (Error.Connection Core_error.Timeout))
@@ -2792,24 +2880,23 @@ module Consumer = struct
                               Error Core_error.Timeout
                             else
                               let timeout = Mtime.span now wait_deadline in
-                              Connection.Subscription.next_or_recovery_with_timeout
-                                ~timeout push.subscription
+                              Connection.Subscription
+                              .next_or_recovery_with_timeout ~timeout
+                                push.subscription
                       in
-                      (match wait_result with
+                      match wait_result with
                       | Ok (Connection.Subscription.Delivery delivery) ->
                           handle_delivery delivery
                       | Ok Connection.Subscription.Recovery ->
                           push.recovery_pending <- true
                       | Error Core_error.Timeout ->
-                          if heartbeat_missed push then (
-                            let error = Error.Missing_heartbeat in
-                            fail push error;
-                            result := Some (Error error))
+                          if heartbeat_missed push then
+                            handle_error Error.Missing_heartbeat
                           else
                             result :=
                               Some (Error (Error.Connection Core_error.Timeout))
                       | Error error ->
-                          result := Some (subscription_error push error)))))
+                          result := Some (subscription_error push error))))
       done;
       match !result with Some result -> result | None -> assert false
 
@@ -2836,6 +2923,60 @@ module Consumer = struct
       done;
       match !result with Some result -> result | None -> assert false
 
+    let make ~sw ~owned consumer subscription config =
+      let connection = consumer.jetstream.connection in
+      let push =
+        {
+          consumer;
+          connection;
+          subscription;
+          config;
+          owned;
+          last_stream_sequence = None;
+          idle_heartbeat = Config.idle_heartbeat config;
+          recovery_pending = false;
+          heartbeat_deadline =
+            heartbeat_deadline_at connection (Config.idle_heartbeat config);
+          state = Open;
+          hook = None;
+        }
+      in
+      let hook =
+        Eio.Switch.on_release_cancellable sw (fun () ->
+            Eio.Cancel.protect (fun () -> ignore (close push)))
+      in
+      push.hook <- Some hook;
+      push
+
+    let create ~sw (stream : Stream.t) config =
+      match Config.durable_name config with
+      | Some name ->
+          Error
+            (Error.Invalid_config
+               (Error.Invalid_consumer_policy
+                  { field = "durable_name"; value = name }))
+      | None -> (
+          match Config.deliver_subject config with
+          | None -> Error Error.Not_push_consumer
+          | Some subject -> (
+              let connection = stream.jetstream.connection in
+              let filter =
+                Nats.Subject.Filter.literal (Nats.Subject.to_string subject)
+              in
+              match
+                Connection.subscribe connection
+                  ?queue_group:(Config.deliver_group config)
+                  filter
+              with
+              | Error error -> Error (Error.Connection error)
+              | Ok subscription -> (
+                  match create_consumer stream config with
+                  | Error error ->
+                      ignore (release_subscription subscription);
+                      Error error
+                  | Ok consumer ->
+                      Ok (make ~sw ~owned:true consumer subscription config))))
+
     let v ~sw consumer =
       match info consumer with
       | Error error -> Error error
@@ -2855,27 +2996,9 @@ module Consumer = struct
               with
               | Error error -> Error (Error.Connection error)
               | Ok subscription ->
-                  let push =
-                    {
-                      consumer;
-                      connection;
-                      subscription;
-                      config;
-                      idle_heartbeat = Config.idle_heartbeat config;
-                      recovery_pending = false;
-                      heartbeat_deadline =
-                        heartbeat_deadline_at connection
-                          (Config.idle_heartbeat config);
-                      state = Open;
-                      hook = None;
-                    }
-                  in
-                  let hook =
-                    Eio.Switch.on_release_cancellable sw (fun () ->
-                        ignore (close push))
-                  in
-                  push.hook <- Some hook;
-                  Ok push))
+                  Ok (make ~sw ~owned:false consumer subscription config)))
+
+    let consumer push = push.consumer
   end
 
   module Ordered = struct
