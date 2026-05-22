@@ -217,6 +217,27 @@ heartbeat deadlines alongside caller timeouts and drain already queued control
 deliveries before declaring the session unhealthy; a normal local timeout still
 leaves the outstanding server request available for a later call.
 
+### Ordered JetStream consumption
+
+Ordered consumption is a sibling of `Consumer.Pull`, not a wrapper around the
+push-session API. `Consumer.Ordered.v` creates a client-managed ephemeral pull
+consumer and owns its reply subscription. The client fixes the consumer to
+no-ack, memory-backed storage, and a bounded inactive threshold; the caller
+chooses the initial delivery policy, filter, and pull limits.
+
+The ordered state machine tracks two distinct cursors. Delivered consumer
+sequence numbers must be consecutive, while stream sequence numbers are the
+resume cursor and may skip when a filter excludes messages. A gap, missing
+heartbeat, consumer-deleted status, or a disconnect that does not replay the
+pull subscription tears down the current generation and creates a new one at
+the next stream sequence. The initial delivery policy is used only for the
+first generation. A normal caller timeout leaves the current generation open;
+an absolute timeout covers both waiting and recovery work.
+
+This behavior is currently covered through the local Eio mock transport. Real
+server-version, cluster, and cross-SDK ordered-consumer interoperability tests
+belong to the final acceptance phase.
+
 ### The protocol core as a testable boundary
 
 An adapter should be able to drive the protocol without a socket:
@@ -632,13 +653,14 @@ These modules should be layered over `Connection.request` and
   response models, stream/consumer management (including typed update and
   inventory operations), publish acknowledgements, consumer handles, one-shot
   fetch, a persistent `Consumer.Pull` session, and a switch-owned
-  `Consumer.Push` session.
+  `Consumer.Push` session, and a client-managed `Consumer.Ordered` session.
   Delivered `Msg.t` values carry the stream/consumer metadata needed for
   explicit `ack`, `nak`, `term`, and `in_progress` operations. Push sessions
   consume idle-heartbeat status frames, answer flow-control requests (including
   stalled-heartbeat replies), and fail with structured missing-heartbeat
-  errors. Ordered consumption, push reconnect restoration, and other advanced
-  consumer behavior remain planned extensions.
+  errors. Ordered sessions validate consumer sequence continuity and resume from
+  the next stream sequence after recovery. Push reconnect restoration and other
+  advanced consumer behavior remain planned extensions.
 - `Nats_eio.Key_value` provides bucket creation/opening, get/put, create/update
   compare-and-set, delete/purge, revision/history, TTL, keys, status, and
   cancellable watches. Watch entries preserve bucket, key, value, revision,
@@ -677,8 +699,8 @@ updates preserve unknown server configuration through an INFO/read-modify-write
 cycle; list operations consume server pagination and fail explicitly on an
 incomplete page. The management prefix is configurable for JetStream domains,
 while application subjects remain ordinary Core NATS subjects. KV, Object
-Store, Services, ordered consumers, push reconnect restoration, and other
-advanced flow-control features remain later layers over the same connection.
+Store, Services, push reconnect restoration, and other advanced flow-control
+features remain later layers over the same connection.
 
 ## 6. Testing and interoperability
 
