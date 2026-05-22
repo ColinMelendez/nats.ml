@@ -631,11 +631,14 @@ These modules should be layered over `Connection.request` and
 - `Nats_eio.Jetstream` provides a connection capability, typed API request and
   response models, stream/consumer management (including typed update and
   inventory operations), publish acknowledgements, consumer handles, one-shot
-  fetch, and a persistent `Consumer.Pull` session.
+  fetch, a persistent `Consumer.Pull` session, and a switch-owned
+  `Consumer.Push` session.
   Delivered `Msg.t` values carry the stream/consumer metadata needed for
-  explicit `ack`, `nak`, `term`, and `in_progress` operations. Push and
-  ordered consumption, consumer-failure detection, flow control, and
-  synchronous ack remain planned extensions.
+  explicit `ack`, `nak`, `term`, and `in_progress` operations. Push sessions
+  consume idle-heartbeat status frames, answer flow-control requests (including
+  stalled-heartbeat replies), and fail with structured missing-heartbeat
+  errors. Ordered consumption, push reconnect restoration, and other advanced
+  consumer behavior remain planned extensions.
 - `Nats_eio.Key_value` provides bucket creation/opening, get/put, create/update
   compare-and-set, delete/purge, revision/history, TTL, keys, status, and
   cancellable watches. Watch entries preserve bucket, key, value, revision,
@@ -674,8 +677,8 @@ updates preserve unknown server configuration through an INFO/read-modify-write
 cycle; list operations consume server pagination and fail explicitly on an
 incomplete page. The management prefix is configurable for JetStream domains,
 while application subjects remain ordinary Core NATS subjects. KV, Object
-Store, Services, push/ordered consumers, consumer-failure detection, and
-flow-control features remain later layers over the same connection.
+Store, Services, ordered consumers, push reconnect restoration, and other
+advanced flow-control features remain later layers over the same connection.
 
 ## 6. Testing and interoperability
 

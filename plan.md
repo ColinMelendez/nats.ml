@@ -80,13 +80,13 @@ Consumer status classification now detects terminal consumer failure consistentl
 across fetch and pull paths. The Eio layer also provides a switch-owned
 single-owner `Consumer.Push` session with delivery-subject and queue-group
 configuration, explicit acknowledgement, local timeout/resumption, and
-fail-closed handling of unsupported status frames. Push consumers configured
-with idle heartbeats or flow control are rejected before subscription until
-those control frames are implemented. KV, Object Store, Services, ordered
-consumers, and the remaining push control features remain later work. Real
-cluster and cross-SDK interop coverage is deliberately deferred to the final
-acceptance phase; current consumer confidence comes from local mock transport
-and pure-boundary tests.
+fail-closed handling of unsupported status frames. Push sessions consume idle
+heartbeats, answer flow-control requests, track heartbeat liveness, and preserve
+absolute caller timeouts across control traffic. KV, Object Store, Services,
+ordered consumers, and reconnect restoration for push sessions remain later
+work. Real cluster and cross-SDK interop coverage is deliberately deferred to
+the final acceptance phase; current consumer confidence comes from local mock
+transport and pure-boundary tests.
 The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
@@ -461,11 +461,11 @@ request/reply and subscription primitives.
 - Completed: add `Consumer.Push` with server-configured delivery subjects and
   queue groups, switch-owned lifecycle, typed deliveries, explicit
   acknowledgement, timeout/resumption, and local failure/close contracts.
-  Push sessions reject configured idle heartbeats and flow control before
-  subscribing; ordered recovery and those control-frame handlers are separate
-  follow-up slices.
-- Remaining: add push heartbeat/flow-control handling, ordered consumers,
-  filtering, and broader delivery semantics without introducing a second
+  Push sessions consume idle heartbeats, answer flow-control requests including
+  stalled-heartbeat replies, and fail with structured missing-heartbeat errors
+  after two configured intervals.
+- Remaining: add ordered consumers, filtering, reconnect restoration for push
+  sessions, and broader delivery semantics without introducing a second
   runtime or subscription abstraction.
 
 ### Acceptance tests
@@ -480,7 +480,7 @@ request/reply and subscription primitives.
   contracts through the Eio mock transport.
 - Completed: heartbeat liveness and local/server timeout interaction.
 - Remaining: real cluster and cross-SDK interop coverage for consumer behavior,
-  server-version gates, and the final push/ordered acceptance matrix.
+  server-version gates, and the final ordered/push acceptance matrix.
 
 ### Gate G4 — JetStream API stabilization
 
