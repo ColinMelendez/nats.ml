@@ -164,6 +164,27 @@ let delivery_without_ack_wire payload =
   in
   operation_wire (Nats.Op.Hmsg { sid = 1; message; status = None })
 
+let direct_message_wire ~sid ~stream ~subject ~sequence ~timestamp payload =
+  let headers =
+    match
+      Nats.Header.of_list
+        [
+          ("JSStream", stream);
+          ("JSSequence", Int64.to_string sequence);
+          ("JSTimeStamp", timestamp);
+          ("JSSubject", subject);
+        ]
+    with
+    | Ok headers -> headers
+    | Error error -> fail (Format.asprintf "%a" Nats.Header.pp_error error)
+  in
+  let message =
+    Nats.Message.v
+      ~subject:(Nats.Subject.literal "_INBOX.reply")
+      ~headers payload
+  in
+  operation_wire (Nats.Op.Hmsg { sid; message; status = None })
+
 let ack_response_wire ~sid =
   let message =
     Nats.Message.v ~subject:(Nats.Subject.literal "_INBOX.reply") "+ACK"
@@ -339,6 +360,81 @@ let rec yield_n count =
 let () =
   run "nats-eio-jetstream"
     [
+      test "stream config models direct and per-subject limits" (fun () ->
+          let subject = Nats.Subject.Filter.literal "$KV.users.>" in
+          let config =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.v ~name:"KV_users"
+                 ~subjects:[ subject ] ~max_msgs_per_subject:5L
+                 ~allow_rollup:true ~allow_direct:true ())
+          in
+          (match
+             Nats_eio.Jetstream.Stream.Config.max_msgs_per_subject config
+           with
+          | Some value -> equal int64 5L value
+          | None -> fail "stream config lost per-subject limit");
+          equal bool true (Nats_eio.Jetstream.Stream.Config.allow_rollup config);
+          equal bool true (Nats_eio.Jetstream.Stream.Config.allow_direct config));
+      test "stream direct reads preserve stored message metadata" (fun () ->
+          let first_response, first_response_u = Eio.Promise.create () in
+          let second_response, second_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:
+              [
+                `Return info_wire;
+                `Await first_response;
+                `Await second_response;
+                `Await hold;
+              ]
+            (fun ~sw connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
+              in
+              let first_result, first_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_result_u
+                    (Nats_eio.Jetstream.Stream.get stream ~sequence:7L));
+              yield_n 5;
+              Eio.Promise.resolve first_response_u
+                (Ok
+                   (direct_message_wire ~sid:1 ~stream:"ORDERS"
+                      ~subject:"orders.created" ~sequence:7L
+                      ~timestamp:"2026-08-11T12:00:00.000000000Z" "stored"));
+              let first =
+                expect_jetstream_ok (Eio.Promise.await first_result)
+              in
+              equal string "orders.created"
+                (Nats.Subject.to_string
+                   (Nats_eio.Jetstream.Stream.Message.subject first));
+              equal int64 7L (Nats_eio.Jetstream.Stream.Message.sequence first);
+              equal string "2026-08-11T12:00:00.000000000Z"
+                (Nats_eio.Jetstream.Stream.Message.timestamp first);
+              equal string "stored"
+                (Nats_eio.Jetstream.Stream.Message.payload first);
+              let second_result, second_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve second_result_u
+                    (Nats_eio.Jetstream.Stream.get_last stream
+                       ~subject:(Nats.Subject.literal "orders.created")));
+              yield_n 5;
+              Eio.Promise.resolve second_response_u
+                (Ok
+                   (direct_message_wire ~sid:2 ~stream:"ORDERS"
+                      ~subject:"orders.created" ~sequence:8L
+                      ~timestamp:"2026-08-11T12:00:01.000000000Z" "latest"));
+              let second =
+                expect_jetstream_ok (Eio.Promise.await second_result)
+              in
+              equal int64 8L (Nats_eio.Jetstream.Stream.Message.sequence second);
+              equal string "latest"
+                (Nats_eio.Jetstream.Stream.Message.payload second);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "pull fails permanently when its consumer is deleted" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in

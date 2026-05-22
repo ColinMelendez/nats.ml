@@ -26,6 +26,8 @@ module Error : sig
     | Invalid_subject of Nats.Subject.error
     | Invalid_config of config
     | Invalid_headers of Nats.Header.error
+    | Message_not_found
+    | Invalid_message_header of { name : string; value : string }
     | Empty_msg_id
     | Msg_id_already_set
     | Unexpected_stream_name of { expected : string; actual : string }
@@ -80,9 +82,12 @@ module Stream : sig
       ?retention:retention ->
       ?discard:discard ->
       ?max_msgs:int64 ->
+      ?max_msgs_per_subject:int64 ->
       ?max_bytes:int64 ->
       ?max_age:Mtime.Span.t ->
       ?max_msg_size:int64 ->
+      ?allow_rollup:bool ->
+      ?allow_direct:bool ->
       unit ->
       (t, error) result
     (** [v] validates a stream name, capture filters, and limits. Limits use
@@ -94,9 +99,12 @@ module Stream : sig
     val retention : t -> retention
     val discard : t -> discard
     val max_msgs : t -> int64 option
+    val max_msgs_per_subject : t -> int64 option
     val max_bytes : t -> int64 option
     val max_age : t -> Mtime.Span.t option
     val max_msg_size : t -> int64 option
+    val allow_rollup : t -> bool
+    val allow_direct : t -> bool
 
     val with_name : t -> string -> (t, error) result
     (** [with_name config name] validates [name] while preserving the other
@@ -121,6 +129,10 @@ module Stream : sig
     (** [with_max_msgs config value] validates and replaces the message limit.
         [None] means unlimited. *)
 
+    val with_max_msgs_per_subject : t -> int64 option -> (t, error) result
+    (** [with_max_msgs_per_subject config value] validates and replaces the
+        per-subject message limit. [None] means unlimited. *)
+
     val with_max_bytes : t -> int64 option -> (t, error) result
     (** [with_max_bytes config value] validates and replaces the byte limit.
         [None] means unlimited. *)
@@ -132,6 +144,14 @@ module Stream : sig
     val with_max_msg_size : t -> int64 option -> (t, error) result
     (** [with_max_msg_size config value] validates and replaces the per-message
         size limit. [None] means unlimited. *)
+
+    val with_allow_rollup : t -> bool -> (t, error) result
+    (** [with_allow_rollup config value] replaces whether rollup headers are
+        accepted by the stream. *)
+
+    val with_allow_direct : t -> bool -> (t, error) result
+    (** [with_allow_direct config value] replaces whether direct message reads
+        are accepted by the stream. *)
   end
 
   module Info : sig
@@ -144,6 +164,19 @@ module Stream : sig
     val last_sequence : t -> int64
     val consumer_count : t -> int
     val pp : Format.formatter -> t -> unit
+  end
+
+  module Message : sig
+    type t
+
+    val subject : t -> Nats.Subject.t
+    val sequence : t -> int64
+    val timestamp : t -> string
+    (** [timestamp message] is the server timestamp in its RFC3339 wire form.
+        Keeping the wire form avoids imposing a wall-clock representation on
+        callers that only need to preserve or display it. *)
+    val headers : t -> Nats.Header.t
+    val payload : t -> string
   end
 
   type t
@@ -172,6 +205,16 @@ module Stream : sig
 
   val name : t -> string
   val info : t -> (Info.t, Error.t) result
+  val get :
+    ?timeout:Mtime.Span.t -> t -> sequence:int64 -> (Message.t, Error.t) result
+  (** [get stream ~sequence] retrieves one stored message by stream sequence
+      through JetStream's direct message API. *)
+
+  val get_last :
+    ?timeout:Mtime.Span.t -> t -> subject:Nats.Subject.t -> (Message.t, Error.t) result
+  (** [get_last stream ~subject] retrieves the latest stored message for an
+      exact subject through JetStream's direct message API. *)
+
   val delete : t -> (unit, Error.t) result
 end
 

@@ -26,6 +26,8 @@ module Error = struct
     | Invalid_subject of Nats.Subject.error
     | Invalid_config of config
     | Invalid_headers of Nats.Header.error
+    | Message_not_found
+    | Invalid_message_header of { name : string; value : string }
     | Empty_msg_id
     | Msg_id_already_set
     | Unexpected_stream_name of { expected : string; actual : string }
@@ -95,6 +97,10 @@ module Error = struct
     | Invalid_headers error ->
         Format.fprintf ppf "invalid JetStream headers: %a" Nats.Header.pp_error
           error
+    | Message_not_found ->
+        Format.pp_print_string ppf "JetStream message was not found"
+    | Invalid_message_header { name; value } ->
+        Format.fprintf ppf "invalid JetStream message header %S=%S" name value
     | Empty_msg_id -> Format.pp_print_string ppf "JetStream message id is empty"
     | Msg_id_already_set ->
         Format.pp_print_string ppf
@@ -209,9 +215,12 @@ module Stream = struct
       retention : retention;
       discard : discard;
       max_msgs : int64 option;
+      max_msgs_per_subject : int64 option;
       max_bytes : int64 option;
       max_age : Mtime.Span.t option;
       max_msg_size : int64 option;
+      allow_rollup : bool;
+      allow_direct : bool;
     }
 
     type error = config_error
@@ -245,8 +254,9 @@ module Stream = struct
       | Some value -> Error (Error.Invalid_limit { field; value })
 
     let v_internal ~allow_empty_subjects ~name ~subjects ?(storage = File)
-        ?(retention = Limits) ?(discard = Old) ?max_msgs ?max_bytes ?max_age
-        ?max_msg_size () =
+        ?(retention = Limits) ?(discard = Old) ?max_msgs ?max_msgs_per_subject
+        ?max_bytes ?max_age ?max_msg_size ?(allow_rollup = false)
+        ?(allow_direct = false) () =
       let max_age =
         match max_age with
         | Some value when Int.equal (Mtime.Span.compare value Mtime.Span.zero) 0
@@ -266,31 +276,41 @@ module Stream = struct
               match validate_limit "max_bytes" max_bytes with
               | Error error -> Error error
               | Ok () -> (
-                  match validate_limit "max_msg_size" max_msg_size with
+                  match
+                    validate_limit "max_msgs_per_subject" max_msgs_per_subject
+                  with
                   | Error error -> Error error
                   | Ok () -> (
-                      match max_age with
-                      | Some value
-                        when Mtime.Span.compare value Mtime.Span.zero < 0 ->
-                          Error Error.Invalid_max_age
-                      | _ ->
-                          Ok
-                            {
-                              name;
-                              subjects;
-                              storage;
-                              retention;
-                              discard;
-                              max_msgs;
-                              max_bytes;
-                              max_age;
-                              max_msg_size;
-                            }))))
+                      match validate_limit "max_msg_size" max_msg_size with
+                      | Error error -> Error error
+                      | Ok () -> (
+                          match max_age with
+                          | Some value
+                            when Mtime.Span.compare value Mtime.Span.zero < 0 ->
+                              Error Error.Invalid_max_age
+                          | _ ->
+                              Ok
+                                {
+                                  name;
+                                  subjects;
+                                  storage;
+                                  retention;
+                                  discard;
+                                  max_msgs;
+                                  max_msgs_per_subject;
+                                  max_bytes;
+                                  max_age;
+                                  max_msg_size;
+                                  allow_rollup;
+                                  allow_direct;
+                                })))))
 
-    let v ~name ~subjects ?storage ?retention ?discard ?max_msgs ?max_bytes
-        ?max_age ?max_msg_size () =
+    let v ~name ~subjects ?storage ?retention ?discard ?max_msgs
+        ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size ?allow_rollup
+        ?allow_direct () =
       v_internal ~allow_empty_subjects:false ~name ~subjects ?storage ?retention
-        ?discard ?max_msgs ?max_bytes ?max_age ?max_msg_size ()
+        ?discard ?max_msgs ?max_msgs_per_subject ?max_bytes ?max_age
+        ?max_msg_size ?allow_rollup ?allow_direct ()
 
     let name value = value.name
     let subjects value = value.subjects
@@ -298,70 +318,124 @@ module Stream = struct
     let retention value = value.retention
     let discard value = value.discard
     let max_msgs value = value.max_msgs
+    let max_msgs_per_subject value = value.max_msgs_per_subject
     let max_bytes value = value.max_bytes
     let max_age value = value.max_age
     let max_msg_size value = value.max_msg_size
+    let allow_rollup value = value.allow_rollup
+    let allow_direct value = value.allow_direct
 
     let rebuild value ~name ~subjects ~storage ~retention ~discard ~max_msgs
-        ~max_bytes ~max_age ~max_msg_size =
+        ~max_msgs_per_subject ~max_bytes ~max_age ~max_msg_size ~allow_rollup
+        ~allow_direct =
       v_internal
         ~allow_empty_subjects:(Int.equal (List.length value.subjects) 0)
         ~name ~subjects ~storage ~retention ~discard ?max_msgs ?max_bytes
-        ?max_age ?max_msg_size ()
+        ?max_msgs_per_subject ?max_age ?max_msg_size ~allow_rollup ~allow_direct
+        ()
 
     let with_name value name =
       rebuild value ~name ~subjects:value.subjects ~storage:value.storage
         ~retention:value.retention ~discard:value.discard
-        ~max_msgs:value.max_msgs ~max_bytes:value.max_bytes
-        ~max_age:value.max_age ~max_msg_size:value.max_msg_size
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct
 
     let with_subjects value subjects =
       rebuild value ~name:value.name ~subjects ~storage:value.storage
         ~retention:value.retention ~discard:value.discard
-        ~max_msgs:value.max_msgs ~max_bytes:value.max_bytes
-        ~max_age:value.max_age ~max_msg_size:value.max_msg_size
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct
 
     let with_storage value storage =
       rebuild value ~name:value.name ~subjects:value.subjects ~storage
         ~retention:value.retention ~discard:value.discard
-        ~max_msgs:value.max_msgs ~max_bytes:value.max_bytes
-        ~max_age:value.max_age ~max_msg_size:value.max_msg_size
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct
 
     let with_retention value retention =
       rebuild value ~name:value.name ~subjects:value.subjects
         ~storage:value.storage ~retention ~discard:value.discard
-        ~max_msgs:value.max_msgs ~max_bytes:value.max_bytes
-        ~max_age:value.max_age ~max_msg_size:value.max_msg_size
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct
 
     let with_discard value discard =
       rebuild value ~name:value.name ~subjects:value.subjects
         ~storage:value.storage ~retention:value.retention ~discard
-        ~max_msgs:value.max_msgs ~max_bytes:value.max_bytes
-        ~max_age:value.max_age ~max_msg_size:value.max_msg_size
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct
 
     let with_max_msgs value max_msgs =
       rebuild value ~name:value.name ~subjects:value.subjects
         ~storage:value.storage ~retention:value.retention ~discard:value.discard
-        ~max_msgs ~max_bytes:value.max_bytes ~max_age:value.max_age
-        ~max_msg_size:value.max_msg_size
+        ~max_msgs ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct
 
     let with_max_bytes value max_bytes =
       rebuild value ~name:value.name ~subjects:value.subjects
         ~storage:value.storage ~retention:value.retention ~discard:value.discard
-        ~max_msgs:value.max_msgs ~max_bytes ~max_age:value.max_age
-        ~max_msg_size:value.max_msg_size
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject ~max_bytes
+        ~max_age:value.max_age ~max_msg_size:value.max_msg_size
+        ~allow_rollup:value.allow_rollup ~allow_direct:value.allow_direct
 
     let with_max_age value max_age =
       rebuild value ~name:value.name ~subjects:value.subjects
         ~storage:value.storage ~retention:value.retention ~discard:value.discard
-        ~max_msgs:value.max_msgs ~max_bytes:value.max_bytes ~max_age
-        ~max_msg_size:value.max_msg_size
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age ~max_msg_size:value.max_msg_size
+        ~allow_rollup:value.allow_rollup ~allow_direct:value.allow_direct
 
     let with_max_msg_size value max_msg_size =
       rebuild value ~name:value.name ~subjects:value.subjects
         ~storage:value.storage ~retention:value.retention ~discard:value.discard
-        ~max_msgs:value.max_msgs ~max_bytes:value.max_bytes
-        ~max_age:value.max_age ~max_msg_size
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age ~max_msg_size
+        ~allow_rollup:value.allow_rollup ~allow_direct:value.allow_direct
+
+    let with_max_msgs_per_subject value max_msgs_per_subject =
+      rebuild value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs ~max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct
+
+    let with_allow_rollup value allow_rollup =
+      rebuild value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup
+        ~allow_direct:value.allow_direct
+
+    let with_allow_direct value allow_direct =
+      rebuild value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct
   end
 
   module Info = struct
@@ -386,6 +460,22 @@ module Stream = struct
         (Config.name value.config) value.messages value.bytes
   end
 
+  module Message = struct
+    type t = {
+      subject : Nats.Subject.t;
+      sequence : int64;
+      timestamp : string;
+      headers : Nats.Header.t;
+      payload : string;
+    }
+
+    let subject value = value.subject
+    let sequence value = value.sequence
+    let timestamp value = value.timestamp
+    let headers value = value.headers
+    let payload value = value.payload
+  end
+
   type jetstream = t
   type t = { jetstream : jetstream; name : string }
 
@@ -396,9 +486,12 @@ module Stream = struct
     retention : Config.retention;
     discard : Config.discard;
     max_msgs : int64 option;
+    max_msgs_per_subject : int64 option;
     max_bytes : int64 option;
     max_age : int64 option;
     max_msg_size : int64 option;
+    allow_rollup : bool;
+    allow_direct : bool;
     unknown : Jsont.json;
   }
 
@@ -424,9 +517,12 @@ module Stream = struct
         retention
         discard
         max_msgs
+        max_msgs_per_subject
         max_bytes
         max_age
         max_msg_size
+        allow_rollup
+        allow_direct
         unknown
       ->
         {
@@ -436,9 +532,12 @@ module Stream = struct
           retention;
           discard;
           max_msgs;
+          max_msgs_per_subject;
           max_bytes;
           max_age;
           max_msg_size;
+          allow_rollup = Option.value ~default:false allow_rollup;
+          allow_direct = Option.value ~default:false allow_direct;
           unknown;
         })
     |> Jsont.Object.mem "name" Jsont.string ~enc:(fun value -> value.name)
@@ -453,12 +552,18 @@ module Stream = struct
         value.discard)
     |> Jsont.Object.opt_mem "max_msgs" Jsont.int64 ~enc:(fun value ->
         value.max_msgs)
+    |> Jsont.Object.opt_mem "max_msgs_per_subject" Jsont.int64
+         ~enc:(fun value -> value.max_msgs_per_subject)
     |> Jsont.Object.opt_mem "max_bytes" Jsont.int64 ~enc:(fun value ->
         value.max_bytes)
     |> Jsont.Object.opt_mem "max_age" Jsont.int64 ~enc:(fun value ->
         value.max_age)
     |> Jsont.Object.opt_mem "max_msg_size" Jsont.int64 ~enc:(fun value ->
         value.max_msg_size)
+    |> Jsont.Object.opt_mem "allow_rollup_hdrs" Jsont.bool ~enc:(fun value ->
+        Some value.allow_rollup)
+    |> Jsont.Object.opt_mem "allow_direct" Jsont.bool ~enc:(fun value ->
+        Some value.allow_direct)
     |> Jsont.Object.keep_unknown
          ~enc:(fun value -> value.unknown)
          Jsont.json_mems
@@ -554,9 +659,12 @@ module Stream = struct
       retention = Config.retention value;
       discard = Config.discard value;
       max_msgs = Config.max_msgs value;
+      max_msgs_per_subject = Config.max_msgs_per_subject value;
       max_bytes = Config.max_bytes value;
       max_age = Option.map Mtime.Span.to_uint64_ns (Config.max_age value);
       max_msg_size = Config.max_msg_size value;
+      allow_rollup = Config.allow_rollup value;
+      allow_direct = Config.allow_direct value;
       unknown = Jsont.Json.object' [];
     }
 
@@ -573,6 +681,8 @@ module Stream = struct
       retention = Config.retention value;
       discard = Config.discard value;
       max_msgs = Some (Option.value ~default:(-1L) (Config.max_msgs value));
+      max_msgs_per_subject =
+        Some (Option.value ~default:(-1L) (Config.max_msgs_per_subject value));
       max_bytes = Some (Option.value ~default:(-1L) (Config.max_bytes value));
       max_age =
         Some
@@ -580,6 +690,8 @@ module Stream = struct
              (Option.map Mtime.Span.to_uint64_ns (Config.max_age value)));
       max_msg_size =
         Some (Option.value ~default:(-1L) (Config.max_msg_size value));
+      allow_rollup = Config.allow_rollup value;
+      allow_direct = Config.allow_direct value;
     }
 
   let config_of_wire value =
@@ -604,6 +716,11 @@ module Stream = struct
         let max_bytes =
           match value.max_bytes with Some -1L -> None | value -> value
         in
+        let max_msgs_per_subject =
+          match value.max_msgs_per_subject with
+          | Some -1L -> None
+          | value -> value
+        in
         let max_msg_size =
           match value.max_msg_size with Some -1L -> None | value -> value
         in
@@ -615,8 +732,9 @@ module Stream = struct
         match
           Config.v_internal ~allow_empty_subjects:true ~name:value.name
             ~subjects ~storage:value.storage ~retention:value.retention
-            ~discard:value.discard ?max_msgs ?max_bytes ?max_age ?max_msg_size
-            ()
+            ~discard:value.discard ?max_msgs ?max_msgs_per_subject ?max_bytes
+            ?max_age ?max_msg_size ~allow_rollup:value.allow_rollup
+            ~allow_direct:value.allow_direct ()
         with
         | Ok config -> Ok config
         | Error error -> Error (Error.Invalid_config error))
@@ -731,6 +849,88 @@ module Stream = struct
                       | Ok response ->
                           info_of_response ~expected_name:stream.name response))
               ))
+
+  type message_get_request = { sequence : int64 }
+
+  let message_get_request_codec =
+    Jsont.Object.map ~kind:"JetStream direct message request" (fun sequence ->
+        { sequence })
+    |> Jsont.Object.mem "seq" Jsont.int64 ~enc:(fun value -> value.sequence)
+    |> Jsont.Object.finish
+
+  let message_header message name =
+    match Nats.Header.find name (Nats.Message.headers message) with
+    | Some value -> Ok value
+    | None -> Error (Error.Missing_field name)
+
+  let message_sequence value =
+    match Int64.of_string_opt value with
+    | Some sequence when Int64.compare sequence 0L >= 0 -> Ok sequence
+    | _ -> Error (Error.Invalid_message_header { name = "JSSequence"; value })
+
+  let stored_message (stream : t) message =
+    let headers = Nats.Message.headers message in
+    if
+      Nats.Header.is_empty headers
+      && String.equal (Nats.Message.payload message) ""
+    then Error Error.Message_not_found
+    else
+      let ( let* ) value f =
+        match value with Error error -> Error error | Ok value -> f value
+      in
+      let* response_stream = message_header message "JSStream" in
+      if not (String.equal response_stream stream.name) then
+        Error
+          (Error.Unexpected_stream_name
+             { expected = stream.name; actual = response_stream })
+      else
+        let* sequence_header = message_header message "JSSequence" in
+        let* sequence = message_sequence sequence_header in
+        let* subject_header = message_header message "JSSubject" in
+        let* subject =
+          match Nats.Subject.of_string subject_header with
+          | Ok subject -> Ok subject
+          | Error error -> Error (Error.Invalid_subject error)
+        in
+        let* timestamp = message_header message "JSTimeStamp" in
+        Ok
+          {
+            Message.subject;
+            sequence;
+            timestamp;
+            headers;
+            payload = Nats.Message.payload message;
+          }
+
+  let get ?timeout stream ~sequence =
+    if Int64.compare sequence 0L < 0 then
+      Error
+        (Error.Invalid_message_header
+           { name = "JSSequence"; value = Int64.to_string sequence })
+    else
+      match encode message_get_request_codec { sequence } with
+      | Error error -> Error error
+      | Ok payload -> (
+          let subject =
+            api_subject stream.jetstream [ "DIRECT"; "GET"; stream.name ]
+          in
+          match
+            request_msg ?timeout stream.jetstream
+              (Nats.Message.v ~subject payload)
+          with
+          | Error error -> Error error
+          | Ok message -> stored_message stream message)
+
+  let get_last ?timeout stream ~subject =
+    let subject =
+      api_subject stream.jetstream
+        [ "DIRECT"; "GET"; stream.name; Nats.Subject.to_string subject ]
+    in
+    match
+      request_msg ?timeout stream.jetstream (Nats.Message.v ~subject "")
+    with
+    | Error error -> Error error
+    | Ok message -> stored_message stream message
 
   let list ?subject jetstream =
     let offset = ref 0 in
@@ -2710,9 +2910,7 @@ module Consumer = struct
       match ordered.state with
       | Open ->
           ordered.state <- Failed error;
-          Option.iter
-            (fun pull -> ignore (Pull.close pull))
-            ordered.pull;
+          Option.iter (fun pull -> ignore (Pull.close pull)) ordered.pull;
           ordered.pull <- None
       | Closed | Failed _ -> ()
 
@@ -2762,8 +2960,8 @@ module Consumer = struct
       in
       match
         Config.v ~deliver_policy ~ack_policy:Config.No_ack
-          ?filter_subject:ordered.filter_subject
-          ~inactive_threshold ~mem_storage:true ()
+          ?filter_subject:ordered.filter_subject ~inactive_threshold
+          ~mem_storage:true ()
       with
       | Ok config -> Ok config
       | Error error -> Error (Error.Invalid_config error)
@@ -2838,8 +3036,7 @@ module Consumer = struct
       | Some deadline -> (
           match remaining_timeout ordered (Some deadline) with
           | Error error -> Error error
-          | Ok (Some timeout) ->
-              Pull.next_with_timeout ~timeout pull
+          | Ok (Some timeout) -> Pull.next_with_timeout ~timeout pull
           | Ok None -> assert false)
 
     let next_loop ordered ~deadline =
@@ -2869,7 +3066,8 @@ module Consumer = struct
                 | Error error when recoverable error -> (
                     match recreate ordered ~deadline with
                     | Ok () -> ()
-                    | Error recreate_error -> result := Some (Error recreate_error))
+                    | Error recreate_error ->
+                        result := Some (Error recreate_error))
                 | Error error ->
                     if not (timed_out error) then fail ordered error;
                     result := Some (Error error)))
@@ -2879,7 +3077,7 @@ module Consumer = struct
     let close ordered =
       match ordered.state with
       | Closed -> Ok ()
-      | Open | Failed _ ->
+      | Open | Failed _ -> (
           ordered.state <- Closed;
           Option.iter
             (fun hook -> ignore (Eio.Switch.try_remove_hook hook))
@@ -2899,10 +3097,12 @@ module Consumer = struct
                 ordered.consumer <- None;
                 delete consumer
           in
-          (match pull_result with Error error -> Error error | Ok () -> delete_result)
+          match pull_result with
+          | Error error -> Error error
+          | Ok () -> delete_result)
 
-    let v ~sw ?batch ?expires ?idle_heartbeat ?max_bytes ?(deliver_policy = Config.All)
-        ?filter_subject (stream : stream) =
+    let v ~sw ?batch ?expires ?idle_heartbeat ?max_bytes
+        ?(deliver_policy = Config.All) ?filter_subject (stream : stream) =
       let batch = Option.value batch ~default:1 in
       let expires = Option.value expires ~default:default_expires in
       let idle_heartbeat =
@@ -2913,7 +3113,7 @@ module Consumer = struct
           ~idle_heartbeat:(Some idle_heartbeat)
       with
       | Error error -> Error error
-      | Ok () ->
+      | Ok () -> (
           let ordered =
             {
               stream;
@@ -2941,7 +3141,7 @@ module Consumer = struct
                     Eio.Cancel.protect (fun () -> ignore (close ordered)))
               in
               ordered.hook <- Some hook;
-              Ok ordered
+              Ok ordered)
 
     let next ordered = next_loop ordered ~deadline:None
 
@@ -3048,7 +3248,6 @@ module Consumer = struct
                             else offset := next_offset))))
     done;
     match !result with Some result -> result | None -> assert false
-
 end
 
 module Publish_ack = struct
