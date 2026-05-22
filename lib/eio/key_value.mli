@@ -34,6 +34,9 @@ module Error : sig
     | Invalid_revision of int64
     | Invalid_headers of Nats.Header.error
     | Invalid_operation of string
+    | Invalid_filter of { value : string; reason : Nats.Subject.error }
+    | Invalid_message_subject of string
+    | Invalid_timestamp of int64
     | Key_not_found
     | Key_deleted of Entry.t
     | Key_exists
@@ -125,3 +128,30 @@ val get : t -> key:string -> (Entry.t, Error.t) result
 val get_revision :
   t -> key:string -> revision:int64 -> (Entry.t, Error.t) result
 (** [get_revision bucket ~key ~revision] returns one exact stream revision. *)
+
+type bucket = t
+
+module Watch : sig
+  type delivery = New | Last_per_subject | All
+  type event = Initial_done | Entry of Entry.t
+  type t
+
+  val v :
+    sw:Eio.Switch.t ->
+    ?key:string ->
+    ?delivery:delivery ->
+    ?ignore_deletes:bool ->
+    ?meta_only:bool ->
+    bucket ->
+    (t, Error.t) result
+  (** [v ~sw bucket] watches the bucket's latest value for every key. [key] may
+      be an exact key or a NATS filter suffix using [*] and [>]. The default
+      delivery policy is [Last_per_subject]; [New] starts with live updates and
+      [All] includes retained history. [Initial_done] is emitted once after the
+      initial retained set, before subsequent live entries. *)
+
+  val next : t -> (event, Error.t) result
+  val next_with_timeout : timeout:Mtime.Span.t -> t -> (event, Error.t) result
+  val iter : t -> f:(event -> unit) -> (unit, Error.t) result
+  val close : t -> (unit, Error.t) result
+end

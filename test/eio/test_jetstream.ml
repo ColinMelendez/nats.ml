@@ -875,6 +875,7 @@ let () =
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "push recreates an ephemeral consumer after reconnect" (fun () ->
           let info_response, info_response_u = Eio.Promise.create () in
+          let first_delivery, first_delivery_u = Eio.Promise.create () in
           let disconnect, disconnect_u = Eio.Promise.create () in
           let reconnect_info, reconnect_info_u = Eio.Promise.create () in
           let restore_info, restore_info_u = Eio.Promise.create () in
@@ -883,7 +884,12 @@ let () =
           let hold, hold_u = Eio.Promise.create () in
           with_reconnecting_connection_traced
             ~first_reads:
-              [ `Return info_wire; `Await info_response; `Await disconnect ]
+              [
+                `Return info_wire;
+                `Await info_response;
+                `Await first_delivery;
+                `Await disconnect;
+              ]
             ~second_reads:
               [
                 `Await reconnect_info;
@@ -902,6 +908,18 @@ let () =
               Eio.Promise.resolve info_response_u
                 (Ok (ephemeral_push_consumer_info_wire_with_sid ~sid:1));
               let push = expect_jetstream_ok (Eio.Promise.await push_result) in
+              let first_result, first_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.next push));
+              yield_n 5;
+              Eio.Promise.resolve first_delivery_u
+                (Ok (delivery_wire_with_sid ~sid:2 "before-reconnect"));
+              let first =
+                expect_jetstream_ok (Eio.Promise.await first_result)
+              in
+              equal string "before-reconnect"
+                (Nats_eio.Jetstream.Msg.payload first);
               let next_result, next_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve next_result_u
@@ -916,6 +934,17 @@ let () =
                 (Ok (consumer_not_found_wire ~sid:3));
               wait_for_trace ~clock ~trace
                 ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS" ~count:1;
+              if
+                not
+                  (contains_substring
+                     ~needle:"deliver_policy\\\":\\\"by_start_sequence"
+                     (Buffer.contents trace))
+              then fail "ephemeral push did not resume by stream sequence";
+              if
+                not
+                  (contains_substring ~needle:"opt_start_seq\\\":2"
+                     (Buffer.contents trace))
+              then fail "ephemeral push resumed from the wrong sequence";
               Eio.Promise.resolve create_response_u
                 (Ok (ephemeral_push_create_wire_with_sid ~sid:4));
               Eio.Promise.resolve delivery_u

@@ -23,6 +23,38 @@ let response_wire ~sid payload =
   in
   operation_wire (Nats.Op.Msg { sid; message })
 
+let consumer_response_wire ~sid ~policy ~num_pending =
+  response_wire ~sid
+    (Format.asprintf
+       "{\"stream_name\":\"KV_users\",\"name\":\"watch\",\"config\":{\"deliver_subject\":\"_INBOX.watch\",\"deliver_policy\":\"%s\",\"ack_policy\":\"none\",\"replay_policy\":\"instant\"},\"num_pending\":%Ld}"
+       policy num_pending)
+
+let watch_delivery_wire ~sid ~stream_sequence ~consumer_sequence ~num_pending
+    ?operation payload =
+  let reply_to =
+    Format.asprintf "$JS.ACK.KV_users.watch.1.%Ld.%Ld.1710000000000000000.%Ld"
+      stream_sequence consumer_sequence num_pending
+  in
+  let subject = Nats.Subject.literal "$KV.users.name" in
+  let message =
+    match operation with
+    | None ->
+        Nats.Message.v ~subject
+          ~reply_to:(Nats.Subject.literal reply_to)
+          payload
+    | Some operation ->
+        let headers =
+          match Nats.Header.of_list [ ("KV-Operation", operation) ] with
+          | Ok headers -> headers
+          | Error error ->
+              fail (Format.asprintf "%a" Nats.Header.pp_error error)
+        in
+        Nats.Message.v ~subject
+          ~reply_to:(Nats.Subject.literal reply_to)
+          ~headers payload
+  in
+  operation_wire (Nats.Op.Hmsg { sid; message; status = None })
+
 let api_error_wire ~sid ~err_code =
   response_wire ~sid
     (Format.asprintf
@@ -73,6 +105,52 @@ let with_connection ~reads f =
     | Error error -> fail (Format.asprintf "%a" Nats_eio.Error.pp error)
   in
   f ~sw connection
+
+let with_connection_traced ~reads f =
+  Eio_mock.Backend.run_full @@ fun env ->
+  let flow = Eio_mock.Flow.make "key-value-server" in
+  Eio_mock.Flow.on_read flow reads;
+  let net = Eio_mock.Net.make "key-value-network" in
+  Eio_mock.Net.on_getaddrinfo net (List.init 16 (fun _ -> `Return [ address ]));
+  Eio_mock.Net.on_connect net [ `Return flow ];
+  let trace = Buffer.create 4096 in
+  let debug = Eio.Stdenv.debug env in
+  let tracer =
+    {
+      Eio.Debug.traceln =
+        (fun ?__POS__:_ fmt ->
+          Format.kasprintf
+            (fun message ->
+              Buffer.add_string trace message;
+              Buffer.add_char trace '\n')
+            fmt);
+    }
+  in
+  Eio.Fiber.with_binding debug#traceln tracer @@ fun () ->
+  Eio.Switch.run @@ fun sw ->
+  let connection =
+    match
+      Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock [ endpoint ]
+    with
+    | Ok value -> value
+    | Error error -> fail (Format.asprintf "%a" Nats_eio.Error.pp error)
+  in
+  f ~sw ~trace connection
+
+let index_substring ~needle value =
+  let needle_length = String.length needle in
+  let limit = String.length value - needle_length in
+  let index = ref 0 in
+  let found = ref None in
+  while Option.is_none !found && !index <= limit do
+    if String.equal (String.sub value !index needle_length) needle then
+      found := Some !index;
+    incr index
+  done;
+  !found
+
+let contains_substring ~needle value =
+  Option.is_some (index_substring ~needle value)
 
 let rec yield_n count =
   if count <= 0 then ()
@@ -289,6 +367,211 @@ let () =
                   fail
                     (Format.asprintf "unexpected tombstone result: %a"
                        Nats_eio.Key_value.Error.pp error));
+              (match Nats_eio.Connection.close connection with
+              | Ok () -> ()
+              | Error error ->
+                  fail (Format.asprintf "%a" Nats_eio.Error.pp error));
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "watch orders the initial marker before live entries" (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let info_response, info_response_u = Eio.Promise.create () in
+          let initial_delivery, initial_delivery_u = Eio.Promise.create () in
+          let live_delivery, live_delivery_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await info_response;
+                `Await initial_delivery;
+                `Await live_delivery;
+                `Await delete_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_key_value
+                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+              in
+              let watch_result, watch_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve watch_result_u
+                    (Nats_eio.Key_value.Watch.v ~sw bucket));
+              yield_n 5;
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (consumer_response_wire ~sid:2 ~policy:"last_per_subject"
+                      ~num_pending:1L));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u
+                (Ok
+                   (consumer_response_wire ~sid:3 ~policy:"last_per_subject"
+                      ~num_pending:1L));
+              let watch = expect_key_value (Eio.Promise.await watch_result) in
+              let trace_output = Buffer.contents trace in
+              (match
+                 ( index_substring ~needle:"SUB _INBOX" trace_output,
+                   index_substring
+                     ~needle:"PUB $JS.API.CONSUMER.CREATE.KV_users" trace_output
+                 )
+               with
+              | Some subscribe, Some create
+                when Int.compare subscribe create < 0 ->
+                  ()
+              | _ -> fail "watch created its consumer before subscribing");
+              let first_result, first_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_result_u
+                    (Nats_eio.Key_value.Watch.next watch));
+              yield_n 5;
+              Eio.Promise.resolve initial_delivery_u
+                (Ok
+                   (watch_delivery_wire ~sid:1 ~stream_sequence:7L
+                      ~consumer_sequence:1L ~num_pending:0L "alice"));
+              (match Eio.Promise.await first_result with
+              | Ok (Nats_eio.Key_value.Watch.Entry entry) ->
+                  equal string "alice" (Nats_eio.Key_value.Entry.value entry);
+                  equal int64 7L (Nats_eio.Key_value.Entry.revision entry);
+                  equal string "2024-03-09T16:00:00.000000000Z"
+                    (Nats_eio.Key_value.Entry.timestamp entry)
+              | Ok Nats_eio.Key_value.Watch.Initial_done ->
+                  fail "watch emitted Initial_done before the initial entry"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected initial watch error: %a"
+                       Nats_eio.Key_value.Error.pp error));
+              (match Nats_eio.Key_value.Watch.next watch with
+              | Ok Nats_eio.Key_value.Watch.Initial_done -> ()
+              | Ok (Nats_eio.Key_value.Watch.Entry _) ->
+                  fail "watch omitted Initial_done"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected marker error: %a"
+                       Nats_eio.Key_value.Error.pp error));
+              let live_result, live_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve live_result_u
+                    (Nats_eio.Key_value.Watch.next watch));
+              yield_n 5;
+              Eio.Promise.resolve live_delivery_u
+                (Ok
+                   (watch_delivery_wire ~sid:1 ~stream_sequence:8L
+                      ~consumer_sequence:2L ~num_pending:0L "bob"));
+              (match Eio.Promise.await live_result with
+              | Ok (Nats_eio.Key_value.Watch.Entry entry) ->
+                  equal string "bob" (Nats_eio.Key_value.Entry.value entry)
+              | Ok Nats_eio.Key_value.Watch.Initial_done ->
+                  fail "watch emitted Initial_done more than once"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected live watch error: %a"
+                       Nats_eio.Key_value.Error.pp error));
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Key_value.Watch.close watch));
+              yield_n 5;
+              Eio.Promise.resolve delete_response_u
+                (Ok (response_wire ~sid:4 "{}"));
+              (match Eio.Promise.await close_result with
+              | Ok () -> ()
+              | Error error ->
+                  fail
+                    (Format.asprintf "watch close failed: %a\n%s"
+                       Nats_eio.Key_value.Error.pp error (Buffer.contents trace)));
+              if
+                not
+                  (contains_substring
+                     ~needle:"PUB $JS.API.CONSUMER.DELETE.KV_users.watch"
+                     (Buffer.contents trace))
+              then fail "watch close did not delete its owned consumer";
+              (match Nats_eio.Connection.close connection with
+              | Ok () -> ()
+              | Error error ->
+                  fail (Format.asprintf "%a" Nats_eio.Error.pp error));
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "new watch emits Initial_done before its first update" (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let info_response, info_response_u = Eio.Promise.create () in
+          let delivery, delivery_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await info_response;
+                `Await delivery;
+                `Await delete_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_key_value
+                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+              in
+              let watch_result, watch_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve watch_result_u
+                    (Nats_eio.Key_value.Watch.v ~sw
+                       ~delivery:Nats_eio.Key_value.Watch.New bucket));
+              yield_n 5;
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (consumer_response_wire ~sid:2 ~policy:"new" ~num_pending:0L));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u
+                (Ok
+                   (consumer_response_wire ~sid:3 ~policy:"new" ~num_pending:0L));
+              let watch = expect_key_value (Eio.Promise.await watch_result) in
+              (match Nats_eio.Key_value.Watch.next watch with
+              | Ok Nats_eio.Key_value.Watch.Initial_done -> ()
+              | Ok (Nats_eio.Key_value.Watch.Entry _) ->
+                  fail "new watch returned an entry before Initial_done"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected new-watch marker error: %a"
+                       Nats_eio.Key_value.Error.pp error));
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Key_value.Watch.next watch));
+              yield_n 5;
+              Eio.Promise.resolve delivery_u
+                (Ok
+                   (watch_delivery_wire ~sid:1 ~stream_sequence:9L
+                      ~consumer_sequence:1L ~num_pending:0L "carol"));
+              (match Eio.Promise.await result with
+              | Ok (Nats_eio.Key_value.Watch.Entry entry) ->
+                  equal string "carol" (Nats_eio.Key_value.Entry.value entry)
+              | Ok Nats_eio.Key_value.Watch.Initial_done ->
+                  fail "new watch emitted the marker twice"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected new-watch error: %a"
+                       Nats_eio.Key_value.Error.pp error));
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Key_value.Watch.close watch));
+              yield_n 5;
+              Eio.Promise.resolve delete_response_u
+                (Ok (response_wire ~sid:4 "{}"));
+              (match Eio.Promise.await close_result with
+              | Ok () -> ()
+              | Error error ->
+                  fail
+                    (Format.asprintf "new watch close failed: %a\n%s"
+                       Nats_eio.Key_value.Error.pp error (Buffer.contents trace)));
               (match Nats_eio.Connection.close connection with
               | Ok () -> ()
               | Error error ->

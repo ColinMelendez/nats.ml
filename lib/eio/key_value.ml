@@ -46,6 +46,9 @@ module Error = struct
     | Invalid_revision of int64
     | Invalid_headers of Nats.Header.error
     | Invalid_operation of string
+    | Invalid_filter of { value : string; reason : Nats.Subject.error }
+    | Invalid_message_subject of string
+    | Invalid_timestamp of int64
     | Key_not_found
     | Key_deleted of Entry.t
     | Key_exists
@@ -90,6 +93,13 @@ module Error = struct
           error
     | Invalid_operation value ->
         Format.fprintf ppf "invalid key-value operation %S" value
+    | Invalid_filter { value; reason } ->
+        Format.fprintf ppf "invalid key-value watch filter %S: %a" value
+          Nats.Subject.pp_error reason
+    | Invalid_message_subject value ->
+        Format.fprintf ppf "unexpected key-value message subject %S" value
+    | Invalid_timestamp value ->
+        Format.fprintf ppf "invalid JetStream message timestamp %Ld" value
     | Key_not_found -> Format.pp_print_string ppf "key was not found"
     | Key_deleted entry ->
         Format.fprintf ppf "key %S was deleted at revision %Ld"
@@ -525,3 +535,254 @@ let purge ?expected_revision value ~key =
           match expected_revision with
           | Some expected -> map_cas_error ~expected error
           | None -> Error error))
+
+type bucket = t
+
+module Watch = struct
+  type delivery = New | Last_per_subject | All
+  type event = Initial_done | Entry of Entry.t
+  type initial = Before | Marker_pending | Live
+  type state = Open | Closed | Failed of Error.t
+
+  type t = {
+    bucket : bucket;
+    push : Jetstream.Consumer.Push.t;
+    ignore_deletes : bool;
+    mutable initial : initial;
+    mutable state : state;
+  }
+
+  let map_error = function
+    | Jetstream.Error.Connection error -> Error.Connection error
+    | Jetstream.Error.Push_closed -> Error.Closed
+    | error -> Error.Jetstream error
+
+  let fail watch error =
+    match watch.state with
+    | Open ->
+        watch.state <- Failed error;
+        ignore (Jetstream.Consumer.Push.close watch.push)
+    | Closed | Failed _ -> ()
+
+  let timestamp_of_nanoseconds value =
+    let billion = 1_000_000_000L in
+    let seconds = Int64.div value billion in
+    let fraction = Int64.rem value billion in
+    let seconds, fraction =
+      if Int64.compare fraction 0L < 0 then
+        (Int64.sub seconds 1L, Int64.add fraction billion)
+      else (seconds, fraction)
+    in
+    try
+      let time = Unix.gmtime (Int64.to_float seconds) in
+      Ok
+        (Format.asprintf "%04d-%02d-%02dT%02d:%02d:%02d.%09LdZ"
+           (time.Unix.tm_year + 1900) (time.Unix.tm_mon + 1) time.Unix.tm_mday
+           time.Unix.tm_hour time.Unix.tm_min time.Unix.tm_sec fraction)
+    with Unix.Unix_error _ | Invalid_argument _ ->
+      Error (Error.Invalid_timestamp value)
+
+  let entry_of_message watch message =
+    let subject = Nats.Subject.to_string (Jetstream.Msg.subject message) in
+    let prefix = "$KV." ^ watch.bucket.bucket ^ "." in
+    let prefix_length = String.length prefix in
+    if
+      String.length subject <= prefix_length
+      || not (String.equal prefix (String.sub subject 0 prefix_length))
+    then Error (Error.Invalid_message_subject subject)
+    else
+      let key =
+        String.sub subject prefix_length (String.length subject - prefix_length)
+      in
+      match validate_key key with
+      | Error reason -> key_error key reason
+      | Ok () -> (
+          match operation_of_headers (Jetstream.Msg.headers message) with
+          | Error error -> Error error
+          | Ok operation -> (
+              match
+                timestamp_of_nanoseconds (Jetstream.Msg.timestamp message)
+              with
+              | Error error -> Error error
+              | Ok timestamp ->
+                  Ok
+                    {
+                      Entry.bucket = watch.bucket.bucket;
+                      key;
+                      value = Jetstream.Msg.payload message;
+                      revision = Jetstream.Msg.stream_sequence message;
+                      timestamp;
+                      operation;
+                    }))
+
+  let update_initial watch message =
+    match watch.initial with
+    | Before when Int64.equal (Jetstream.Msg.num_pending message) 0L ->
+        watch.initial <- Marker_pending
+    | Before | Marker_pending | Live -> ()
+
+  let allowed_watch_token token =
+    String.equal token "*" || String.equal token ">"
+
+  let watch_filter (value : bucket) key =
+    let pattern = Option.value key ~default:">" in
+    let subject = "$KV." ^ value.bucket ^ "." ^ pattern in
+    match Nats.Subject.Filter.of_string subject with
+    | Error reason -> Error (Error.Invalid_filter { value = pattern; reason })
+    | Ok filter -> (
+        let tokens = String.split_on_char '.' pattern in
+        let invalid = ref None in
+        List.iter
+          (fun token ->
+            match !invalid with
+            | Some _ -> ()
+            | None when allowed_watch_token token -> ()
+            | None -> (
+                match validate_key token with
+                | Ok () -> ()
+                | Error reason ->
+                    invalid :=
+                      Some (Error.Invalid_key { value = pattern; reason })))
+          tokens;
+        match !invalid with None -> Ok filter | Some error -> Error error)
+
+  let config (value : bucket) ~filter ~delivery ~meta_only =
+    let deliver_subject =
+      Connection.fresh_inbox (Jetstream.connection value.jetstream)
+    in
+    let deliver_policy =
+      match delivery with
+      | New -> Jetstream.Consumer.Config.New
+      | Last_per_subject -> Jetstream.Consumer.Config.Last_per_subject
+      | All -> Jetstream.Consumer.Config.All
+    in
+    let make ?headers_only () =
+      Jetstream.Consumer.Config.v ~deliver_subject
+        ~idle_heartbeat:Mtime.Span.(5 * s)
+        ~flow_control:true ~deliver_policy
+        ~ack_policy:Jetstream.Consumer.Config.No_ack ~filter_subject:filter
+        ~inactive_threshold:Mtime.Span.(5 * min)
+        ~mem_storage:true ?headers_only ()
+    in
+    match meta_only with true -> make ~headers_only:true () | false -> make ()
+
+  let initial_state delivery info =
+    match delivery with
+    | New -> Marker_pending
+    | Last_per_subject | All ->
+        if Int64.equal (Jetstream.Consumer.Info.num_pending info) 0L then
+          Marker_pending
+        else Before
+
+  let v ~sw ?key ?(delivery = Last_per_subject) ?(ignore_deletes = false)
+      ?(meta_only = false) (value : bucket) =
+    match watch_filter value key with
+    | Error error -> Error error
+    | Ok filter -> (
+        match config value ~filter ~delivery ~meta_only with
+        | Error error ->
+            Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
+        | Ok config -> (
+            match Jetstream.Consumer.Push.create ~sw value.stream config with
+            | Error error -> Error (map_error error)
+            | Ok push -> (
+                match
+                  Jetstream.Consumer.info
+                    (Jetstream.Consumer.Push.consumer push)
+                with
+                | Error error ->
+                    ignore (Jetstream.Consumer.Push.close push);
+                    Error (map_error error)
+                | Ok info ->
+                    Ok
+                      {
+                        bucket = value;
+                        push;
+                        ignore_deletes;
+                        initial = initial_state delivery info;
+                        state = Open;
+                      })))
+
+  let next_loop watch deadline =
+    let result = ref None in
+    let pull () =
+      match deadline with
+      | None -> Jetstream.Consumer.Push.next watch.push
+      | Some deadline ->
+          let connection = Jetstream.connection watch.bucket.jetstream in
+          let now = Connection.now connection in
+          if Mtime.compare now deadline >= 0 then
+            Error (Jetstream.Error.Connection Core_error.Timeout)
+          else
+            Jetstream.Consumer.Push.next_with_timeout
+              ~timeout:(Mtime.span now deadline) watch.push
+    in
+    while Option.is_none !result do
+      match watch.state with
+      | Closed -> result := Some (Error Error.Closed)
+      | Failed error -> result := Some (Error error)
+      | Open -> (
+          match watch.initial with
+          | Marker_pending ->
+              watch.initial <- Live;
+              result := Some (Ok Initial_done)
+          | Before | Live -> (
+              match pull () with
+              | Error error ->
+                  let error = map_error error in
+                  (match error with
+                  | Error.Connection Core_error.Timeout -> ()
+                  | Error.Closed -> watch.state <- Closed
+                  | _ -> fail watch error);
+                  result := Some (Error error)
+              | Ok message -> (
+                  match entry_of_message watch message with
+                  | Error error ->
+                      fail watch error;
+                      result := Some (Error error)
+                  | Ok entry ->
+                      update_initial watch message;
+                      if
+                        watch.ignore_deletes
+                        &&
+                        match Entry.operation entry with
+                        | Entry.Delete | Entry.Purge -> true
+                        | Entry.Put -> false
+                      then ()
+                      else result := Some (Ok (Entry entry)))))
+    done;
+    match !result with Some result -> result | None -> assert false
+
+  let next watch = next_loop watch None
+
+  let next_with_timeout ~timeout watch =
+    if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then
+      Error (Error.Connection (Core_error.Invalid_timeout "watch"))
+    else
+      let connection = Jetstream.connection watch.bucket.jetstream in
+      let deadline =
+        match Mtime.add_span (Connection.now connection) timeout with
+        | Some deadline -> deadline
+        | None -> Mtime.max_stamp
+      in
+      next_loop watch (Some deadline)
+
+  let iter watch ~f =
+    let result = ref None in
+    while Option.is_none !result do
+      match next watch with
+      | Ok event -> f event
+      | Error Error.Closed -> result := Some (Ok ())
+      | Error error -> result := Some (Error error)
+    done;
+    match !result with Some result -> result | None -> assert false
+
+  let close watch =
+    match watch.state with
+    | Closed -> Ok ()
+    | Open | Failed _ -> (
+        watch.state <- Closed;
+        match Jetstream.Consumer.Push.close watch.push with
+        | Ok () -> Ok ()
+        | Error error -> Error (map_error error))
+end
