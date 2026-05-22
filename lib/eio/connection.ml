@@ -226,8 +226,10 @@ type subscription_drain_waiter = {
 }
 
 module Subscription = struct
-  type item = Message of delivery | Done of Error.t
+  type item = Message of delivery | Recovery | Done of Error.t
   and delivery = { message : Nats.Message.t; status : Nats.Op.status option }
+  type recovery = Detached of int | Attached of int
+  type next = Delivery of delivery | Recovery
 
   type t = {
     sid : int;
@@ -240,6 +242,10 @@ module Subscription = struct
     mutable drain_promise : (unit, Error.t) result Eio.Promise.t option;
     mutable drain_resolver : (unit, Error.t) result Eio.Promise.u option;
     mutable drain_result : (unit, Error.t) result option;
+    mutable recovery : recovery;
+    mutable recovery_queued : bool;
+    mutable recovery_signal : unit Eio.Promise.t;
+    mutable recovery_signal_u : unit Eio.Promise.u;
     unsubscribe_request : unit -> (unit, Error.t) result;
     auto_unsubscribe_request : max_messages:int -> (unit, Error.t) result;
     replay_on_reconnect : bool;
@@ -254,10 +260,12 @@ module Subscription = struct
 
   let create ~sid ~capacity ~unsubscribe_request ~auto_unsubscribe_request
       ~replay_on_reconnect ~drain_request ~cancel_drain_request ~wait =
+    let recovery_signal, recovery_signal_u = Eio.Promise.create () in
     {
       sid;
       queue =
-        Eio.Stream.create (if capacity = max_int then max_int else capacity + 1);
+        Eio.Stream.create
+          (if capacity >= max_int - 2 then max_int else capacity + 2);
       capacity;
       terminal = None;
       done_seen = false;
@@ -266,6 +274,10 @@ module Subscription = struct
       drain_promise = None;
       drain_resolver = None;
       drain_result = None;
+      recovery = Attached 0;
+      recovery_queued = false;
+      recovery_signal;
+      recovery_signal_u;
       unsubscribe_request;
       auto_unsubscribe_request;
       replay_on_reconnect;
@@ -276,6 +288,46 @@ module Subscription = struct
 
   let sid t = t.sid
   let replay_on_reconnect t = t.replay_on_reconnect
+  let recovery t = t.recovery
+
+  let equal_recovery first second =
+    match (first, second) with
+    | Detached first, Detached second | Attached first, Attached second ->
+        Int.equal first second
+    | Detached _, Attached _ | Attached _, Detached _ -> false
+
+  let signal_recovery t =
+    let signal = t.recovery_signal_u in
+    let next_signal, next_signal_u = Eio.Promise.create () in
+    t.recovery_signal <- next_signal;
+    t.recovery_signal_u <- next_signal_u;
+    Eio.Promise.resolve signal ()
+
+  let queue_recovery t =
+    if (not t.recovery_queued) && Option.is_none t.terminal then (
+      t.recovery_queued <- true;
+      Eio.Stream.add t.queue Recovery)
+
+  let set_recovery t recovery =
+    if not (equal_recovery t.recovery recovery) then (
+      t.recovery <- recovery;
+      signal_recovery t)
+
+  let detach t =
+    match t.recovery with
+    | Attached generation ->
+        set_recovery t (Detached generation);
+        queue_recovery t
+    | Detached _ -> ()
+
+  let next_generation generation =
+    if Int.equal generation max_int then max_int else generation + 1
+
+  let attach t =
+    match t.recovery with
+    | Detached generation ->
+        set_recovery t (Attached (next_generation generation))
+    | Attached _ -> ()
 
   let push t (delivery : delivery) =
     if (not t.active) || Option.is_some t.terminal then false
@@ -322,14 +374,16 @@ module Subscription = struct
     t.active <- false;
     if Option.is_none t.terminal then (
       t.terminal <- Some error;
-      Eio.Stream.add t.queue (Done error));
+      Eio.Stream.add t.queue (Done error);
+      signal_recovery t);
     fail_pending_drain t error
 
   let terminate_for_drain t =
     t.active <- false;
     if Option.is_none t.terminal then (
       t.terminal <- Some Error.Closed;
-      Eio.Stream.add t.queue (Done Error.Closed));
+      Eio.Stream.add t.queue (Done Error.Closed);
+      signal_recovery t);
     match t.drain_waiter with
     | None -> ()
     | Some waiter ->
@@ -339,27 +393,80 @@ module Subscription = struct
   let terminal_error t =
     match t.terminal with Some error -> Error error | None -> assert false
 
-  let handle_item t = function
-    | Message delivery -> Ok delivery
-    | Done error ->
-        t.done_seen <- true;
-        (match t.drain_waiter with
-        | None -> ()
-        | Some waiter ->
-            waiter.done_seen <- true;
-            if waiter.server_flushed then complete_drain t waiter (Ok ()));
-        Error error
+  let mark_done t error =
+    t.done_seen <- true;
+    (match t.drain_waiter with
+    | None -> ()
+    | Some waiter ->
+        waiter.done_seen <- true;
+        if waiter.server_flushed then complete_drain t waiter (Ok ()))
 
-  let next t =
+  let rec next t =
     if t.done_seen then terminal_error t
-    else handle_item t (Eio.Stream.take t.queue)
+    else
+      match Eio.Stream.take t.queue with
+      | Message delivery -> Ok delivery
+      | Recovery ->
+          t.recovery_queued <- false;
+          next t
+      | Done error ->
+          mark_done t error;
+          Error error
 
-  let next_nonblocking t =
+  let rec next_nonblocking t =
     if t.done_seen then Some (terminal_error t)
     else
       match Eio.Stream.take_nonblocking t.queue with
       | None -> None
-      | Some item -> Some (handle_item t item)
+      | Some (Message delivery) -> Some (Ok delivery)
+      | Some Recovery ->
+          t.recovery_queued <- false;
+          next_nonblocking t
+      | Some (Done error) ->
+          mark_done t error;
+          Some (Error error)
+
+  let next_or_recovery t =
+    if t.done_seen then terminal_error t
+    else
+      match Eio.Stream.take t.queue with
+      | Message delivery -> Ok (Delivery delivery)
+      | Recovery ->
+          t.recovery_queued <- false;
+          Ok Recovery
+      | Done error ->
+          mark_done t error;
+          Error error
+
+  let next_or_recovery_nonblocking t =
+    if t.done_seen then Some (terminal_error t)
+    else
+      match Eio.Stream.take_nonblocking t.queue with
+      | None -> None
+      | Some (Message delivery) -> Some (Ok (Delivery delivery))
+      | Some Recovery ->
+          t.recovery_queued <- false;
+          Some (Ok Recovery)
+      | Some (Done error) ->
+          mark_done t error;
+          Some (Error error)
+
+  let next_or_recovery_with_timeout ~timeout t =
+    if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then
+      Error (Error.Invalid_timeout "subscription")
+    else
+      let prefer first second =
+        match (first, second) with
+        | (Ok _ as value), _ | _, (Ok _ as value) -> value
+        | Error Error.Timeout, other | other, Error Error.Timeout -> other
+        | first, _ -> first
+      in
+      Eio.Fiber.first ~combine:prefer
+        (fun () -> next_or_recovery t)
+        (fun () ->
+          match t.wait timeout with
+          | Ok () -> Error Error.Timeout
+          | Error error -> Error error)
 
   let next_with_timeout ~timeout t =
     if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then
@@ -377,6 +484,41 @@ module Subscription = struct
           match t.wait timeout with
           | Ok () -> Error Error.Timeout
           | Error error -> Error error)
+
+  let await_recovery ?timeout ~from t =
+    let rec wait () =
+      match t.terminal with
+      | Some error -> Error error
+      | None ->
+          let current = t.recovery in
+          if not (equal_recovery current from) then Ok current
+          else
+            let wait_signal () =
+              Eio.Promise.await t.recovery_signal;
+              Ok ()
+            in
+            let wait_result =
+              match timeout with
+              | None -> wait_signal ()
+              | Some timeout ->
+                  if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then
+                    Error (Error.Invalid_timeout "subscription recovery")
+                  else
+                    let choose first second =
+                      match (first, second) with
+                      | (Ok _ as value), _ | _, (Ok _ as value) -> value
+                      | Error Error.Timeout, other
+                      | other, Error Error.Timeout -> other
+                      | first, _ -> first
+                    in
+                    Eio.Fiber.first ~combine:choose wait_signal (fun () ->
+                        match t.wait timeout with
+                        | Ok () -> Error Error.Timeout
+                        | Error error -> Error error)
+            in
+            match wait_result with Ok () -> wait () | Error error -> Error error
+    in
+    wait ()
 
   let unsubscribe t = if not t.active then Ok () else t.unsubscribe_request ()
 
@@ -826,6 +968,13 @@ let push_reconnect_core_events t =
   in
   loop events
 
+let attach_replayed_subscriptions t =
+  Hashtbl.iter
+    (fun _ subscription ->
+      if Subscription.replay_on_reconnect subscription then
+        Subscription.attach subscription)
+    t.subscriptions
+
 let handle_event t event =
   match event with
   | Nats.Event.Info info ->
@@ -849,6 +998,7 @@ let handle_event t event =
         | Error error -> Error error
         | Ok () ->
             if Event_stream.push_control t.events Event.Reconnected then (
+              attach_replayed_subscriptions t;
               Event_stream.end_control_sequence t.events;
               t.reconnecting <- false;
               release_deferred_commands t;
@@ -1240,6 +1390,11 @@ let retry_reconnect t error =
   schedule_reconnect t error
 
 let recover_transport t initial_error =
+  Hashtbl.iter
+    (fun _ subscription ->
+      if Subscription.replay_on_reconnect subscription then
+        Subscription.detach subscription)
+    t.subscriptions;
   let request_ids = request_sids t in
   let non_reconnecting_sids =
     Hashtbl.fold

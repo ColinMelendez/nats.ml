@@ -1162,6 +1162,7 @@ let () =
         (fun () ->
           let queued, queued_u = Eio.Promise.create () in
           let disconnect, disconnect_u = Eio.Promise.create () in
+          let reconnect_info, reconnect_info_u = Eio.Promise.create () in
           let later, later_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
           let config =
@@ -1169,17 +1170,60 @@ let () =
           in
           with_reconnecting_connection ~config
             ~first_reads:[ `Return info_wire; `Await queued; `Await disconnect ]
-            ~second_reads:[ `Return info_wire; `Await later; `Await hold ]
-            (fun ~sw:_ connection ->
+            ~second_reads:
+              [ `Await reconnect_info; `Await later; `Await hold ]
+            (fun ~sw connection ->
               let events = Nats_eio.Connection.events connection in
               let subscription =
                 expect_ok (Nats_eio.Connection.subscribe connection filter)
               in
+              let initial_recovery =
+                Nats_eio.Subscription.recovery subscription
+              in
+              (match initial_recovery with
+              | Nats_eio.Subscription.Attached 0 -> ()
+              | Nats_eio.Subscription.Attached generation ->
+                  fail
+                    (Format.asprintf
+                       "new subscription has recovery generation %d" generation)
+              | Nats_eio.Subscription.Detached generation ->
+                  fail
+                    (Format.asprintf
+                       "new subscription is detached at generation %d"
+                       generation));
+              let detached_result, detached_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve detached_result_u
+                    (Nats_eio.Subscription.await_recovery
+                       ~from:initial_recovery subscription));
               Eio.Promise.resolve queued_u
                 (Ok "MSG orders.created 1 6\r\nbefore\r\n");
               yield_n 5;
               Eio.Promise.resolve disconnect_u (Error End_of_file);
-              yield_n 10;
+              let detached = Eio.Promise.await detached_result in
+              (match detached with
+              | Ok (Nats_eio.Subscription.Detached 0) -> ()
+              | Ok recovery ->
+                  fail
+                    (Format.asprintf
+                       "expected detached generation 0, got %s"
+                       (match recovery with
+                       | Nats_eio.Subscription.Detached generation ->
+                           Format.asprintf "detached %d" generation
+                       | Nats_eio.Subscription.Attached generation ->
+                           Format.asprintf "attached %d" generation))
+              | Error error ->
+                  fail
+                    (Format.asprintf "recovery detached with %a"
+                       Nats_eio.Error.pp error));
+              let attached_result, attached_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve attached_result_u
+                    (Nats_eio.Subscription.await_recovery
+                       ~from:(match detached with Ok value -> value | Error _ ->
+                         initial_recovery)
+                       subscription));
+              Eio.Promise.resolve reconnect_info_u (Ok info_wire);
               (match expect_core_event (Nats_eio.Event_stream.next events) with
               | Nats.Event.Info _ -> ()
               | event ->
@@ -1229,6 +1273,21 @@ let () =
               | Error error ->
                   fail
                     (Format.asprintf "expected reconnected lifecycle, got %a"
+                       Nats_eio.Error.pp error));
+              (match Eio.Promise.await attached_result with
+              | Ok (Nats_eio.Subscription.Attached 1) -> ()
+              | Ok recovery ->
+                  fail
+                    (Format.asprintf
+                       "expected attached generation 1, got %s"
+                       (match recovery with
+                       | Nats_eio.Subscription.Detached generation ->
+                           Format.asprintf "detached %d" generation
+                       | Nats_eio.Subscription.Attached generation ->
+                           Format.asprintf "attached %d" generation))
+              | Error error ->
+                  fail
+                    (Format.asprintf "recovery attached with %a"
                        Nats_eio.Error.pp error));
               let queued_delivery =
                 expect_ok (Nats_eio.Subscription.next subscription)

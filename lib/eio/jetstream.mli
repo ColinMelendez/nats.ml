@@ -382,10 +382,11 @@ module Consumer : sig
         status frames are consumed transparently, and flow-control requests
         are answered with an empty message. A missing heartbeat fails the
         session with [Missing_heartbeat]. The session owns its subscription
-        and closes it when [sw] releases. It is not transparently restored
-        after a transport loss; recreate it after [Error (Connection
-        Disconnected)]. The session is single-owner: do not call [next] or
-        [next_with_timeout] concurrently on one value. *)
+        and closes it when [sw] releases. A replayable delivery subscription
+        is restored after transport recovery; durable consumers are checked
+        with [info], while missing ephemeral consumers are recreated from
+        their last configuration. The session is single-owner: do not call
+        [next] or [next_with_timeout] concurrently on one value. *)
 
     val next : t -> (Msg.t, Error.t) result
     (** [next push] waits for the next delivered message. Messages are not
@@ -393,13 +394,15 @@ module Consumer : sig
         flow-control requests are answered with an empty message. Other status
         frames fail the handle instead of being treated as data. A configured
         heartbeat that is not received within two intervals fails with
-        [Missing_heartbeat]. *)
+        [Missing_heartbeat]. During reconnect recovery, heartbeat deadlines
+        are suspended until the subscription is replayed and the consumer is
+        confirmed or recreated. *)
 
     val next_with_timeout : timeout:Mtime.Span.t -> t -> (Msg.t, Error.t) result
     (** [next_with_timeout ~timeout push] bounds the wait with an absolute
-        caller deadline; control frames do not extend it. A timeout leaves an
-        open push handle active. A missing configured heartbeat fails the
-        handle with [Missing_heartbeat]. *)
+        caller deadline across reconnect restoration; control frames do not
+        extend it. A timeout leaves an open push handle active. A missing
+        configured heartbeat fails the handle with [Missing_heartbeat]. *)
 
     val iter : t -> f:(Msg.t -> unit) -> (unit, Error.t) result
     (** [iter push ~f] invokes [f] for each message until the handle is closed

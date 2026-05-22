@@ -52,6 +52,34 @@ end
 module Subscription : sig
   type t
   type delivery = { message : Nats.Message.t; status : Nats.Op.status option }
+  type recovery = Detached of int | Attached of int
+  type next = Delivery of delivery | Recovery
+
+  val recovery : t -> recovery
+  (** [recovery subscription] reports whether a replayable subscription is
+      detached from the current transport or attached to it. The initial
+      state is [Attached 0]; each successful reconnect replay advances the
+      generation. *)
+
+  val await_recovery :
+    ?timeout:Mtime.Span.t -> from:recovery -> t -> (recovery, Error.t) result
+  (** [await_recovery ?timeout ~from subscription] waits until the
+      subscription's recovery state differs from [from], or until it reaches
+      a terminal error. A timeout leaves the subscription active. *)
+
+  val next_or_recovery : t -> (next, Error.t) result
+  (** [next_or_recovery subscription] waits for the next delivery, recovery
+      detachment, or terminal subscription error. Unlike [next], it exposes a
+      recovery wakeup to consumers that must restore protocol-level state. *)
+
+  val next_or_recovery_nonblocking : t -> (next, Error.t) result option
+  (** [next_or_recovery_nonblocking subscription] consumes one queued delivery,
+      recovery wakeup, or terminal error without waiting. *)
+
+  val next_or_recovery_with_timeout :
+    timeout:Mtime.Span.t -> t -> (next, Error.t) result
+  (** [next_or_recovery_with_timeout ~timeout subscription] waits for one
+      delivery, recovery wakeup, or terminal error for at most [timeout]. *)
 
   val sid : t -> int
   val next : t -> (delivery, Error.t) result

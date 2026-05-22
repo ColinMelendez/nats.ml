@@ -16,6 +16,13 @@ let expect_ok = function
   | Ok value -> value
   | Error error -> fail (Format.asprintf "%a" Nats_eio.Error.pp error)
 
+let expect_core_event = function
+  | Ok (Nats_eio.Event.Core event) -> event
+  | Ok event ->
+      fail
+        (Format.asprintf "expected a core event, got %a" Nats_eio.Event.pp event)
+  | Error error -> fail (Format.asprintf "%a" Nats_eio.Error.pp error)
+
 let expect_jetstream_ok = function
   | Ok value -> value
   | Error error -> fail (Format.asprintf "%a" Nats_eio.Jetstream.Error.pp error)
@@ -52,6 +59,36 @@ let api_ok_wire ~sid = consumer_info_wire_with_sid ~sid "{}"
 let push_consumer_info_wire =
   consumer_info_wire
     {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","deliver_subject":"orders.push","deliver_group":"workers","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant"}}|}
+
+let push_consumer_info_wire_with_sid ~sid =
+  consumer_info_wire_with_sid ~sid
+    {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","deliver_subject":"orders.push","deliver_group":"workers","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant"}}|}
+
+let push_consumer_info_wire_with_sid_and_subject ~sid ~subject =
+  let payload =
+    Format.asprintf
+      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","deliver_subject":"%s","deliver_group":"workers","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant"}}|}
+      subject
+  in
+  consumer_info_wire_with_sid ~sid payload
+
+let push_heartbeat_consumer_info_wire_with_sid ~sid =
+  consumer_info_wire_with_sid ~sid
+    {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","deliver_subject":"orders.push","deliver_group":"workers","idle_heartbeat":1000000,"deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant"}}|}
+
+let ephemeral_push_consumer_info_wire_with_sid ~sid =
+  consumer_info_wire_with_sid ~sid
+    {|{"stream_name":"ORDERS","name":"worker","config":{"deliver_subject":"orders.push","deliver_group":"workers","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant"}}|}
+
+let ephemeral_push_create_wire_with_sid ~sid =
+  consumer_info_wire_with_sid ~sid
+    {|{"stream_name":"ORDERS","name":"worker","config":{"deliver_subject":"orders.push","deliver_group":"workers","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant"}}|}
+
+let consumer_not_found_wire ~sid =
+  let payload =
+    {|{"error":{"code":404,"err_code":10014,"description":"consumer not found"}}|}
+  in
+  consumer_info_wire_with_sid ~sid payload
 
 let pull_consumer_info_wire =
   consumer_info_wire
@@ -206,6 +243,46 @@ let with_connection_traced_clock ?config ~reads f =
   in
   f ~sw ~trace ~clock:env#mono_clock connection
 
+let with_reconnecting_connection_traced ?config ~first_reads ~second_reads
+    ?third_reads f =
+  Eio_mock.Backend.run_full @@ fun env ->
+  let first = Eio_mock.Flow.make "jetstream-server-first" in
+  Eio_mock.Flow.on_read first first_reads;
+  let second = Eio_mock.Flow.make "jetstream-server-second" in
+  Eio_mock.Flow.on_read second second_reads;
+  let connects =
+    match third_reads with
+    | None -> [ `Return first; `Return second ]
+    | Some reads ->
+        let third = Eio_mock.Flow.make "jetstream-server-third" in
+        Eio_mock.Flow.on_read third reads;
+        [ `Return first; `Return second; `Return third ]
+  in
+  let net = Eio_mock.Net.make "jetstream-reconnect-network" in
+  Eio_mock.Net.on_getaddrinfo net (List.init 16 (fun _ -> `Return [ address ]));
+  Eio_mock.Net.on_connect net connects;
+  let trace = Buffer.create 4096 in
+  let debug = Eio.Stdenv.debug env in
+  let tracer =
+    {
+      Eio.Debug.traceln =
+        (fun ?__POS__:_ fmt ->
+          Format.kasprintf
+            (fun message ->
+              Buffer.add_string trace message;
+              Buffer.add_char trace '\n')
+            fmt);
+    }
+  in
+  Eio.Fiber.with_binding debug#traceln tracer @@ fun () ->
+  Eio.Switch.run @@ fun sw ->
+  let connection =
+    expect_ok
+      (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock ?config
+         [ endpoint ])
+  in
+  f ~sw ~trace ~clock:env#mono_clock connection
+
 let contains_substring ~needle value =
   let needle_length = String.length needle in
   let limit = String.length value - needle_length in
@@ -241,8 +318,9 @@ let wait_for_trace ~clock ~trace ~needle ~count =
   done;
   if !seen < count then
     fail
-      (Format.asprintf "trace did not contain %d occurrences of %S (saw %d)"
-         count needle !seen)
+      (Format.asprintf
+         "trace did not contain %d occurrences of %S (saw %d); trace:\n%s"
+         count needle !seen (Buffer.contents trace))
 
 let consumer connection =
   let jetstream = expect_jetstream_ok (Nats_eio.Jetstream.v connection) in
@@ -373,6 +451,340 @@ let () =
                 (Nats_eio.Jetstream.Consumer.Push.next push) (function
                 | Nats_eio.Jetstream.Error.Push_closed -> true
                 | _ -> false);
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Push.close push);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "push restores its subscription after reconnect" (fun () ->
+          let info_response, info_response_u = Eio.Promise.create () in
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let reconnect_info, reconnect_info_u = Eio.Promise.create () in
+          let restore_info, restore_info_u = Eio.Promise.create () in
+          let delivery, delivery_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_reconnecting_connection_traced
+            ~first_reads:[ `Return info_wire; `Await info_response; `Await disconnect ]
+            ~second_reads:
+              [ `Await reconnect_info; `Await restore_info; `Await delivery; `Await hold ]
+            (fun ~sw ~trace ~clock connection ->
+              let push_result, push_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve push_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.v ~sw
+                       (consumer connection)));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u
+                (Ok push_heartbeat_consumer_info_wire);
+              let push = expect_jetstream_ok (Eio.Promise.await push_result) in
+              let next_result, next_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve next_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.next push));
+              yield_n 5;
+              Eio.Promise.resolve disconnect_u (Error End_of_file);
+              Eio.Time.Mono.sleep clock 0.005;
+              Eio.Promise.resolve reconnect_info_u (Ok info_wire);
+              wait_for_trace ~clock ~trace
+                ~needle:"wrote \"SUB orders.push workers 2\\r\\n\"" ~count:2;
+              wait_for_trace ~clock ~trace
+                ~needle:
+                  "wrote \"PUB $JS.API.CONSUMER.INFO.ORDERS.worker"
+                ~count:2;
+              Eio.Promise.resolve restore_info_u
+                (Ok (push_heartbeat_consumer_info_wire_with_sid ~sid:3));
+              Eio.Promise.resolve delivery_u
+                (Ok (delivery_wire_with_sid ~sid:2 "after-reconnect"));
+              let message = expect_jetstream_ok (Eio.Promise.await next_result) in
+              equal string "after-reconnect"
+                (Nats_eio.Jetstream.Msg.payload message);
+              (match expect_core_event (Nats_eio.Event_stream.next
+                                           (Nats_eio.Connection.events connection)) with
+              | Nats.Event.Info _ -> ()
+              | event ->
+                  fail
+                    (Format.asprintf "expected initial INFO, got %a"
+                       Nats.Event.pp event));
+              let events = Nats_eio.Connection.events connection in
+              (match expect_core_event (Nats_eio.Event_stream.next events) with
+              | Nats.Event.Connected -> ()
+              | event ->
+                  fail
+                    (Format.asprintf "expected initial CONNECTED, got %a"
+                       Nats.Event.pp event));
+              (match expect_core_event (Nats_eio.Event_stream.next events) with
+              | Nats.Event.Closed -> ()
+              | event ->
+                  fail
+                    (Format.asprintf "expected disconnect CLOSED, got %a"
+                       Nats.Event.pp event));
+              (match Nats_eio.Event_stream.next events with
+              | Ok Nats_eio.Event.Disconnected -> ()
+              | Ok event ->
+                  fail
+                    (Format.asprintf "expected disconnect lifecycle, got %a"
+                       Nats_eio.Event.pp event)
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected disconnect event, got %a"
+                       Nats_eio.Error.pp error));
+              (match expect_core_event (Nats_eio.Event_stream.next events) with
+              | Nats.Event.Info _ -> ()
+              | event ->
+                  fail
+                    (Format.asprintf "expected reconnect INFO, got %a"
+                       Nats.Event.pp event));
+              (match expect_core_event (Nats_eio.Event_stream.next events) with
+              | Nats.Event.Connected -> ()
+              | event ->
+                  fail
+                    (Format.asprintf "expected reconnect CONNECTED, got %a"
+                       Nats.Event.pp event));
+              (match Nats_eio.Event_stream.next events with
+              | Ok Nats_eio.Event.Reconnected -> ()
+              | Ok event ->
+                  fail
+                    (Format.asprintf "expected reconnected event, got %a"
+                       Nats_eio.Event.pp event)
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected reconnected lifecycle, got %a"
+                       Nats_eio.Error.pp error));
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Push.close push);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "push restores again after its delivery subject changes" (fun () ->
+          let info_response, info_response_u = Eio.Promise.create () in
+          let disconnect_first, disconnect_first_u = Eio.Promise.create () in
+          let reconnect_info_first, reconnect_info_first_u =
+            Eio.Promise.create ()
+          in
+          let restore_info_first, restore_info_first_u = Eio.Promise.create () in
+          let first_delivery, first_delivery_u = Eio.Promise.create () in
+          let disconnect_second, disconnect_second_u = Eio.Promise.create () in
+          let reconnect_info_second, reconnect_info_second_u =
+            Eio.Promise.create ()
+          in
+          let restore_info_second, restore_info_second_u =
+            Eio.Promise.create ()
+          in
+          let second_delivery, second_delivery_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_reconnecting_connection_traced
+            ~first_reads:
+              [ `Return info_wire; `Await info_response; `Await disconnect_first ]
+            ~second_reads:
+              [ `Await reconnect_info_first; `Await restore_info_first;
+                `Await first_delivery; `Await disconnect_second ]
+            ~third_reads:
+              [ `Await reconnect_info_second; `Await restore_info_second;
+                `Await second_delivery; `Await hold ]
+            (fun ~sw ~trace ~clock connection ->
+              let push_result, push_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve push_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.v ~sw
+                       (consumer connection)));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u (Ok push_consumer_info_wire);
+              let push = expect_jetstream_ok (Eio.Promise.await push_result) in
+              let first_result, first_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.next push));
+              yield_n 5;
+              Eio.Promise.resolve disconnect_first_u (Error End_of_file);
+              wait_for_trace ~clock ~trace
+                ~needle:"jetstream-reconnect-network: connect to tcp"
+                ~count:2;
+              Eio.Promise.resolve reconnect_info_first_u (Ok info_wire);
+              wait_for_trace ~clock ~trace
+                ~needle:"wrote \"SUB orders.push workers 2\\r\\n\"" ~count:2;
+              wait_for_trace ~clock ~trace
+                ~needle:
+                  "wrote \"PUB $JS.API.CONSUMER.INFO.ORDERS.worker"
+                ~count:2;
+              Eio.Promise.resolve restore_info_first_u
+                (Ok
+                   (push_consumer_info_wire_with_sid_and_subject ~sid:3
+                      ~subject:"orders.push.changed"));
+              wait_for_trace ~clock ~trace
+                ~needle:"wrote \"SUB orders.push.changed workers " ~count:1;
+              Eio.Promise.resolve first_delivery_u
+                (Ok (delivery_wire_with_sid ~sid:4 "after-subject-change"));
+              let first_message = expect_jetstream_ok (Eio.Promise.await first_result) in
+              equal string "after-subject-change"
+                (Nats_eio.Jetstream.Msg.payload first_message);
+              Eio.Promise.resolve disconnect_second_u (Error End_of_file);
+              let second_result, second_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve second_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.next_with_timeout
+                       ~timeout:Mtime.Span.(50 * ms) push));
+              wait_for_trace ~clock ~trace
+                ~needle:"jetstream-reconnect-network: connect to tcp"
+                ~count:3;
+              Eio.Promise.resolve reconnect_info_second_u (Ok info_wire);
+              wait_for_trace ~clock ~trace
+                ~needle:
+                  "wrote \"PUB $JS.API.CONSUMER.INFO.ORDERS.worker"
+                ~count:3;
+              Eio.Promise.resolve restore_info_second_u
+                (Ok
+                   (push_consumer_info_wire_with_sid_and_subject ~sid:5
+                      ~subject:"orders.push.changed"));
+              Eio.Promise.resolve second_delivery_u
+                (Ok (delivery_wire_with_sid ~sid:4 "after-second-reconnect"));
+              let second_message =
+                expect_jetstream_ok (Eio.Promise.await second_result)
+              in
+              equal string "after-second-reconnect"
+                (Nats_eio.Jetstream.Msg.payload second_message);
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Push.close push);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "push reports a deleted durable consumer after reconnect" (fun () ->
+          let info_response, info_response_u = Eio.Promise.create () in
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let reconnect_info, reconnect_info_u = Eio.Promise.create () in
+          let restore_info, restore_info_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_reconnecting_connection_traced
+            ~first_reads:[ `Return info_wire; `Await info_response; `Await disconnect ]
+            ~second_reads:[ `Await reconnect_info; `Await restore_info; `Await hold ]
+            (fun ~sw ~trace ~clock connection ->
+              let push_result, push_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve push_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.v ~sw
+                       (consumer connection)));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u (Ok push_consumer_info_wire);
+              let push = expect_jetstream_ok (Eio.Promise.await push_result) in
+              let next_result, next_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve next_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.next push));
+              yield_n 5;
+              Eio.Promise.resolve disconnect_u (Error End_of_file);
+              wait_for_trace ~clock ~trace
+                ~needle:"jetstream-reconnect-network: connect to tcp"
+                ~count:2;
+              Eio.Promise.resolve reconnect_info_u (Ok info_wire);
+              wait_for_trace ~clock ~trace
+                ~needle:
+                  "wrote \"PUB $JS.API.CONSUMER.INFO.ORDERS.worker"
+                ~count:2;
+              Eio.Promise.resolve restore_info_u
+                (Ok (consumer_not_found_wire ~sid:3));
+              expect_jetstream_error (Eio.Promise.await next_result) (function
+                | Nats_eio.Jetstream.Error.Consumer_deleted -> true
+                | _ -> false);
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Push.close push);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "push recreates an ephemeral consumer after reconnect" (fun () ->
+          let info_response, info_response_u = Eio.Promise.create () in
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let reconnect_info, reconnect_info_u = Eio.Promise.create () in
+          let restore_info, restore_info_u = Eio.Promise.create () in
+          let create_response, create_response_u = Eio.Promise.create () in
+          let delivery, delivery_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_reconnecting_connection_traced
+            ~first_reads:[ `Return info_wire; `Await info_response; `Await disconnect ]
+            ~second_reads:
+              [ `Await reconnect_info; `Await restore_info; `Await create_response;
+                `Await delivery; `Await hold ]
+            (fun ~sw ~trace ~clock connection ->
+              let push_result, push_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve push_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.v ~sw
+                       (consumer connection)));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u
+                (Ok (ephemeral_push_consumer_info_wire_with_sid ~sid:1));
+              let push = expect_jetstream_ok (Eio.Promise.await push_result) in
+              let next_result, next_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve next_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.next push));
+              yield_n 5;
+              Eio.Promise.resolve disconnect_u (Error End_of_file);
+              Eio.Promise.resolve reconnect_info_u (Ok info_wire);
+              wait_for_trace ~clock ~trace
+                ~needle:
+                  "wrote \"PUB $JS.API.CONSUMER.INFO.ORDERS.worker"
+                ~count:2;
+              Eio.Promise.resolve restore_info_u (Ok (consumer_not_found_wire ~sid:3));
+              wait_for_trace ~clock ~trace
+                ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS"
+                ~count:1;
+              Eio.Promise.resolve create_response_u
+                (Ok (ephemeral_push_create_wire_with_sid ~sid:4));
+              Eio.Promise.resolve delivery_u
+                (Ok (delivery_wire_with_sid ~sid:2 "after-ephemeral-recreate"));
+              let message = expect_jetstream_ok (Eio.Promise.await next_result) in
+              equal string "after-ephemeral-recreate"
+                (Nats_eio.Jetstream.Msg.payload message);
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Push.close push);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "push timeout during reconnect leaves restoration available" (fun () ->
+          let info_response, info_response_u = Eio.Promise.create () in
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let reconnect_info, reconnect_info_u = Eio.Promise.create () in
+          let restore_info, restore_info_u = Eio.Promise.create () in
+          let delivery, delivery_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_reconnecting_connection_traced
+            ~first_reads:[ `Return info_wire; `Await info_response; `Await disconnect ]
+            ~second_reads:
+              [ `Await reconnect_info; `Await restore_info; `Await delivery; `Await hold ]
+            (fun ~sw ~trace ~clock connection ->
+              let push_result, push_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve push_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.v ~sw
+                       (consumer connection)));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u (Ok push_consumer_info_wire);
+              let push = expect_jetstream_ok (Eio.Promise.await push_result) in
+              let timeout_result, timeout_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve timeout_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.next_with_timeout
+                       ~timeout:Mtime.Span.(1 * ms) push));
+              yield_n 5;
+              Eio.Promise.resolve disconnect_u (Error End_of_file);
+              (match Eio.Promise.await timeout_result with
+              | Error
+                  (Nats_eio.Jetstream.Error.Connection Nats_eio.Error.Timeout)
+                -> ()
+              | Ok _ -> fail "push reconnect timeout returned a message"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected push reconnect timeout: %a"
+                       Nats_eio.Jetstream.Error.pp error));
+              wait_for_trace ~clock ~trace
+                ~needle:"jetstream-reconnect-network: connect to tcp"
+                ~count:2;
+              yield_n 5;
+              Eio.Promise.resolve reconnect_info_u (Ok info_wire);
+              let next_result, next_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve next_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.next push));
+              wait_for_trace ~clock ~trace
+                ~needle:
+                  "wrote \"PUB $JS.API.CONSUMER.INFO.ORDERS.worker"
+                ~count:2;
+              Eio.Promise.resolve restore_info_u
+                (Ok (push_consumer_info_wire_with_sid ~sid:3));
+              Eio.Promise.resolve delivery_u
+                (Ok (delivery_wire_with_sid ~sid:2 "after-timeout"));
+              let message = expect_jetstream_ok (Eio.Promise.await next_result) in
+              equal string "after-timeout"
+                (Nats_eio.Jetstream.Msg.payload message);
               expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Push.close push);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));

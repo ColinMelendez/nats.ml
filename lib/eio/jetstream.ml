@@ -2322,10 +2322,12 @@ module Consumer = struct
     type state = Open | Closed | Failed of Error.t
 
     type t = {
-      consumer : consumer;
+      mutable consumer : consumer;
       connection : Connection.t;
-      subscription : Connection.Subscription.t;
-      idle_heartbeat : Mtime.Span.t option;
+      mutable subscription : Connection.Subscription.t;
+      mutable config : Config.t;
+      mutable idle_heartbeat : Mtime.Span.t option;
+      mutable recovery_pending : bool;
       mutable heartbeat_deadline : Mtime.t option;
       mutable state : state;
       mutable hook : Eio.Switch.hook option;
@@ -2371,6 +2373,126 @@ module Consumer = struct
     let reset_heartbeat push =
       push.heartbeat_deadline <-
         heartbeat_deadline_at push.connection push.idle_heartbeat
+
+    let timeout_error = Error.Connection Core_error.Timeout
+
+    let remaining_timeout push deadline =
+      match deadline with
+      | None -> Ok None
+      | Some deadline ->
+          let now = Connection.now push.connection in
+          if Mtime.compare now deadline >= 0 then Error timeout_error
+          else Ok (Some (Mtime.span now deadline))
+
+    let is_timeout = function
+      | Error.Connection Core_error.Timeout -> true
+      | _ -> false
+
+    let is_core_timeout = function
+      | Core_error.Timeout -> true
+      | _ -> false
+
+    let is_recoverable = function
+      | Error.Connection Core_error.Disconnected -> true
+      | _ -> false
+
+    let is_missing_consumer = function
+      | Error.Consumer_deleted -> true
+      | Error.Api { err_code = Some 10014; _ } -> true
+      | _ -> false
+
+    let option_equal equal first second =
+      match (first, second) with
+      | None, None -> true
+      | Some first, Some second -> equal first second
+      | None, Some _ | Some _, None -> false
+
+    let same_delivery_config first second =
+      option_equal Nats.Subject.equal (Config.deliver_subject first)
+        (Config.deliver_subject second)
+      && option_equal Nats.Queue_group.equal (Config.deliver_group first)
+           (Config.deliver_group second)
+
+    let replace_subscription push config subject =
+      let filter =
+        Nats.Subject.Filter.literal (Nats.Subject.to_string subject)
+      in
+      match
+        Connection.subscribe push.connection
+          ?queue_group:(Config.deliver_group config) filter
+      with
+      | Error error -> Error (Error.Connection error)
+      | Ok subscription ->
+          let old_subscription = push.subscription in
+          push.subscription <- subscription;
+          match release_subscription old_subscription with
+          | None -> Ok ()
+          | Some error -> Error (Error.Connection error)
+
+    let restore_consumer push ~deadline =
+      match remaining_timeout push deadline with
+      | Error error -> Error error
+      | Ok timeout -> (
+          match info ?timeout push.consumer with
+          | Ok info ->
+              let config = Info.config info in
+              (match Config.deliver_subject config with
+              | None -> Error Error.Not_push_consumer
+              | Some subject ->
+                  let subscription_result =
+                    if same_delivery_config push.config config then Ok ()
+                    else replace_subscription push config subject
+                  in
+                  (match subscription_result with
+                  | Error error -> Error error
+                  | Ok () ->
+                      push.config <- config;
+                      push.idle_heartbeat <- Config.idle_heartbeat config;
+                      push.recovery_pending <- false;
+                      reset_heartbeat push;
+                      Ok ()))
+          | Error error when is_missing_consumer error -> (
+              match Config.durable_name push.config with
+              | Some _ -> Error Error.Consumer_deleted
+              | None -> (
+                  match remaining_timeout push deadline with
+                  | Error error -> Error error
+                  | Ok timeout ->
+                      match create ?timeout push.consumer.stream push.config with
+                      | Error error -> Error error
+                      | Ok consumer ->
+                          push.consumer <- consumer;
+                          push.recovery_pending <- false;
+                          reset_heartbeat push;
+                          Ok ()))
+          | Error error -> Error error)
+
+    let recover push ~deadline =
+      match Connection.Subscription.recovery push.subscription with
+      | Connection.Subscription.Detached _ ->
+          push.heartbeat_deadline <- None;
+          let from = Connection.Subscription.recovery push.subscription in
+          (match remaining_timeout push deadline with
+          | Error error -> Error (`Timeout error)
+          | Ok timeout -> (
+              match
+                Connection.Subscription.await_recovery ?timeout ~from
+                  push.subscription
+              with
+              | Ok _ ->
+                  push.recovery_pending <- true;
+                  Ok `Retry
+              | Error error when is_core_timeout error ->
+                  Error (`Timeout timeout_error)
+              | Error error ->
+                  Stdlib.Error (`Fatal (Error.Connection error))))
+      | Connection.Subscription.Attached _ when push.recovery_pending -> (
+          match restore_consumer push ~deadline with
+          | Ok () -> Ok `Ready
+          | Error error when is_timeout error -> Error (`Timeout error)
+          | Error error when is_recoverable error -> Ok `Retry
+          | Error error -> Stdlib.Error (`Fatal error))
+      | Connection.Subscription.Attached _ -> Ok `Ready
 
     let respond_flow_control push subject =
       match Connection.publish push.connection subject "" with
@@ -2423,54 +2545,71 @@ module Consumer = struct
         | Closed -> result := Some (Error Error.Push_closed)
         | Failed error -> result := Some (Error error)
         | Open -> (
-            match
-              Connection.Subscription.next_nonblocking push.subscription
-            with
-            | Some (Ok delivery) -> handle_delivery delivery
-            | Some (Error error) ->
-                result := Some (subscription_error push error)
-            | None -> (
-                let deadline_reached =
-                  match deadline with
-                  | Some deadline ->
-                      Mtime.compare (Connection.now push.connection) deadline
-                      >= 0
-                  | None -> false
-                in
-                if heartbeat_missed push then (
-                  let error = Error.Missing_heartbeat in
-                  fail push error;
-                  result := Some (Error error))
-                else if deadline_reached then
-                  result := Some (Error (Error.Connection Core_error.Timeout))
-                else
-                  let wait_deadline =
-                    earliest_deadline deadline push.heartbeat_deadline
-                  in
-                  let wait_result =
-                    match wait_deadline with
-                    | None -> Connection.Subscription.next push.subscription
-                    | Some wait_deadline ->
-                        let now = Connection.now push.connection in
-                        if Mtime.compare now wait_deadline >= 0 then
-                          Error Core_error.Timeout
-                        else
-                          let timeout = Mtime.span now wait_deadline in
-                          Connection.Subscription.next_with_timeout ~timeout
-                            push.subscription
-                  in
-                  match wait_result with
-                  | Error Core_error.Timeout ->
-                      if heartbeat_missed push then (
-                        let error = Error.Missing_heartbeat in
-                        fail push error;
-                        result := Some (Error error))
-                      else
-                        result :=
-                          Some (Error (Error.Connection Core_error.Timeout))
-                  | Error error ->
-                      result := Some (subscription_error push error)
-                  | Ok delivery -> handle_delivery delivery))
+            match recover push ~deadline with
+            | Error (`Timeout error) -> result := Some (Error error)
+            | Error (`Fatal error) ->
+                fail push error;
+                result := Some (Error error)
+            | Ok `Retry -> ()
+            | Ok `Ready -> (
+                match
+                  Connection.Subscription.next_or_recovery_nonblocking
+                    push.subscription
+                with
+                | Some (Ok (Connection.Subscription.Delivery delivery)) ->
+                    handle_delivery delivery
+                | Some (Ok Connection.Subscription.Recovery) ->
+                    push.recovery_pending <- true
+                | Some (Error error) ->
+                    result := Some (subscription_error push error)
+                | None -> (
+                    let deadline_reached =
+                      match deadline with
+                      | Some deadline ->
+                          Mtime.compare (Connection.now push.connection) deadline
+                          >= 0
+                      | None -> false
+                    in
+                    if heartbeat_missed push then (
+                      let error = Error.Missing_heartbeat in
+                      fail push error;
+                      result := Some (Error error))
+                    else if deadline_reached then
+                      result :=
+                        Some (Error (Error.Connection Core_error.Timeout))
+                    else
+                      let wait_deadline =
+                        earliest_deadline deadline push.heartbeat_deadline
+                      in
+                      let wait_result =
+                        match wait_deadline with
+                        | None ->
+                            Connection.Subscription.next_or_recovery
+                              push.subscription
+                        | Some wait_deadline ->
+                            let now = Connection.now push.connection in
+                            if Mtime.compare now wait_deadline >= 0 then
+                              Error Core_error.Timeout
+                            else
+                              let timeout = Mtime.span now wait_deadline in
+                              Connection.Subscription.next_or_recovery_with_timeout
+                                ~timeout push.subscription
+                      in
+                      (match wait_result with
+                      | Ok (Connection.Subscription.Delivery delivery) ->
+                          handle_delivery delivery
+                      | Ok Connection.Subscription.Recovery ->
+                          push.recovery_pending <- true
+                      | Error Core_error.Timeout ->
+                          if heartbeat_missed push then (
+                            let error = Error.Missing_heartbeat in
+                            fail push error;
+                            result := Some (Error error))
+                          else
+                            result :=
+                              Some (Error (Error.Connection Core_error.Timeout))
+                      | Error error ->
+                          result := Some (subscription_error push error)))))
       done;
       match !result with Some result -> result | None -> assert false
 
@@ -2521,7 +2660,9 @@ module Consumer = struct
                       consumer;
                       connection;
                       subscription;
+                      config;
                       idle_heartbeat = Config.idle_heartbeat config;
+                      recovery_pending = false;
                       heartbeat_deadline =
                         heartbeat_deadline_at connection
                           (Config.idle_heartbeat config);
