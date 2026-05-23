@@ -88,6 +88,7 @@ module Stream : sig
       ?max_msg_size:int64 ->
       ?allow_rollup:bool ->
       ?allow_direct:bool ->
+      ?sealed:bool ->
       unit ->
       (t, error) result
     (** [v] validates a stream name, capture filters, and limits. Limits use
@@ -105,6 +106,7 @@ module Stream : sig
     val max_msg_size : t -> int64 option
     val allow_rollup : t -> bool
     val allow_direct : t -> bool
+    val sealed : t -> bool
 
     val with_name : t -> string -> (t, error) result
     (** [with_name config name] validates [name] while preserving the other
@@ -152,6 +154,9 @@ module Stream : sig
     val with_allow_direct : t -> bool -> (t, error) result
     (** [with_allow_direct config value] replaces whether direct message reads
         are accepted by the stream. *)
+
+    val with_sealed : t -> bool -> (t, error) result
+    (** [with_sealed config value] replaces whether the stream is sealed. *)
   end
 
   module Info : sig
@@ -163,6 +168,7 @@ module Stream : sig
     val first_sequence : t -> int64
     val last_sequence : t -> int64
     val consumer_count : t -> int
+    val sealed : t -> bool
     val pp : Format.formatter -> t -> unit
   end
 
@@ -216,6 +222,17 @@ module Stream : sig
       exact subject through JetStream's direct message API. *)
 
   val delete : t -> (unit, Error.t) result
+
+  val purge :
+    ?timeout:Mtime.Span.t ->
+    ?filter:Nats.Subject.Filter.t ->
+    ?sequence:int64 ->
+    ?keep:int64 ->
+    t ->
+    (unit, Error.t) result
+  (** [purge stream] removes all retained messages. [filter] limits the purge
+      to matching subjects; [sequence] removes messages before that stream
+      sequence, and [keep] retains the newest number of matching messages. *)
 end
 
 module Msg : sig

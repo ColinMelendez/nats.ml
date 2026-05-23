@@ -221,6 +221,7 @@ module Stream = struct
       max_msg_size : int64 option;
       allow_rollup : bool;
       allow_direct : bool;
+      sealed : bool;
     }
 
     type error = config_error
@@ -256,7 +257,7 @@ module Stream = struct
     let v_internal ~allow_empty_subjects ~name ~subjects ?(storage = File)
         ?(retention = Limits) ?(discard = Old) ?max_msgs ?max_msgs_per_subject
         ?max_bytes ?max_age ?max_msg_size ?(allow_rollup = false)
-        ?(allow_direct = false) () =
+        ?(allow_direct = false) ?(sealed = false) () =
       let max_age =
         match max_age with
         | Some value when Int.equal (Mtime.Span.compare value Mtime.Span.zero) 0
@@ -303,14 +304,15 @@ module Stream = struct
                                   max_msg_size;
                                   allow_rollup;
                                   allow_direct;
+                                  sealed;
                                 })))))
 
     let v ~name ~subjects ?storage ?retention ?discard ?max_msgs
         ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size ?allow_rollup
-        ?allow_direct () =
+        ?allow_direct ?sealed () =
       v_internal ~allow_empty_subjects:false ~name ~subjects ?storage ?retention
         ?discard ?max_msgs ?max_msgs_per_subject ?max_bytes ?max_age
-        ?max_msg_size ?allow_rollup ?allow_direct ()
+        ?max_msg_size ?allow_rollup ?allow_direct ?sealed ()
 
     let name value = value.name
     let subjects value = value.subjects
@@ -324,15 +326,16 @@ module Stream = struct
     let max_msg_size value = value.max_msg_size
     let allow_rollup value = value.allow_rollup
     let allow_direct value = value.allow_direct
+    let sealed value = value.sealed
 
     let rebuild value ~name ~subjects ~storage ~retention ~discard ~max_msgs
         ~max_msgs_per_subject ~max_bytes ~max_age ~max_msg_size ~allow_rollup
-        ~allow_direct =
+        ~allow_direct ~sealed =
       v_internal
         ~allow_empty_subjects:(Int.equal (List.length value.subjects) 0)
         ~name ~subjects ~storage ~retention ~discard ?max_msgs ?max_bytes
         ?max_msgs_per_subject ?max_age ?max_msg_size ~allow_rollup ~allow_direct
-        ()
+        ~sealed ()
 
     let with_name value name =
       rebuild value ~name ~subjects:value.subjects ~storage:value.storage
@@ -341,7 +344,7 @@ module Stream = struct
         ~max_msgs_per_subject:value.max_msgs_per_subject
         ~max_bytes:value.max_bytes ~max_age:value.max_age
         ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
-        ~allow_direct:value.allow_direct
+        ~allow_direct:value.allow_direct ~sealed:value.sealed
 
     let with_subjects value subjects =
       rebuild value ~name:value.name ~subjects ~storage:value.storage
@@ -350,7 +353,7 @@ module Stream = struct
         ~max_msgs_per_subject:value.max_msgs_per_subject
         ~max_bytes:value.max_bytes ~max_age:value.max_age
         ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
-        ~allow_direct:value.allow_direct
+        ~allow_direct:value.allow_direct ~sealed:value.sealed
 
     let with_storage value storage =
       rebuild value ~name:value.name ~subjects:value.subjects ~storage
@@ -359,7 +362,7 @@ module Stream = struct
         ~max_msgs_per_subject:value.max_msgs_per_subject
         ~max_bytes:value.max_bytes ~max_age:value.max_age
         ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
-        ~allow_direct:value.allow_direct
+        ~allow_direct:value.allow_direct ~sealed:value.sealed
 
     let with_retention value retention =
       rebuild value ~name:value.name ~subjects:value.subjects
@@ -368,7 +371,7 @@ module Stream = struct
         ~max_msgs_per_subject:value.max_msgs_per_subject
         ~max_bytes:value.max_bytes ~max_age:value.max_age
         ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
-        ~allow_direct:value.allow_direct
+        ~allow_direct:value.allow_direct ~sealed:value.sealed
 
     let with_discard value discard =
       rebuild value ~name:value.name ~subjects:value.subjects
@@ -377,7 +380,7 @@ module Stream = struct
         ~max_msgs_per_subject:value.max_msgs_per_subject
         ~max_bytes:value.max_bytes ~max_age:value.max_age
         ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
-        ~allow_direct:value.allow_direct
+        ~allow_direct:value.allow_direct ~sealed:value.sealed
 
     let with_max_msgs value max_msgs =
       rebuild value ~name:value.name ~subjects:value.subjects
@@ -385,7 +388,7 @@ module Stream = struct
         ~max_msgs ~max_msgs_per_subject:value.max_msgs_per_subject
         ~max_bytes:value.max_bytes ~max_age:value.max_age
         ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
-        ~allow_direct:value.allow_direct
+        ~allow_direct:value.allow_direct ~sealed:value.sealed
 
     let with_max_bytes value max_bytes =
       rebuild value ~name:value.name ~subjects:value.subjects
@@ -394,6 +397,7 @@ module Stream = struct
         ~max_msgs_per_subject:value.max_msgs_per_subject ~max_bytes
         ~max_age:value.max_age ~max_msg_size:value.max_msg_size
         ~allow_rollup:value.allow_rollup ~allow_direct:value.allow_direct
+        ~sealed:value.sealed
 
     let with_max_age value max_age =
       rebuild value ~name:value.name ~subjects:value.subjects
@@ -402,6 +406,7 @@ module Stream = struct
         ~max_msgs_per_subject:value.max_msgs_per_subject
         ~max_bytes:value.max_bytes ~max_age ~max_msg_size:value.max_msg_size
         ~allow_rollup:value.allow_rollup ~allow_direct:value.allow_direct
+        ~sealed:value.sealed
 
     let with_max_msg_size value max_msg_size =
       rebuild value ~name:value.name ~subjects:value.subjects
@@ -410,6 +415,7 @@ module Stream = struct
         ~max_msgs_per_subject:value.max_msgs_per_subject
         ~max_bytes:value.max_bytes ~max_age:value.max_age ~max_msg_size
         ~allow_rollup:value.allow_rollup ~allow_direct:value.allow_direct
+        ~sealed:value.sealed
 
     let with_max_msgs_per_subject value max_msgs_per_subject =
       rebuild value ~name:value.name ~subjects:value.subjects
@@ -417,7 +423,7 @@ module Stream = struct
         ~max_msgs:value.max_msgs ~max_msgs_per_subject
         ~max_bytes:value.max_bytes ~max_age:value.max_age
         ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
-        ~allow_direct:value.allow_direct
+        ~allow_direct:value.allow_direct ~sealed:value.sealed
 
     let with_allow_rollup value allow_rollup =
       rebuild value ~name:value.name ~subjects:value.subjects
@@ -426,7 +432,7 @@ module Stream = struct
         ~max_msgs_per_subject:value.max_msgs_per_subject
         ~max_bytes:value.max_bytes ~max_age:value.max_age
         ~max_msg_size:value.max_msg_size ~allow_rollup
-        ~allow_direct:value.allow_direct
+        ~allow_direct:value.allow_direct ~sealed:value.sealed
 
     let with_allow_direct value allow_direct =
       rebuild value ~name:value.name ~subjects:value.subjects
@@ -435,7 +441,16 @@ module Stream = struct
         ~max_msgs_per_subject:value.max_msgs_per_subject
         ~max_bytes:value.max_bytes ~max_age:value.max_age
         ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
-        ~allow_direct
+        ~allow_direct ~sealed:value.sealed
+
+    let with_sealed value sealed =
+      rebuild value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~sealed
   end
 
   module Info = struct
@@ -454,6 +469,7 @@ module Stream = struct
     let first_sequence value = value.first_sequence
     let last_sequence value = value.last_sequence
     let consumer_count value = value.consumer_count
+    let sealed value = Config.sealed value.config
 
     let pp ppf value =
       Format.fprintf ppf "JetStream stream %S (messages=%Ld, bytes=%Ld)"
@@ -492,6 +508,7 @@ module Stream = struct
     max_msg_size : int64 option;
     allow_rollup : bool;
     allow_direct : bool;
+    sealed : bool;
     unknown : Jsont.json;
   }
 
@@ -523,6 +540,7 @@ module Stream = struct
         max_msg_size
         allow_rollup
         allow_direct
+        sealed
         unknown
       ->
         {
@@ -538,6 +556,7 @@ module Stream = struct
           max_msg_size;
           allow_rollup = Option.value ~default:false allow_rollup;
           allow_direct = Option.value ~default:false allow_direct;
+          sealed = Option.value ~default:false sealed;
           unknown;
         })
     |> Jsont.Object.mem "name" Jsont.string ~enc:(fun value -> value.name)
@@ -564,6 +583,8 @@ module Stream = struct
         Some value.allow_rollup)
     |> Jsont.Object.opt_mem "allow_direct" Jsont.bool ~enc:(fun value ->
         Some value.allow_direct)
+    |> Jsont.Object.opt_mem "sealed" Jsont.bool ~enc:(fun value ->
+        Some value.sealed)
     |> Jsont.Object.keep_unknown
          ~enc:(fun value -> value.unknown)
          Jsont.json_mems
@@ -651,6 +672,22 @@ module Stream = struct
            match value.missing with [] -> None | missing -> Some missing)
     |> Jsont.Object.skip_unknown |> Jsont.Object.finish
 
+  type purge_request = {
+    filter : string option;
+    sequence : int64 option;
+    keep : int64 option;
+  }
+
+  let purge_request_codec =
+    Jsont.Object.map ~kind:"JetStream stream purge request"
+      (fun filter sequence keep -> { filter; sequence; keep })
+    |> Jsont.Object.opt_mem "filter" Jsont.string ~enc:(fun value ->
+        value.filter)
+    |> Jsont.Object.opt_mem "seq" Jsont.int64 ~enc:(fun value ->
+        value.sequence)
+    |> Jsont.Object.opt_mem "keep" Jsont.int64 ~enc:(fun value -> value.keep)
+    |> Jsont.Object.finish
+
   let wire_config value =
     {
       name = Config.name value;
@@ -665,6 +702,7 @@ module Stream = struct
       max_msg_size = Config.max_msg_size value;
       allow_rollup = Config.allow_rollup value;
       allow_direct = Config.allow_direct value;
+      sealed = Config.sealed value;
       unknown = Jsont.Json.object' [];
     }
 
@@ -692,6 +730,7 @@ module Stream = struct
         Some (Option.value ~default:(-1L) (Config.max_msg_size value));
       allow_rollup = Config.allow_rollup value;
       allow_direct = Config.allow_direct value;
+      sealed = Config.sealed value;
     }
 
   let config_of_wire value =
@@ -734,7 +773,7 @@ module Stream = struct
             ~subjects ~storage:value.storage ~retention:value.retention
             ~discard:value.discard ?max_msgs ?max_msgs_per_subject ?max_bytes
             ?max_age ?max_msg_size ~allow_rollup:value.allow_rollup
-            ~allow_direct:value.allow_direct ()
+            ~allow_direct:value.allow_direct ~sealed:value.sealed ()
         with
         | Ok config -> Ok config
         | Error error -> Error (Error.Invalid_config error))
@@ -1025,6 +1064,27 @@ module Stream = struct
         match decode_response message with
         | Ok _ -> Ok ()
         | Error error -> Error error)
+
+  let purge ?timeout ?filter ?sequence ?keep stream =
+    let request =
+      {
+        filter = Option.map Nats.Subject.Filter.to_string filter;
+        sequence;
+        keep;
+      }
+    in
+    match encode purge_request_codec request with
+    | Error error -> Error error
+    | Ok payload ->
+        let subject =
+          api_subject stream.jetstream [ "STREAM"; "PURGE"; stream.name ]
+        in
+        (match request_msg ?timeout stream.jetstream (Nats.Message.v ~subject payload) with
+        | Error error -> Error error
+        | Ok message -> (
+            match decode_response message with
+            | Ok _ -> Ok ()
+            | Error error -> Error error))
 end
 
 module Msg = struct
