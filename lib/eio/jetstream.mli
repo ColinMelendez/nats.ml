@@ -78,6 +78,7 @@ module Stream : sig
     val v :
       name:string ->
       subjects:Nats.Subject.Filter.t list ->
+      ?description:string ->
       ?storage:storage ->
       ?retention:retention ->
       ?discard:discard ->
@@ -96,6 +97,7 @@ module Stream : sig
 
     val name : t -> string
     val subjects : t -> Nats.Subject.Filter.t list
+    val description : t -> string option
     val storage : t -> storage
     val retention : t -> retention
     val discard : t -> discard
@@ -111,6 +113,9 @@ module Stream : sig
     val with_name : t -> string -> (t, error) result
     (** [with_name config name] validates [name] while preserving the other
         fields. *)
+
+    val with_description : t -> string option -> (t, error) result
+    (** [with_description config value] replaces the stream description. *)
 
     val with_subjects : t -> Nats.Subject.Filter.t list -> (t, error) result
     (** [with_subjects config subjects] validates [subjects] while preserving

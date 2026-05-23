@@ -379,7 +379,8 @@ let () =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Stream.Config.v ~name:"KV_users"
                  ~subjects:[ subject ] ~max_msgs_per_subject:5L
-                 ~allow_rollup:true ~allow_direct:true ~sealed:true ())
+                 ~description:"user values" ~allow_rollup:true
+                 ~allow_direct:true ~sealed:true ())
           in
           (match
              Nats_eio.Jetstream.Stream.Config.max_msgs_per_subject config
@@ -388,13 +389,21 @@ let () =
           | None -> fail "stream config lost per-subject limit");
           equal bool true (Nats_eio.Jetstream.Stream.Config.allow_rollup config);
           equal bool true (Nats_eio.Jetstream.Stream.Config.allow_direct config);
+          equal (option string) (Some "user values")
+            (Nats_eio.Jetstream.Stream.Config.description config);
           equal bool true (Nats_eio.Jetstream.Stream.Config.sealed config);
           let unsealed =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Stream.Config.with_sealed config false)
           in
           equal bool false
-            (Nats_eio.Jetstream.Stream.Config.sealed unsealed));
+            (Nats_eio.Jetstream.Stream.Config.sealed unsealed);
+          let no_description =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_description unsealed None)
+          in
+          equal (option string) None
+            (Nats_eio.Jetstream.Stream.Config.description no_description));
       test "stream direct reads preserve stored message metadata" (fun () ->
           let first_response, first_response_u = Eio.Promise.create () in
           let second_response, second_response_u = Eio.Promise.create () in
