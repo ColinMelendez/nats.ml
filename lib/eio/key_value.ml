@@ -538,6 +538,232 @@ let purge ?expected_revision value ~key =
 
 type bucket = t
 
+module Key_set = Set.Make (String)
+
+let allowed_filter_token token =
+  String.equal token "*" || String.equal token ">"
+
+let make_filter value pattern =
+  let pattern = Option.value pattern ~default:">" in
+  let subject = "$KV." ^ value.bucket ^ "." ^ pattern in
+  match Nats.Subject.Filter.of_string subject with
+  | Error reason -> Error (Error.Invalid_filter { value = pattern; reason })
+  | Ok filter -> (
+      let tokens = String.split_on_char '.' pattern in
+      let invalid = ref None in
+      List.iter
+        (fun token ->
+          match !invalid with
+          | Some _ -> ()
+          | None when allowed_filter_token token -> ()
+          | None -> (
+              match validate_key token with
+              | Ok () -> ()
+              | Error reason ->
+                  invalid :=
+                    Some (Error.Invalid_key { value = pattern; reason })))
+        tokens;
+      match !invalid with None -> Ok filter | Some error -> Error error)
+
+let timestamp_of_nanoseconds value =
+  let billion = 1_000_000_000L in
+  let seconds = Int64.div value billion in
+  let fraction = Int64.rem value billion in
+  let seconds, fraction =
+    if Int64.compare fraction 0L < 0 then
+      (Int64.sub seconds 1L, Int64.add fraction billion)
+    else (seconds, fraction)
+  in
+  try
+    let time = Unix.gmtime (Int64.to_float seconds) in
+    Ok
+      (Format.asprintf "%04d-%02d-%02dT%02d:%02d:%02d.%09LdZ"
+         (time.Unix.tm_year + 1900) (time.Unix.tm_mon + 1) time.Unix.tm_mday
+         time.Unix.tm_hour time.Unix.tm_min time.Unix.tm_sec fraction)
+  with Unix.Unix_error _ | Invalid_argument _ ->
+    Error (Error.Invalid_timestamp value)
+
+let key_of_delivery value message =
+  let subject = Nats.Subject.to_string (Jetstream.Msg.subject message) in
+  let prefix = "$KV." ^ value.bucket ^ "." in
+  let prefix_length = String.length prefix in
+  if
+    String.length subject <= prefix_length
+    || not (String.equal prefix (String.sub subject 0 prefix_length))
+  then Error (Error.Invalid_message_subject subject)
+  else
+    let key =
+      String.sub subject prefix_length (String.length subject - prefix_length)
+    in
+    match validate_key key with
+    | Ok () -> Ok key
+    | Error reason -> key_error key reason
+
+let entry_of_delivery value message =
+  match key_of_delivery value message with
+  | Error error -> Error error
+  | Ok key -> (
+      match operation_of_headers (Jetstream.Msg.headers message) with
+      | Error error -> Error error
+      | Ok operation -> (
+          match timestamp_of_nanoseconds (Jetstream.Msg.timestamp message) with
+          | Error error -> Error error
+          | Ok timestamp ->
+              Ok
+                {
+                  Entry.bucket = value.bucket;
+                  key;
+                  value = Jetstream.Msg.payload message;
+                  revision = Jetstream.Msg.stream_sequence message;
+                  timestamp;
+                  operation;
+                }))
+
+let one_shot_config ~filter ~deliver_policy ~headers_only =
+  match
+    Jetstream.Consumer.Config.v ~deliver_policy
+      ~ack_policy:Jetstream.Consumer.Config.No_ack ~filter_subject:filter
+      ~headers_only
+      ~inactive_threshold:Mtime.Span.(5 * min)
+      ~mem_storage:true ()
+  with
+  | Ok config -> Ok config
+  | Error error ->
+      Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
+
+let with_temporary_consumer value config f =
+  match Jetstream.Consumer.create value.stream config with
+  | Error error -> Error (map_jetstream_error error)
+  | Ok consumer ->
+      Fun.protect
+        ~finally:(fun () ->
+          ignore
+            (Eio.Cancel.protect (fun () ->
+                 ignore (Jetstream.Consumer.delete consumer))))
+        (fun () -> f consumer)
+
+let one_shot_batch = 256
+let one_shot_expires = Mtime.Span.(1 * s)
+let max_empty_fetches = 3
+
+let drain_messages consumer =
+  let acc = ref [] in
+  let empty_fetches = ref 0 in
+  let result = ref None in
+  while Option.is_none !result do
+    match
+      Jetstream.Consumer.fetch ~expires:one_shot_expires consumer
+        ~batch:one_shot_batch
+    with
+    | Error error -> result := Some (Error (map_jetstream_error error))
+    | Ok messages -> (
+        acc := List.rev_append messages !acc;
+        let last_pending =
+          List.fold_left
+            (fun _ message -> Some (Jetstream.Msg.num_pending message))
+            None messages
+        in
+        if
+          match last_pending with
+          | Some pending -> Int64.equal pending 0L
+          | None -> false
+        then result := Some (Ok (List.rev !acc))
+        else
+          match Jetstream.Consumer.info consumer with
+          | Error error -> result := Some (Error (map_jetstream_error error))
+          | Ok info
+            when Int64.equal (Jetstream.Consumer.Info.num_pending info) 0L ->
+              result := Some (Ok (List.rev !acc))
+          | Ok _ ->
+              (match messages with
+              | [] -> incr empty_fetches
+              | _ -> empty_fetches := 0);
+              if Int.compare !empty_fetches max_empty_fetches >= 0 then
+                result := Some (Error (Error.Connection Core_error.Timeout)))
+  done;
+  match !result with Some result -> result | None -> assert false
+
+let collect_messages value config =
+  with_temporary_consumer value config (fun consumer ->
+      match Jetstream.Consumer.info consumer with
+      | Error error -> Error (map_jetstream_error error)
+      | Ok info when Int64.equal (Jetstream.Consumer.Info.num_pending info) 0L
+        ->
+          Ok []
+      | Ok _ -> drain_messages consumer)
+
+let keys ?filter value =
+  match make_filter value filter with
+  | Error error -> Error error
+  | Ok filter -> (
+      match
+        one_shot_config ~filter
+          ~deliver_policy:Jetstream.Consumer.Config.Last_per_subject
+          ~headers_only:true
+      with
+      | Error error -> Error error
+      | Ok config -> (
+          match collect_messages value config with
+          | Error error -> Error error
+          | Ok messages -> (
+              let result =
+                List.fold_left
+                  (fun result message ->
+                    match result with
+                    | Error _ -> result
+                    | Ok (seen, keys) -> (
+                        match key_of_delivery value message with
+                        | Error error -> Error error
+                        | Ok key -> (
+                            match
+                              operation_of_headers
+                                (Jetstream.Msg.headers message)
+                            with
+                            | Error error -> Error error
+                            | Ok Entry.Put when not (Key_set.mem key seen) ->
+                                Ok (Key_set.add key seen, key :: keys)
+                            | Ok Entry.Put -> Ok (seen, keys)
+                            | Ok (Entry.Delete | Entry.Purge) -> Ok (seen, keys)
+                            )))
+                  (Ok (Key_set.empty, []))
+                  messages
+              in
+              match result with
+              | Error error -> Error error
+              | Ok (_, keys) -> Ok (List.rev keys))))
+
+let history value ~key =
+  match validate_key key with
+  | Error reason -> key_error key reason
+  | Ok () -> (
+      let filter =
+        Nats.Subject.Filter.literal
+          (Nats.Subject.to_string (key_subject value key))
+      in
+      match
+        one_shot_config ~filter ~deliver_policy:Jetstream.Consumer.Config.All
+          ~headers_only:false
+      with
+      | Error error -> Error error
+      | Ok config -> (
+          match collect_messages value config with
+          | Error error -> Error error
+          | Ok messages -> (
+              let result =
+                List.fold_left
+                  (fun result message ->
+                    match result with
+                    | Error _ -> result
+                    | Ok entries -> (
+                        match entry_of_delivery value message with
+                        | Error error -> Error error
+                        | Ok entry -> Ok (entry :: entries)))
+                  (Ok []) messages
+              in
+              match result with
+              | Error error -> Error error
+              | Ok entries -> Ok (List.rev entries))))
+
 module Watch = struct
   type delivery = New | Last_per_subject | All
   type event = Initial_done | Entry of Entry.t
@@ -564,87 +790,11 @@ module Watch = struct
         ignore (Jetstream.Consumer.Push.close watch.push)
     | Closed | Failed _ -> ()
 
-  let timestamp_of_nanoseconds value =
-    let billion = 1_000_000_000L in
-    let seconds = Int64.div value billion in
-    let fraction = Int64.rem value billion in
-    let seconds, fraction =
-      if Int64.compare fraction 0L < 0 then
-        (Int64.sub seconds 1L, Int64.add fraction billion)
-      else (seconds, fraction)
-    in
-    try
-      let time = Unix.gmtime (Int64.to_float seconds) in
-      Ok
-        (Format.asprintf "%04d-%02d-%02dT%02d:%02d:%02d.%09LdZ"
-           (time.Unix.tm_year + 1900) (time.Unix.tm_mon + 1) time.Unix.tm_mday
-           time.Unix.tm_hour time.Unix.tm_min time.Unix.tm_sec fraction)
-    with Unix.Unix_error _ | Invalid_argument _ ->
-      Error (Error.Invalid_timestamp value)
-
-  let entry_of_message watch message =
-    let subject = Nats.Subject.to_string (Jetstream.Msg.subject message) in
-    let prefix = "$KV." ^ watch.bucket.bucket ^ "." in
-    let prefix_length = String.length prefix in
-    if
-      String.length subject <= prefix_length
-      || not (String.equal prefix (String.sub subject 0 prefix_length))
-    then Error (Error.Invalid_message_subject subject)
-    else
-      let key =
-        String.sub subject prefix_length (String.length subject - prefix_length)
-      in
-      match validate_key key with
-      | Error reason -> key_error key reason
-      | Ok () -> (
-          match operation_of_headers (Jetstream.Msg.headers message) with
-          | Error error -> Error error
-          | Ok operation -> (
-              match
-                timestamp_of_nanoseconds (Jetstream.Msg.timestamp message)
-              with
-              | Error error -> Error error
-              | Ok timestamp ->
-                  Ok
-                    {
-                      Entry.bucket = watch.bucket.bucket;
-                      key;
-                      value = Jetstream.Msg.payload message;
-                      revision = Jetstream.Msg.stream_sequence message;
-                      timestamp;
-                      operation;
-                    }))
-
   let update_initial watch message =
     match watch.initial with
     | Before when Int64.equal (Jetstream.Msg.num_pending message) 0L ->
         watch.initial <- Marker_pending
     | Before | Marker_pending | Live -> ()
-
-  let allowed_watch_token token =
-    String.equal token "*" || String.equal token ">"
-
-  let watch_filter (value : bucket) key =
-    let pattern = Option.value key ~default:">" in
-    let subject = "$KV." ^ value.bucket ^ "." ^ pattern in
-    match Nats.Subject.Filter.of_string subject with
-    | Error reason -> Error (Error.Invalid_filter { value = pattern; reason })
-    | Ok filter -> (
-        let tokens = String.split_on_char '.' pattern in
-        let invalid = ref None in
-        List.iter
-          (fun token ->
-            match !invalid with
-            | Some _ -> ()
-            | None when allowed_watch_token token -> ()
-            | None -> (
-                match validate_key token with
-                | Ok () -> ()
-                | Error reason ->
-                    invalid :=
-                      Some (Error.Invalid_key { value = pattern; reason })))
-          tokens;
-        match !invalid with None -> Ok filter | Some error -> Error error)
 
   let config (value : bucket) ~filter ~delivery ~meta_only =
     let deliver_subject =
@@ -676,7 +826,7 @@ module Watch = struct
 
   let v ~sw ?key ?(delivery = Last_per_subject) ?(ignore_deletes = false)
       ?(meta_only = false) (value : bucket) =
-    match watch_filter value key with
+    match make_filter value key with
     | Error error -> Error error
     | Ok filter -> (
         match config value ~filter ~delivery ~meta_only with
@@ -736,7 +886,7 @@ module Watch = struct
                   | _ -> fail watch error);
                   result := Some (Error error)
               | Ok message -> (
-                  match entry_of_message watch message with
+                  match entry_of_delivery watch.bucket message with
                   | Error error ->
                       fail watch error;
                       result := Some (Error error)

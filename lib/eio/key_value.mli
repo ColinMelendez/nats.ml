@@ -129,6 +129,15 @@ val get_revision :
   t -> key:string -> revision:int64 -> (Entry.t, Error.t) result
 (** [get_revision bucket ~key ~revision] returns one exact stream revision. *)
 
+val keys : ?filter:string -> t -> (string list, Error.t) result
+(** [keys bucket] returns the currently live keys in server delivery order.
+    [filter] is an optional bucket-relative NATS filter; it defaults to [>].
+    Tombstoned keys are omitted. *)
+
+val history : t -> key:string -> (Entry.t list, Error.t) result
+(** [history bucket ~key] returns the retained entries for [key], oldest first.
+    Put, delete, and purge entries are all included. *)
+
 type bucket = t
 
 module Watch : sig
