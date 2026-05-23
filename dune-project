@@ -32,6 +32,8 @@
   jsont
   eio
   cstruct
+  base64
+  digestif
   tls-eio
   mtime
   (eio_main :with-test)
