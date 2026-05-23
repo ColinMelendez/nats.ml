@@ -3380,6 +3380,15 @@ module Consumer = struct
         | Error error -> result := Some (Error error)
       done;
       match !result with Some result -> result | None -> assert false
+
+    let info ordered =
+      match ordered.state with
+      | Closed -> Error Error.Ordered_closed
+      | Failed error -> Error error
+      | Open -> (
+          match ordered.consumer with
+          | None -> Error Error.Ordered_closed
+          | Some consumer -> info consumer)
   end
 
   let list (stream : stream) =

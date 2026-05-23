@@ -530,6 +530,9 @@ module Consumer : sig
     (** [close ordered] stops the pull session, best-effort deletes its current
         ephemeral consumer, and is idempotent. Explicit closure returns
         [Ordered_closed] from subsequent reads. *)
+
+    val info : t -> (Info.t, Error.t) result
+    (** [info ordered] reads the current server-side consumer information. *)
   end
 
   val info : ?timeout:Mtime.Span.t -> t -> (Info.t, Error.t) result
