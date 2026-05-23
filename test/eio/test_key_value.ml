@@ -55,6 +55,57 @@ let watch_delivery_wire ~sid ~stream_sequence ~consumer_sequence ~num_pending
   in
   operation_wire (Nats.Op.Hmsg { sid; message; status = None })
 
+let one_shot_consumer_response_wire ~sid ~name ~policy ~num_pending
+    ?filter_subject ?headers_only () =
+  let filter_subject =
+    match filter_subject with
+    | None -> ""
+    | Some value -> Format.asprintf ",\"filter_subject\":\"%s\"" value
+  in
+  let headers_only =
+    match headers_only with
+    | None -> ""
+    | Some value -> Format.asprintf ",\"headers_only\":%b" value
+  in
+  response_wire ~sid
+    (Format.asprintf
+       "{\"stream_name\":\"KV_users\",\"name\":\"%s\",\"config\":{\"deliver_policy\":\"%s\",\"ack_policy\":\"none\",\"replay_policy\":\"instant\"%s%s},\"num_pending\":%Ld}"
+       name policy filter_subject headers_only num_pending)
+
+let key_delivery_wire ~sid ~consumer ~stream_sequence ~consumer_sequence
+    ~num_pending ~subject ?operation payload =
+  let reply_to =
+    Format.asprintf "$JS.ACK.KV_users.%s.1.%Ld.%Ld.1710000000000000000.%Ld"
+      consumer stream_sequence consumer_sequence num_pending
+  in
+  let message =
+    match operation with
+    | None ->
+        Nats.Message.v
+          ~subject:(Nats.Subject.literal subject)
+          ~reply_to:(Nats.Subject.literal reply_to)
+          payload
+    | Some operation ->
+        let headers =
+          match Nats.Header.of_list [ ("KV-Operation", operation) ] with
+          | Ok headers -> headers
+          | Error error ->
+              fail (Format.asprintf "%a" Nats.Header.pp_error error)
+        in
+        Nats.Message.v
+          ~subject:(Nats.Subject.literal subject)
+          ~reply_to:(Nats.Subject.literal reply_to)
+          ~headers payload
+  in
+  operation_wire (Nats.Op.Hmsg { sid; message; status = None })
+
+let status_wire_with_sid ~sid ~code ~description =
+  let message =
+    Nats.Message.v ~subject:(Nats.Subject.literal "_INBOX.reply") ""
+  in
+  operation_wire
+    (Nats.Op.Hmsg { sid; message; status = Some { code; description } })
+
 let api_error_wire ~sid ~err_code =
   response_wire ~sid
     (Format.asprintf
@@ -572,6 +623,272 @@ let () =
                   fail
                     (Format.asprintf "new watch close failed: %a\n%s"
                        Nats_eio.Key_value.Error.pp error (Buffer.contents trace)));
+              (match Nats_eio.Connection.close connection with
+              | Ok () -> ()
+              | Error error ->
+                  fail (Format.asprintf "%a" Nats_eio.Error.pp error));
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "keys returns live keys and cleans up its consumer" (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let info_response, info_response_u = Eio.Promise.create () in
+          let first_delivery, first_delivery_u = Eio.Promise.create () in
+          let second_delivery, second_delivery_u = Eio.Promise.create () in
+          let third_delivery, third_delivery_u = Eio.Promise.create () in
+          let fetch_done, fetch_done_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await info_response;
+                `Await first_delivery;
+                `Await second_delivery;
+                `Await third_delivery;
+                `Await fetch_done;
+                `Await delete_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_key_value
+                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Key_value.keys ~filter:"team.>" bucket));
+              yield_n 5;
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (one_shot_consumer_response_wire ~sid:1 ~name:"reader"
+                      ~policy:"last_per_subject" ~num_pending:0L
+                      ~filter_subject:"$KV.users.team.>" ~headers_only:true ()));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u
+                (Ok
+                   (one_shot_consumer_response_wire ~sid:2 ~name:"reader"
+                      ~policy:"last_per_subject" ~num_pending:3L
+                      ~filter_subject:"$KV.users.team.>" ~headers_only:true ()));
+              yield_n 5;
+              Eio.Promise.resolve first_delivery_u
+                (Ok
+                   (key_delivery_wire ~sid:3 ~consumer:"reader"
+                      ~stream_sequence:7L ~consumer_sequence:1L ~num_pending:2L
+                      ~subject:"$KV.users.team.alice" ""));
+              yield_n 5;
+              Eio.Promise.resolve second_delivery_u
+                (Ok
+                   (key_delivery_wire ~sid:3 ~consumer:"reader"
+                      ~stream_sequence:8L ~consumer_sequence:2L ~num_pending:1L
+                      ~subject:"$KV.users.team.bob" ~operation:"DEL" ""));
+              yield_n 5;
+              Eio.Promise.resolve third_delivery_u
+                (Ok
+                   (key_delivery_wire ~sid:3 ~consumer:"reader"
+                      ~stream_sequence:9L ~consumer_sequence:3L ~num_pending:0L
+                      ~subject:"$KV.users.team.carol" ""));
+              yield_n 5;
+              Eio.Promise.resolve fetch_done_u
+                (Ok
+                   (status_wire_with_sid ~sid:3 ~code:408
+                      ~description:"Request Timeout"));
+              let keys = expect_key_value (Eio.Promise.await result) in
+              (match keys with
+              | [ first; second ] ->
+                  equal string "team.alice" first;
+                  equal string "team.carol" second
+              | _ -> fail "keys returned the wrong live-key set");
+              let trace_output = Buffer.contents trace in
+              if
+                not
+                  (contains_substring
+                     ~needle:"deliver_policy\\\":\\\"last_per_subject"
+                     trace_output)
+              then fail "keys did not use Last_per_subject";
+              if
+                not
+                  (contains_substring ~needle:"headers_only\\\":true"
+                     trace_output)
+              then fail "keys did not request metadata-only delivery";
+              if
+                not
+                  (contains_substring
+                     ~needle:"filter_subject\\\":\\\"$KV.users.team.>"
+                     trace_output)
+              then fail "keys did not apply its bucket-relative filter";
+              Eio.Promise.resolve delete_response_u
+                (Ok (response_wire ~sid:4 "{}"));
+              yield_n 5;
+              if
+                not
+                  (contains_substring
+                     ~needle:"PUB $JS.API.CONSUMER.DELETE.KV_users.reader"
+                     (Buffer.contents trace))
+              then fail "keys did not delete its ephemeral consumer";
+              (match Nats_eio.Connection.close connection with
+              | Ok () -> ()
+              | Error error ->
+                  fail (Format.asprintf "%a" Nats_eio.Error.pp error));
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "history retries empty fetches and preserves tombstones" (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let info_response, info_response_u = Eio.Promise.create () in
+          let first_fetch_done, first_fetch_done_u = Eio.Promise.create () in
+          let retry_info, retry_info_u = Eio.Promise.create () in
+          let first_delivery, first_delivery_u = Eio.Promise.create () in
+          let second_delivery, second_delivery_u = Eio.Promise.create () in
+          let third_delivery, third_delivery_u = Eio.Promise.create () in
+          let second_fetch_done, second_fetch_done_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await info_response;
+                `Await first_fetch_done;
+                `Await retry_info;
+                `Await first_delivery;
+                `Await second_delivery;
+                `Await third_delivery;
+                `Await second_fetch_done;
+                `Await delete_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_key_value
+                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Key_value.history bucket ~key:"name"));
+              yield_n 5;
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (one_shot_consumer_response_wire ~sid:1 ~name:"reader"
+                      ~policy:"all" ~num_pending:0L
+                      ~filter_subject:"$KV.users.name" ~headers_only:false ()));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u
+                (Ok
+                   (one_shot_consumer_response_wire ~sid:2 ~name:"reader"
+                      ~policy:"all" ~num_pending:3L
+                      ~filter_subject:"$KV.users.name" ~headers_only:false ()));
+              yield_n 5;
+              Eio.Promise.resolve first_fetch_done_u
+                (Ok
+                   (status_wire_with_sid ~sid:3 ~code:408
+                      ~description:"Request Timeout"));
+              yield_n 5;
+              Eio.Promise.resolve retry_info_u
+                (Ok
+                   (one_shot_consumer_response_wire ~sid:4 ~name:"reader"
+                      ~policy:"all" ~num_pending:3L
+                      ~filter_subject:"$KV.users.name" ~headers_only:false ()));
+              yield_n 5;
+              Eio.Promise.resolve first_delivery_u
+                (Ok
+                   (key_delivery_wire ~sid:5 ~consumer:"reader"
+                      ~stream_sequence:10L ~consumer_sequence:1L ~num_pending:2L
+                      ~subject:"$KV.users.name" "alice"));
+              yield_n 5;
+              Eio.Promise.resolve second_delivery_u
+                (Ok
+                   (key_delivery_wire ~sid:5 ~consumer:"reader"
+                      ~stream_sequence:11L ~consumer_sequence:2L ~num_pending:1L
+                      ~subject:"$KV.users.name" ~operation:"DEL" ""));
+              yield_n 5;
+              Eio.Promise.resolve third_delivery_u
+                (Ok
+                   (key_delivery_wire ~sid:5 ~consumer:"reader"
+                      ~stream_sequence:12L ~consumer_sequence:3L ~num_pending:0L
+                      ~subject:"$KV.users.name" ~operation:"PURGE" ""));
+              yield_n 5;
+              Eio.Promise.resolve second_fetch_done_u
+                (Ok
+                   (status_wire_with_sid ~sid:5 ~code:408
+                      ~description:"Request Timeout"));
+              let entries = expect_key_value (Eio.Promise.await result) in
+              (match entries with
+              | [ put; delete; purge ] -> (
+                  equal string "alice" (Nats_eio.Key_value.Entry.value put);
+                  equal int64 10L (Nats_eio.Key_value.Entry.revision put);
+                  (match Nats_eio.Key_value.Entry.operation put with
+                  | Nats_eio.Key_value.Entry.Put -> ()
+                  | Nats_eio.Key_value.Entry.Delete
+                  | Nats_eio.Key_value.Entry.Purge ->
+                      fail "history changed the put operation");
+                  (match Nats_eio.Key_value.Entry.operation delete with
+                  | Nats_eio.Key_value.Entry.Delete -> ()
+                  | Nats_eio.Key_value.Entry.Put
+                  | Nats_eio.Key_value.Entry.Purge ->
+                      fail "history lost the delete operation");
+                  match Nats_eio.Key_value.Entry.operation purge with
+                  | Nats_eio.Key_value.Entry.Purge -> ()
+                  | Nats_eio.Key_value.Entry.Put
+                  | Nats_eio.Key_value.Entry.Delete ->
+                      fail "history lost the purge operation")
+              | _ -> fail "history returned the wrong number of entries");
+              let trace_output = Buffer.contents trace in
+              if
+                not
+                  (contains_substring ~needle:"deliver_policy\\\":\\\"all"
+                     trace_output)
+              then fail "history did not request all retained entries";
+              if
+                not
+                  (contains_substring
+                     ~needle:"filter_subject\\\":\\\"$KV.users.name"
+                     trace_output)
+              then fail "history did not filter the requested key";
+              Eio.Promise.resolve delete_response_u
+                (Ok (response_wire ~sid:6 "{}"));
+              yield_n 5;
+              if
+                not
+                  (contains_substring
+                     ~needle:"PUB $JS.API.CONSUMER.DELETE.KV_users.reader"
+                     (Buffer.contents trace))
+              then fail "history did not delete its ephemeral consumer";
+              (match Nats_eio.Connection.close connection with
+              | Ok () -> ()
+              | Error error ->
+                  fail (Format.asprintf "%a" Nats_eio.Error.pp error));
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "keys rejects invalid filters before creating a consumer" (fun () ->
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await hold ]
+            (fun ~sw:_ ~trace connection ->
+              let jetstream =
+                expect_jetstream (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_key_value
+                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+              in
+              (match Nats_eio.Key_value.keys ~filter:"bad..key" bucket with
+              | Error (Nats_eio.Key_value.Error.Invalid_filter _) -> ()
+              | Ok _ -> fail "invalid filter was accepted"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected filter error: %a"
+                       Nats_eio.Key_value.Error.pp error));
+              if
+                contains_substring ~needle:"CONSUMER.CREATE"
+                  (Buffer.contents trace)
+              then fail "invalid filter created a consumer";
               (match Nats_eio.Connection.close connection with
               | Ok () -> ()
               | Error error ->
