@@ -152,10 +152,18 @@ let expect_jetstream = function
       fail (Format.asprintf "%a" Nats_eio.Jetstream.Error.pp error)
 
 let object_info_json ?(digest = "") ?(deleted = false) ?(headers = "{}")
-    ~name ~bucket ~nuid ~size ~chunks () =
+    ?link ~name ~bucket ~nuid ~size ~chunks () =
+  let options =
+    match link with
+    | None -> {|{"max_chunk_size":131072}|}
+    | Some (link_bucket, link_name) ->
+        Format.asprintf
+          {|{"link":{"bucket":%S,"name":%S},"max_chunk_size":131072}|}
+          link_bucket link_name
+  in
   Format.asprintf
-    "{\"name\":%S,\"description\":\"\",\"headers\":%s,\"metadata\":{},\"options\":{\"max_chunk_size\":131072},\"bucket\":%S,\"nuid\":%S,\"size\":%Ld,\"mtime\":\"\",\"chunks\":%Ld,\"digest\":%S,\"deleted\":%b}"
-    name headers bucket nuid size chunks digest deleted
+    "{\"name\":%S,\"description\":\"\",\"headers\":%s,\"metadata\":{},\"options\":%s,\"bucket\":%S,\"nuid\":%S,\"size\":%Ld,\"mtime\":\"\",\"chunks\":%Ld,\"digest\":%S,\"deleted\":%b}"
+    name headers options bucket nuid size chunks digest deleted
 
 let () =
   run "nats-eio-object-store"
@@ -177,6 +185,13 @@ let () =
                   (Nats_eio.Object_store.Config.ttl config)));
           equal int64 10_000L
             (Option.get (Nats_eio.Object_store.Config.max_bytes config));
+          let unlimited =
+            expect_config
+              (Nats_eio.Object_store.Config.v ~bucket:"unlimited"
+                 ~max_bytes:0L ())
+          in
+          equal (option int64) None
+            (Nats_eio.Object_store.Config.max_bytes unlimited);
           (match Nats_eio.Object_store.Config.storage config with
           | Nats_eio.Object_store.Config.Memory -> ()
           | Nats_eio.Object_store.Config.File -> fail "storage changed");
@@ -196,7 +211,22 @@ let () =
                (List.length
                (Nats.Header.to_list (Nats_eio.Object_store.Meta.headers meta)));
           equal int 4096
-            (Option.get (Nats_eio.Object_store.Meta.chunk_size meta)));
+            (Option.get (Nats_eio.Object_store.Meta.chunk_size meta));
+          (match
+             Nats_eio.Object_store.Meta.v
+               ~link:(Nats_eio.Object_store.Meta.Object
+                        { bucket = "bad bucket"; name = "report" })
+               ()
+           with
+          | Error
+              (Nats_eio.Object_store.Error.Invalid_link
+                 { bucket = "bad bucket"; name = Some "report" }) ->
+              ()
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected metadata error: %a"
+                   Nats_eio.Object_store.Error.pp_meta error)
+          | Ok _ -> fail "invalid object link was accepted"));
       test "get_info decodes padded metadata subjects and headers" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
@@ -236,6 +266,76 @@ let () =
                 |> Nats.Header.to_list
               in
               equal int 2 (List.length headers);
+              match Nats_eio.Connection.close connection with
+              | Ok () -> Eio.Promise.resolve hold_u (Error End_of_file)
+              | Error error ->
+                  fail (Format.asprintf "%a" Nats_eio.Error.pp error)));
+      test "get_info rejects a mismatched metadata subject" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw connection ->
+              let jetstream = expect_jetstream (Nats_eio.Jetstream.v connection) in
+              let store =
+                expect_store
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"docs")
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.get_info store ~name:"greeting"));
+              yield_n 5;
+              Eio.Promise.resolve response_u
+                (Ok
+                   (direct_message_wire ~sid:1 ~stream:"OBJ_docs"
+                      ~subject:"$O.docs.M.b3RoZXI=" ~sequence:4L
+                      ~timestamp:"2026-08-11T12:00:00.000000000Z"
+                      (object_info_json ~name:"greeting" ~bucket:"docs"
+                         ~nuid:"0123456789012345678901" ~size:5L ~chunks:1L
+                         ~digest:"SHA-256=LPJNul-wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=" ())));
+              (match Eio.Promise.await result with
+              | Error (Nats_eio.Object_store.Error.Invalid_message_subject value) ->
+                  equal string "$O.docs.M.b3RoZXI=" value
+              | Error error ->
+                  fail (Format.asprintf "unexpected error: %a"
+                          Nats_eio.Object_store.Error.pp error)
+              | Ok _ -> fail "mismatched metadata subject was accepted");
+              match Nats_eio.Connection.close connection with
+              | Ok () -> Eio.Promise.resolve hold_u (Error End_of_file)
+              | Error error ->
+                  fail (Format.asprintf "%a" Nats_eio.Error.pp error)));
+      test "get_info decodes empty-name bucket links" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw connection ->
+              let jetstream = expect_jetstream (Nats_eio.Jetstream.v connection) in
+              let store =
+                expect_store
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"docs")
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.get_info store ~name:"shortcut"));
+              yield_n 5;
+              Eio.Promise.resolve response_u
+                (Ok
+                   (direct_message_wire ~sid:1 ~stream:"OBJ_docs"
+                      ~subject:"$O.docs.M.c2hvcnRjdXQ=" ~sequence:4L
+                      ~timestamp:"2026-08-11T12:00:00.000000000Z"
+                      (object_info_json ~link:("archive", "") ~name:"shortcut"
+                         ~bucket:"docs" ~nuid:"0123456789012345678901"
+                         ~size:0L ~chunks:0L ())));
+              let info = expect_store (Eio.Promise.await result) in
+              (match Nats_eio.Object_store.Info.link info with
+              | Some (Nats_eio.Object_store.Meta.Bucket { bucket }) ->
+                  equal string "archive" bucket
+              | Some (Nats_eio.Object_store.Meta.Object _) ->
+                  fail "empty link name decoded as an object link"
+              | None -> fail "bucket link was discarded");
               match Nats_eio.Connection.close connection with
               | Ok () -> Eio.Promise.resolve hold_u (Error End_of_file)
               | Error error ->
@@ -555,6 +655,86 @@ let () =
               (match Nats_eio.Object_store.Watch.next watch with
               | Ok Nats_eio.Object_store.Watch.Initial_done -> ()
               | Ok _ -> fail "watch emitted an object before its marker"
+              | Error error ->
+                  fail (Format.asprintf "%a" Nats_eio.Object_store.Error.pp error));
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Object_store.Watch.close watch));
+              yield_n 5;
+              Eio.Promise.resolve cleanup_u (Ok (response_wire ~sid:4 "{}"));
+              ignore (expect_store (Eio.Promise.await close_result));
+              match Nats_eio.Connection.close connection with
+              | Ok () -> Eio.Promise.resolve hold_u (Error End_of_file)
+              | Error error ->
+                  fail (Format.asprintf "%a" Nats_eio.Error.pp error)));
+      test "watch timeouts leave the watch usable" (fun () ->
+          let create, create_u = Eio.Promise.create () in
+          let info, info_u = Eio.Promise.create () in
+          let delivery, delivery_u = Eio.Promise.create () in
+          let cleanup, cleanup_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create;
+                `Await info;
+                `Await delivery;
+                `Await cleanup;
+                `Await hold;
+              ]
+            (fun ~sw connection ->
+              let jetstream = expect_jetstream (Nats_eio.Jetstream.v connection) in
+              let store =
+                expect_store
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"docs")
+              in
+              let watch_result, watch_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve watch_result_u
+                    (Nats_eio.Object_store.Watch.v ~sw
+                       ~delivery:Nats_eio.Object_store.Watch.New store));
+              yield_n 5;
+              Eio.Promise.resolve create_u
+                (Ok
+                   (object_consumer_info_wire ~sid:1 ~name:"watch-1"
+                      ~num_pending:0L));
+              yield_n 5;
+              Eio.Promise.resolve info_u
+                (Ok
+                   (object_consumer_info_wire ~sid:3 ~name:"watch-1"
+                      ~num_pending:0L));
+              let watch = expect_store (Eio.Promise.await watch_result) in
+              (match Nats_eio.Object_store.Watch.next watch with
+              | Ok Nats_eio.Object_store.Watch.Initial_done -> ()
+              | Ok _ -> fail "watch emitted an object before its marker"
+              | Error error ->
+                  fail (Format.asprintf "%a" Nats_eio.Object_store.Error.pp error));
+              (match
+                 Nats_eio.Object_store.Watch.next_with_timeout
+                   ~timeout:Mtime.Span.(1 * ms) watch
+               with
+              | Error
+                  (Nats_eio.Object_store.Error.Connection Nats_eio.Error.Timeout) ->
+                  ()
+              | Ok _ -> fail "watch timeout unexpectedly returned a message"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected watch timeout: %a"
+                       Nats_eio.Object_store.Error.pp error));
+              Eio.Promise.resolve delivery_u
+                (Ok
+                   (object_metadata_delivery_wire ~sid:2 ~consumer:"watch-1"
+                      ~name:"hello" ~num_pending:0L
+                      (object_info_json ~name:"hello" ~bucket:"docs"
+                         ~nuid:"0123456789012345678901" ~size:5L ~chunks:1L
+                         ~digest:"SHA-256=LPJNul-wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=" ())));
+              (match Nats_eio.Object_store.Watch.next watch with
+              | Ok (Nats_eio.Object_store.Watch.Info info) ->
+                  equal string "hello" (Nats_eio.Object_store.Info.name info)
+              | Ok Nats_eio.Object_store.Watch.Initial_done ->
+                  fail "watch repeated its initial marker"
               | Error error ->
                   fail (Format.asprintf "%a" Nats_eio.Object_store.Error.pp error));
               let close_result, close_result_u = Eio.Promise.create () in

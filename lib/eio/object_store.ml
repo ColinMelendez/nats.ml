@@ -10,6 +10,7 @@ module Error = struct
   type meta =
     | Invalid_chunk_size of int
     | Duplicate_attribute of string
+    | Invalid_link of { bucket : string; name : string option }
 
   type t =
     | Connection of Connection.error
@@ -57,6 +58,12 @@ module Error = struct
         Format.fprintf ppf "invalid object-store chunk size %d" value
     | Duplicate_attribute name ->
         Format.fprintf ppf "object metadata repeats attribute %S" name
+    | Invalid_link { bucket; name } ->
+        Format.fprintf ppf "invalid object link target %S%a" bucket
+          (fun ppf -> function
+            | None -> ()
+            | Some name -> Format.fprintf ppf "/%s" name)
+          name
 
   let pp ppf = function
     | Connection error ->
@@ -171,6 +178,20 @@ module Meta = struct
       attributes;
     !duplicate
 
+  let validate_link = function
+    | None -> Ok ()
+    | Some (Object { bucket; name }) -> (
+        match validate_bucket bucket with
+        | Error _ -> Error (Error.Invalid_link { bucket; name = Some name })
+        | Ok () -> (
+            match validate_name name with
+            | Error _ -> Error (Error.Invalid_link { bucket; name = Some name })
+            | Ok () -> Ok ()))
+    | Some (Bucket { bucket }) -> (
+        match validate_bucket bucket with
+        | Error _ -> Error (Error.Invalid_link { bucket; name = None })
+        | Ok () -> Ok ())
+
   let v ?(description = "") ?(headers = Nats.Header.empty) ?(attributes = [])
       ?chunk_size ?link () =
     match chunk_size with
@@ -178,7 +199,10 @@ module Meta = struct
     | _ -> (
         match duplicate_attribute attributes with
         | Some name -> Error (Error.Duplicate_attribute name)
-        | None -> Ok { description; headers; attributes; chunk_size; link })
+        | None -> (
+            match validate_link link with
+            | Error error -> Error error
+            | Ok () -> Ok { description; headers; attributes; chunk_size; link }))
 
   let description value = value.description
   let headers value = value.headers
@@ -246,6 +270,9 @@ module Config = struct
             match validate_limit "max_bytes" max_bytes with
             | Error error -> Error error
             | Ok () ->
+                let max_bytes =
+                  match max_bytes with Some 0L -> None | value -> value
+                in
                 Ok
                   {
                     bucket;
@@ -549,8 +576,8 @@ let header_object ~field = function
 
 let link_of_wire (value : wire_link) =
   match value.name with
+  | Some "" | None -> Meta.Bucket { bucket = value.bucket }
   | Some name -> Meta.Object { bucket = value.bucket; name }
-  | None -> Meta.Bucket { bucket = value.bucket }
 
 let wire_link_of_link = function
   | Meta.Object { bucket; name } -> { bucket; name = Some name }
@@ -670,6 +697,16 @@ let get_info ?(show_deleted = false) value ~name =
                      { expected = value.bucket; actual = Info.bucket info })
               else if not (String.equal (Info.name info) name) then
                 Error (Error.Invalid_name (Info.name info))
+              else if
+                not
+                  (Nats.Subject.equal
+                     (Jetstream.Stream.Message.subject message)
+                     (meta_subject value name))
+              then
+                Error
+                  (Error.Invalid_message_subject
+                     (Nats.Subject.to_string
+                        (Jetstream.Stream.Message.subject message)))
               else if Info.deleted info && not show_deleted then
                 Error (Error.Object_not_found)
               else
@@ -778,13 +815,14 @@ let upload value ~name ~meta ~chunk_size ~source ~previous =
         while not !eof && Option.is_none !failure do
           try
             let count = Eio.Flow.single_read source buffer in
-            let payload = Cstruct.to_string (Cstruct.sub buffer 0 count) in
-            match Jetstream.publish value.jetstream chunk_subject payload with
-            | Error error -> failure := Some (map_jetstream_error error)
-            | Ok _ ->
-                digest := Digestif.SHA256.feed_string !digest payload;
-                size := Int64.add !size (Int64.of_int count);
-                chunks := Int64.add !chunks 1L
+            if count > 0 then
+              let payload = Cstruct.to_string (Cstruct.sub buffer 0 count) in
+              match Jetstream.publish value.jetstream chunk_subject payload with
+              | Error error -> failure := Some (map_jetstream_error error)
+              | Ok _ ->
+                  digest := Digestif.SHA256.feed_string !digest payload;
+                  size := Int64.add !size (Int64.of_int count);
+                  chunks := Int64.add !chunks 1L
           with
           | End_of_file -> eof := true
           | Eio.Io _ as error -> failure := Some (Error.Io error)
@@ -1035,6 +1073,13 @@ let info_of_delivery (value : t) message =
               Error
                 (Error.Unexpected_bucket
                    { expected = value.bucket; actual = Info.bucket info })
+            else if
+              not
+                (Nats.Subject.equal
+                   (Jetstream.Msg.subject message)
+                   (meta_subject value (Info.name info)))
+            then
+              Error (Error.Invalid_message_subject subject)
             else
               match timestamp_of_nanoseconds (Jetstream.Msg.timestamp message) with
               | Error error -> Error error
@@ -1138,9 +1183,9 @@ let delete value ~name =
       | Ok () -> purge_chunks value (Info.nuid info))
 
 let update_meta value ~name meta =
-  match get_info value ~name with
-  | Error Error.Object_not_found -> Error (Error.Update_deleted { name })
+  match get_info ~show_deleted:true value ~name with
   | Error error -> Error error
+  | Ok info when Info.deleted info -> Error (Error.Update_deleted { name })
   | Ok info -> (
       match
         Meta.v ~description:(Meta.description meta) ~headers:(Meta.headers meta)
@@ -1328,7 +1373,10 @@ module Watch = struct
               match next_message () with
               | Error error ->
                   let error = map_error error in
-                  fail watch error;
+                  (match error with
+                  | Error.Connection Core_error.Timeout -> ()
+                  | Error.Closed -> watch.state <- Closed
+                  | _ -> fail watch error);
                   result := Some (Error error)
               | Ok message -> (
                   update_initial watch message;

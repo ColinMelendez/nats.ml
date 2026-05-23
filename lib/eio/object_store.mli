@@ -1,4 +1,8 @@
-(** JetStream-backed NATS Object Store buckets. *)
+(** JetStream-backed NATS Object Store buckets.
+
+    Buckets store object metadata separately from acknowledged, incrementally
+    transferred chunks. Use {!put} and {!get} for large objects and {!Watch}
+    for metadata changes. *)
 
 module Error : sig
   type config =
@@ -10,6 +14,7 @@ module Error : sig
   type meta =
     | Invalid_chunk_size of int
     | Duplicate_attribute of string
+    | Invalid_link of { bucket : string; name : string option }
 
   type t =
     | Connection of Connection.error
@@ -73,6 +78,7 @@ end
 
 module Info : sig
   type t
+  (** The metadata for one object or object link. *)
 
   val name : t -> string
   val bucket : t -> string
@@ -126,6 +132,7 @@ module Status : sig
 end
 
 type t
+(** A handle to an existing or newly created object-store bucket. *)
 
 val create : Jetstream.t -> Config.t -> (t, Error.t) result
 (** [create jetstream config] creates the [OBJ_<bucket>] JetStream stream. *)
@@ -156,7 +163,9 @@ val put :
   (Info.t, Error.t) result
 (** [put bucket ~name source] streams [source] into the bucket. Each chunk is
     acknowledged by JetStream before the next chunk is read. The metadata
-    message is published only after the source reaches end of file. *)
+    message is published only after the source reaches end of file. An
+    existing object is replaced after the new metadata is committed. Links
+    cannot be uploaded with this operation. *)
 
 val put_string :
   ?chunk_size:int ->
@@ -174,7 +183,8 @@ val get :
   sink:_ Eio.Flow.sink ->
   (Info.t, Error.t) result
 (** [get ~sw bucket ~name sink] streams the object's chunks into [sink] and
-    verifies both the advertised size and digest before returning. *)
+    verifies both the advertised size and digest before returning. Object
+    links are resolved recursively; bucket links are not readable as objects. *)
 
 val get_string :
   sw:Eio.Switch.t ->
@@ -186,12 +196,17 @@ val get_string :
 val delete : t -> name:string -> (unit, Error.t) result
 
 val update_meta : t -> name:string -> Meta.t -> (Info.t, Error.t) result
+(** [update_meta bucket ~name meta] replaces an object's description, headers,
+    and attributes. The existing chunk size and link target are preserved. *)
 
 val list : ?show_deleted:bool -> t -> (Info.t list, Error.t) result
+(** [list bucket] returns the latest metadata for each object. It is not an
+    atomic snapshot of concurrent writes. *)
 
 val link : t -> name:string -> target:Info.t -> (Info.t, Error.t) result
 val link_bucket : t -> name:string -> bucket:t -> (Info.t, Error.t) result
 val seal : t -> (unit, Error.t) result
+(** [seal bucket] prevents further writes to the bucket through JetStream. *)
 
 type bucket = t
 
@@ -208,8 +223,10 @@ module Watch : sig
     bucket ->
     (t, Error.t) result
   (** [v ~sw bucket] watches metadata for the bucket. [name] selects one exact
-      object. [Latest] emits one retained value per object, [History] emits all
-      retained metadata, and [New] emits only subsequent metadata. *)
+      object. [Last_per_subject] emits one retained value per object, [All]
+      emits all retained metadata, and [New] emits only subsequent metadata.
+      Each watch emits [Initial_done] once after its retained initial values;
+      timeout errors from {!next_with_timeout} do not close the watch. *)
 
   val next : t -> (event, Error.t) result
   val next_with_timeout : timeout:Mtime.Span.t -> t -> (event, Error.t) result
