@@ -667,10 +667,12 @@ These modules should be layered over `Connection.request` and
   Other advanced consumer behavior remains a planned extension.
 - `Nats_eio.Key_value` provides bucket creation/opening, validated bucket
   configuration/status, get/get-revision, put, create/update compare-and-set,
-  delete/purge, and cancellable `New`, `Last_per_subject`, and `All` watches.
-  Watch entries preserve bucket, key, value, revision, RFC3339 timestamp, and
-  operation (`put`, `delete`, or `purge`); key enumeration and explicit history
-  helpers remain planned extensions.
+  delete/purge, finite live-key enumeration, retained per-key history, and
+  cancellable `New`, `Last_per_subject`, and `All` watches. Finite reads use
+  short-lived pull consumers and preserve server delivery order without
+  claiming an atomic bucket snapshot. Watch entries preserve bucket, key,
+  value, revision, RFC3339 timestamp, and operation (`put`, `delete`, or
+  `purge`).
 - `Nats_eio.Object_store` provides streaming put/get, metadata, list, watch,
   update, link, and seal. Large objects must be transferred incrementally and
   not assembled into one mandatory in-memory string.

@@ -89,10 +89,12 @@ ephemeral pull consumers, force no-ack memory-backed configuration, validate
 consumer sequence continuity, and recreate consumers after gaps, liveness loss,
 deletion, or non-replayed disconnects while resuming from the next stream
 sequence. KV now provides bucket configuration/status, direct reads, put/create/
-update/delete/purge compare-and-set operations, and typed cancellable watches
-over the owned push path. Explicit key enumeration and broader KV expiry,
-history, and reconnect acceptance remain ahead; Object Store and Services remain
-later work. Real cluster and cross-SDK interop coverage is deliberately deferred
+update/delete/purge compare-and-set operations, typed cancellable watches over
+the owned push path, finite live-key enumeration, and retained per-key history
+reads. Finite reads use ephemeral pull consumers with pending-aware draining and
+cancellation-protected cleanup. Broader KV expiry and reconnect acceptance
+remain ahead; Object Store and Services remain later work. Real cluster and
+cross-SDK interop coverage is deliberately deferred
 to the final acceptance phase; current confidence comes from local mock
 transport and pure-boundary tests.
 The recovery bridge
@@ -524,9 +526,12 @@ semantics before calling the feature complete.
 - Completed locally: implement cancellable `New`, `Last_per_subject`, and
   `All` watches with exact/wildcard key filters, one ordered `Initial_done`
   event, metadata-only delivery, and typed put/delete/purge entries.
-- Remaining: add a dedicated key enumeration API, explicit history helpers,
-  server-expiry assertions, and watch ordering/cancellation coverage through
-  reconnect and cross-SDK acceptance.
+- Completed locally: add finite live-key enumeration with bucket-relative
+  filters and explicit retained per-key history, including put/delete/purge
+  entries. One-shot consumers drain by pending metadata, retry transient empty
+  fetches, and are deleted on every completion path.
+- Remaining: server-expiry assertions and watch ordering/cancellation coverage
+  through reconnect and cross-SDK acceptance.
 
 ### Workstream 5B — Object Store
 
@@ -537,9 +542,9 @@ semantics before calling the feature complete.
 
 ### Acceptance tests
 
-- KV CAS success/failure, revisions, deletes/purges, and watch ordering are
-  covered locally through the Eio mock transport; watch history and TTL expiry
-  assertions remain acceptance work.
+- KV CAS success/failure, revisions, deletes/purges, finite key/history reads,
+  and watch ordering are covered locally through the Eio mock transport; watch
+  history and TTL expiry assertions remain acceptance work.
 - Watch cancellation and ordering under reconnect remain a real-server and
   cross-SDK acceptance item.
 - Large Object Store transfer, metadata, listing, linking, sealing, and
