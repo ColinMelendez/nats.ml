@@ -101,7 +101,9 @@ latest-object listing, cancellable ordered watches, object and bucket links,
 metadata updates, and sealing. Local confidence comes from pure-boundary tests
 and Eio mock-transport black-box tests. Real cluster and cross-SDK interop
 coverage is deliberately deferred to the final acceptance phase. Replication,
-placement, compression, and bucket metadata remain planned work.
+placement, compression, and bucket metadata are now modeled through the shared
+JetStream stream configuration and covered locally; server-version and cluster
+behavior remain acceptance work.
 Services now have their first local Eio implementation and black-box coverage;
 real-server acceptance remains.
 The recovery bridge
@@ -554,8 +556,12 @@ semantics before calling the feature complete.
   Inventory returns recognized statuses, propagates incomplete pages, and
   ignores unrelated streams. Updates preserve Object Store stream invariants
   and unknown server fields through JetStream read-modify-write.
-- Remaining: replicated or compressed/placed buckets, bucket metadata, and
-  real-server/cross-SDK acceptance.
+- Completed locally: expose replica count, shared placement values, S2
+  compression, and bucket metadata in create, inventory/status, and full-
+  replacement update operations. Validation rejects invalid replica counts,
+  empty placement tags, empty metadata keys, and duplicate metadata keys.
+- Remaining: real-server/cross-SDK acceptance, including server-version gates
+  and cluster placement/replication behavior.
 
 ### Acceptance tests
 
@@ -569,8 +575,9 @@ semantics before calling the feature complete.
   real-server behavior and cross-SDK wire compatibility remain acceptance
   work.
 - Bucket inventory filtering, incomplete-page errors, status/configuration
-  round-trips, and sealed configuration updates are covered locally; cluster
-  configuration fields remain intentionally out of this slice.
+  round-trips, sealed configuration updates, and advanced cluster-backed
+  configuration fields are covered locally; server-version and real cluster
+  behavior remain acceptance work.
 - No direct dependence by these modules on a private socket or private
   connection lifecycle.
 
