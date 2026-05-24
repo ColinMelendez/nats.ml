@@ -402,6 +402,129 @@ let () =
           in
           equal bool false
             (Nats_eio.Jetstream.Stream.Config.allow_direct updated));
+      test "stream create emits retained config fields" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Stream.Config.v ~name:"KV_users"
+                     ~subjects:[ Nats.Subject.Filter.literal "$KV.users.>" ]
+                     ~description:"user values" ~max_msgs_per_subject:5L
+                     ~allow_rollup:true ~allow_direct:true ())
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Stream.create jetstream config));
+              yield_n 5;
+              let trace = Buffer.contents trace in
+              if not (contains_substring ~needle:"STREAM.CREATE.KV_users" trace)
+              then fail "stream create was not sent";
+              if
+                not
+                  (contains_substring ~needle:"description\\\":\\\"user values"
+                     trace)
+              then fail "stream create omitted the description";
+              if
+                not
+                  (contains_substring ~needle:"max_msgs_per_subject\\\":5" trace)
+              then fail "stream create omitted the per-subject limit";
+              if
+                not
+                  (contains_substring ~needle:"allow_rollup_hdrs\\\":true" trace)
+              then fail "stream create omitted the rollup-header flag";
+              if not (contains_substring ~needle:"allow_direct\\\":true" trace)
+              then fail "stream create omitted the direct-read flag";
+              Eio.Promise.resolve response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"config":{"name":"KV_users","subjects":["$KV.users.>"],"description":"user values","storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":5,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":true,"allow_direct":true,"num_replicas":3,"sealed":true,"metadata":{"owner":"test"}}}|}));
+              let stream = expect_jetstream_ok (Eio.Promise.await result) in
+              equal string "KV_users" (Nats_eio.Jetstream.Stream.name stream);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "stream update preserves unknown server configuration" (fun () ->
+          let info_response, info_response_u = Eio.Promise.create () in
+          let update_response, update_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await info_response;
+                `Await update_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Stream.Config.v ~name:"ORDERS"
+                     ~subjects:[ Nats.Subject.Filter.literal "orders.>" ]
+                     ~description:"updated" ~max_msgs_per_subject:5L
+                     ~allow_rollup:true ~allow_direct:true ())
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Stream.update stream config));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"config":{"name":"ORDERS","subjects":["orders.>"],"description":"before","storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":-1,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":false,"allow_direct":false,"num_replicas":3,"sealed":true,"metadata":{"owner":"test"}},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}));
+              yield_n 5;
+              let trace = Buffer.contents trace in
+              if not (contains_substring ~needle:"STREAM.UPDATE.ORDERS" trace)
+              then fail "stream update was not sent";
+              if
+                not
+                  (contains_substring ~needle:"description\\\":\\\"updated"
+                     trace)
+              then fail "stream update did not emit the changed description";
+              if
+                not
+                  (contains_substring ~needle:"max_msgs_per_subject\\\":5" trace)
+              then
+                fail "stream update did not emit the changed per-subject limit";
+              if
+                not
+                  (contains_substring ~needle:"allow_rollup_hdrs\\\":true" trace)
+              then fail "stream update did not emit the changed rollup flag";
+              if not (contains_substring ~needle:"allow_direct\\\":true" trace)
+              then
+                fail "stream update did not emit the changed direct-read flag";
+              if count_substring ~needle:"num_replicas\\\":3" trace < 2 then
+                fail "stream update discarded an unknown numeric field";
+              if count_substring ~needle:"sealed\\\":true" trace < 2 then
+                fail "stream update discarded an unknown boolean field";
+              if
+                count_substring
+                  ~needle:"metadata\\\":{\\\"owner\\\":\\\"test\\\"}" trace
+                < 2
+              then fail "stream update discarded an unknown object field";
+              Eio.Promise.resolve update_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:2
+                      {|{"config":{"name":"ORDERS","subjects":["orders.>"],"description":"updated","storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":5,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":true,"allow_direct":true,"num_replicas":3,"sealed":true,"metadata":{"owner":"test"}},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}));
+              let info = expect_jetstream_ok (Eio.Promise.await result) in
+              equal (option string) (Some "updated")
+                (Nats_eio.Jetstream.Stream.Config.description
+                   (Nats_eio.Jetstream.Stream.Info.config info));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream direct reads preserve stored message metadata" (fun () ->
           let first_response, first_response_u = Eio.Promise.create () in
           let second_response, second_response_u = Eio.Promise.create () in
