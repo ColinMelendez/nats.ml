@@ -93,17 +93,17 @@ update/delete/purge compare-and-set operations, typed cancellable watches over
 the owned push path, finite live-key enumeration, and retained per-key history
 reads. Finite reads use ephemeral pull consumers with pending-aware draining and
 cancellation-protected cleanup. The Eio Object Store slice now also provides
-validated bucket configuration/status and lifecycle, padded URL-safe metadata
-subjects, repeated-header metadata, incremental acknowledged chunk uploads,
+validated bucket configuration/status and lifecycle, bucket inventory and
+configuration updates, padded URL-safe metadata subjects, repeated-header
+metadata, incremental acknowledged chunk uploads,
 digest/size-checked reads, partial-upload and overwrite cleanup, tombstones,
 latest-object listing, cancellable ordered watches, object and bucket links,
 metadata updates, and sealing. Local confidence comes from pure-boundary tests
 and Eio mock-transport black-box tests. Real cluster and cross-SDK interop
-coverage is deliberately deferred to the final acceptance phase. Bucket
-inventory/configuration extensions, replication, placement, and compression
-remain planned work. Services are now in implementation: the public shape has
-been reviewed against the first-party micro convention, with the remaining
-work limited to the Eio composition and local black-box tests.
+coverage is deliberately deferred to the final acceptance phase. Replication,
+placement, compression, and bucket metadata remain planned work.
+Services now have their first local Eio implementation and black-box coverage;
+real-server acceptance remains.
 The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
@@ -550,8 +550,12 @@ semantics before calling the feature complete.
 - Completed locally: transfer chunks incrementally with per-chunk JetStream
   acknowledgement; publish metadata only after EOF; purge partial uploads and
   superseded chunk subjects; preserve link/chunk-size metadata on updates.
-- Remaining: bucket inventory and configuration-update helpers, replicated or
-  compressed/placed buckets, and real-server/cross-SDK acceptance.
+- Completed locally: add bucket inventory and configuration-update helpers.
+  Inventory returns recognized statuses, propagates incomplete pages, and
+  ignores unrelated streams. Updates preserve Object Store stream invariants
+  and unknown server fields through JetStream read-modify-write.
+- Remaining: replicated or compressed/placed buckets, bucket metadata, and
+  real-server/cross-SDK acceptance.
 
 ### Acceptance tests
 
@@ -564,6 +568,9 @@ semantics before calling the feature complete.
   interrupted-transfer cleanup are covered locally through the mock transport;
   real-server behavior and cross-SDK wire compatibility remain acceptance
   work.
+- Bucket inventory filtering, incomplete-page errors, status/configuration
+  round-trips, and sealed configuration updates are covered locally; cluster
+  configuration fields remain intentionally out of this slice.
 - No direct dependence by these modules on a private socket or private
   connection lifecycle.
 
@@ -615,7 +622,9 @@ invariants:
 Run discovery, request handling, monitoring, queue balancing, reconnect, and
 drain tests against a real server. Services may start after G2 and do not block
 JetStream, KV, or Object Store. Stabilize only after confirming that all
-service behavior composes with the Core connection ownership model.
+service behavior composes with the Core connection ownership model. The local
+Service slice is implemented and mock-covered; this gate is now the live
+interoperability and drain boundary.
 
 ## Phase 7 — Operational polish and optional integrations
 

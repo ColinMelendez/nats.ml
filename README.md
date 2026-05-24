@@ -55,9 +55,10 @@ bucket operations, finite reads, history, and cancellable watches. The
 listing, watches, links, deletion, updates, and sealing. The local
 `Nats_eio.Service` surface provides validated service/endpoint/group values,
 queue-backed workers, Core request replies, service-error responses, and
-`$SRV.PING`/`INFO`/`STATS` monitoring. Bucket inventory/configuration
-extensions, cluster-only Object Store options, and real cluster/interop
-coverage remain later implementation phases.
+`$SRV.PING`/`INFO`/`STATS` monitoring. Object Store also supports bucket
+inventory and modeled configuration updates while preserving server-side
+invariants. Cluster-only Object Store options and real cluster/interop coverage
+remain later implementation phases.
 
 The project uses Dune package management. No compatibility layer for NATS
 Streaming is planned.
