@@ -6,6 +6,9 @@ module Error = struct
     | Invalid_bucket_character of { position : int; character : char }
     | Invalid_ttl
     | Invalid_limit of { field : string; value : int64 }
+    | Invalid_replicas of int
+    | Empty_metadata_key
+    | Duplicate_metadata_key of string
 
   type meta =
     | Invalid_chunk_size of int
@@ -52,6 +55,13 @@ module Error = struct
         Format.pp_print_string ppf "object-store TTL must not be negative"
     | Invalid_limit { field; value } ->
         Format.fprintf ppf "invalid object-store %s limit %Ld" field value
+    | Invalid_replicas value ->
+        Format.fprintf ppf "invalid object-store replica count %d" value
+    | Empty_metadata_key ->
+        Format.pp_print_string ppf
+          "object-store metadata keys must not be empty"
+    | Duplicate_metadata_key key ->
+        Format.fprintf ppf "object-store metadata repeats key %S" key
 
   let pp_meta ppf = function
     | Invalid_chunk_size value ->
@@ -243,6 +253,9 @@ end
 
 module Config = struct
   type storage = Memory | File
+  module Placement = Jetstream.Stream.Config.Placement
+  type compression = Jetstream.Stream.Config.compression = Off | S2
+  type placement = Placement.t
 
   type t = {
     bucket : string;
@@ -250,6 +263,10 @@ module Config = struct
     ttl : Mtime.Span.t option;
     max_bytes : int64 option;
     storage : storage;
+    replicas : int;
+    placement : placement option;
+    compression : compression;
+    metadata : (string * string) list;
   }
 
   type error = Error.config
@@ -259,7 +276,29 @@ module Config = struct
     | Some value when Int64.compare value (-1L) >= 0 -> Ok ()
     | Some value -> Error (Error.Invalid_limit { field; value })
 
-  let v ~bucket ?description ?ttl ?max_bytes ?(storage = File) () =
+  let validate_replicas value =
+    if Int.compare value 1 < 0 || Int.compare value 5 > 0 then
+      Error (Error.Invalid_replicas value)
+    else Ok ()
+
+  let validate_metadata metadata =
+    let seen = ref [] in
+    let invalid = ref None in
+    List.iter
+      (fun pair ->
+        match !invalid with
+        | Some _ -> ()
+        | None ->
+            let key = fst pair in
+            if String.equal key "" then invalid := Some Error.Empty_metadata_key
+            else if List.exists (String.equal key) !seen then
+              invalid := Some (Error.Duplicate_metadata_key key)
+            else seen := key :: !seen)
+      metadata;
+    match !invalid with None -> Ok () | Some error -> Error error
+
+  let v ~bucket ?description ?ttl ?max_bytes ?(storage = File) ?(replicas = 1)
+      ?placement ?(compression = Off) ?(metadata = []) () =
     match validate_bucket bucket with
     | Error error -> Error error
     | Ok () -> (
@@ -269,31 +308,45 @@ module Config = struct
         | _ -> (
             match validate_limit "max_bytes" max_bytes with
             | Error error -> Error error
-            | Ok () ->
-                let max_bytes =
-                  match max_bytes with Some 0L -> None | value -> value
-                in
-                Ok
-                  {
-                    bucket;
-                    description;
-                    ttl =
-                      (match ttl with
-                      | Some value
-                        when Int.equal
-                               (Mtime.Span.compare value Mtime.Span.zero)
-                               0 ->
-                          None
-                      | value -> value);
-                    max_bytes;
-                    storage;
-                  }))
+            | Ok () -> (
+                match validate_replicas replicas with
+                | Error error -> Error error
+                | Ok () -> (
+                    match validate_metadata metadata with
+                    | Error error -> Error error
+                    | Ok () ->
+                        let max_bytes =
+                          match max_bytes with Some 0L -> None | value -> value
+                        in
+                        Ok
+                          {
+                            bucket;
+                            description;
+                            ttl =
+                              (match ttl with
+                              | Some value
+                                when Int.equal
+                                       (Mtime.Span.compare value Mtime.Span.zero)
+                                       0 ->
+                                  None
+                              | value -> value);
+                            max_bytes;
+                            storage;
+                            replicas;
+                            placement;
+                            compression;
+                            metadata;
+                          }))))
 
   let bucket value = value.bucket
   let description value = value.description
   let ttl value = value.ttl
   let max_bytes value = value.max_bytes
   let storage value = value.storage
+  let replicas value = value.replicas
+  let placement value = value.placement
+  let compression value = value.compression
+  let metadata value = value.metadata
 end
 
 module Status = struct
@@ -308,12 +361,18 @@ module Status = struct
     ttl : Mtime.Span.t option;
     max_bytes : int64 option;
     storage : Config.storage;
+    replicas : int;
+    placement : Config.placement option;
+    compression : Config.compression;
+    metadata : (string * string) list;
     sealed : bool;
   }
 
   let config value =
     Config.v ~bucket:value.bucket ?description:value.description ?ttl:value.ttl
-      ?max_bytes:value.max_bytes ~storage:value.storage ()
+      ?max_bytes:value.max_bytes ~storage:value.storage ~replicas:value.replicas
+      ?placement:value.placement ~compression:value.compression
+      ~metadata:value.metadata ()
 
   let bucket value = value.bucket
   let description value = value.description
@@ -325,6 +384,10 @@ module Status = struct
   let ttl value = value.ttl
   let max_bytes value = value.max_bytes
   let storage value = value.storage
+  let replicas value = value.replicas
+  let placement value = value.placement
+  let compression value = value.compression
+  let metadata value = value.metadata
   let sealed value = value.sealed
 end
 
@@ -404,7 +467,11 @@ let stream_for_config config jetstream =
       ?description:(Config.description config) ~storage
       ~retention:Jetstream.Stream.Config.Limits
       ~discard:Jetstream.Stream.Config.New ?max_bytes:(Config.max_bytes config)
-      ?max_age:(Config.ttl config) ~allow_rollup:true ~allow_direct:true ()
+      ?max_age:(Config.ttl config) ~replicas:(Config.replicas config)
+      ?placement:(Config.placement config)
+      ~compression:(Config.compression config)
+      ~metadata:(Config.metadata config) ~allow_rollup:true ~allow_direct:true
+      ()
   with
   | Error error -> Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
   | Ok value -> Ok value
@@ -456,6 +523,10 @@ let status_of_stream_info ~bucket info =
     ttl = Jetstream.Stream.Config.max_age config;
     max_bytes = Jetstream.Stream.Config.max_bytes config;
     storage;
+    replicas = Jetstream.Stream.Config.replicas config;
+    placement = Jetstream.Stream.Config.placement config;
+    compression = Jetstream.Stream.Config.compression config;
+    metadata = Jetstream.Stream.Config.metadata config;
     sealed = Jetstream.Stream.Info.sealed info;
   }
 
@@ -466,27 +537,38 @@ let status value =
 
 let stream_config_for_update ~current config =
   let result =
-    match
+    let ( let* ) value f =
+      match value with Error error -> Error error | Ok value -> f value
+    in
+    let* value =
       Jetstream.Stream.Config.with_description current
         (Config.description config)
-    with
-    | Error error -> Error error
-    | Ok value -> (
-        match
-          Jetstream.Stream.Config.with_storage value
-            (match Config.storage config with
-            | Config.Memory -> Jetstream.Stream.Config.Memory
-            | Config.File -> Jetstream.Stream.Config.File)
-        with
-        | Error error -> Error error
-        | Ok value -> (
-            match
-              Jetstream.Stream.Config.with_max_bytes value
-                (Config.max_bytes config)
-            with
-            | Error error -> Error error
-            | Ok value ->
-                Jetstream.Stream.Config.with_max_age value (Config.ttl config)))
+    in
+    let* value =
+      Jetstream.Stream.Config.with_storage value
+        (match Config.storage config with
+        | Config.Memory -> Jetstream.Stream.Config.Memory
+        | Config.File -> Jetstream.Stream.Config.File)
+    in
+    let* value =
+      Jetstream.Stream.Config.with_max_bytes value (Config.max_bytes config)
+    in
+    let* value =
+      Jetstream.Stream.Config.with_max_age value (Config.ttl config)
+    in
+    let* value =
+      Jetstream.Stream.Config.with_replicas value (Config.replicas config)
+    in
+    let* value =
+      Jetstream.Stream.Config.with_placement value (Config.placement config)
+    in
+    let* value =
+      Jetstream.Stream.Config.with_compression value (Config.compression config)
+    in
+    let* value =
+      Jetstream.Stream.Config.with_metadata value (Config.metadata config)
+    in
+    Ok value
   in
   match result with
   | Ok value -> Ok value

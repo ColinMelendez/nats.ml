@@ -10,6 +10,9 @@ module Error : sig
     | Invalid_bucket_character of { position : int; character : char }
     | Invalid_ttl
     | Invalid_limit of { field : string; value : int64 }
+    | Invalid_replicas of int
+    | Empty_metadata_key
+    | Duplicate_metadata_key of string
 
   type meta =
     | Invalid_chunk_size of int
@@ -96,6 +99,9 @@ end
 
 module Config : sig
   type storage = Memory | File
+  type compression = Jetstream.Stream.Config.compression = Off | S2
+  module Placement = Jetstream.Stream.Config.Placement
+  type placement = Placement.t
   type t
   type error = Error.config
 
@@ -105,6 +111,10 @@ module Config : sig
     ?ttl:Mtime.Span.t ->
     ?max_bytes:int64 ->
     ?storage:storage ->
+    ?replicas:int ->
+    ?placement:placement ->
+    ?compression:compression ->
+    ?metadata:(string * string) list ->
     unit ->
     (t, error) result
 
@@ -113,6 +123,10 @@ module Config : sig
   val ttl : t -> Mtime.Span.t option
   val max_bytes : t -> int64 option
   val storage : t -> storage
+  val replicas : t -> int
+  val placement : t -> placement option
+  val compression : t -> compression
+  val metadata : t -> (string * string) list
 end
 
 module Status : sig
@@ -134,6 +148,10 @@ module Status : sig
   val ttl : t -> Mtime.Span.t option
   val max_bytes : t -> int64 option
   val storage : t -> Config.storage
+  val replicas : t -> int
+  val placement : t -> Config.placement option
+  val compression : t -> Config.compression
+  val metadata : t -> (string * string) list
   val sealed : t -> bool
 end
 

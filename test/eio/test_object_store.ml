@@ -181,16 +181,39 @@ let json_strings values =
   String.concat "," (List.map (fun value -> Format.asprintf "%S" value) values)
 
 let stream_response_json ~name ~subjects ~description ~storage ~max_bytes
-    ~max_age ~sealed ~messages =
+    ~max_age ?(replicas = 1) ?placement
+    ?(compression = Nats_eio.Object_store.Config.Off) ?(metadata = []) ~sealed
+    ~messages () =
   let storage =
     match storage with
     | Nats_eio.Object_store.Config.Memory -> "memory"
     | Nats_eio.Object_store.Config.File -> "file"
   in
+  let compression =
+    match compression with
+    | Nats_eio.Object_store.Config.Off -> "none"
+    | Nats_eio.Object_store.Config.S2 -> "s2"
+  in
+  let placement =
+    match placement with
+    | None -> ""
+    | Some value ->
+        Format.asprintf ",\"placement\":{\"cluster\":%S,\"tags\":[%s]}"
+          (Option.value ~default:""
+             (Nats_eio.Object_store.Config.Placement.cluster value))
+          (json_strings
+             (Nats_eio.Object_store.Config.Placement.tags value))
+  in
+  let metadata =
+    String.concat ","
+      (List.map
+         (fun pair -> Format.asprintf "%S:%S" (fst pair) (snd pair))
+         metadata)
+  in
   Format.asprintf
-    "{\"config\":{\"name\":%S,\"subjects\":[%s],\"storage\":%S,\"retention\":\"limits\",\"discard\":\"new\",\"description\":%S,\"max_bytes\":%Ld,\"max_age\":%Ld,\"allow_rollup_hdrs\":true,\"allow_direct\":true,\"sealed\":%b},\"state\":{\"messages\":%Ld,\"bytes\":%Ld,\"first_seq\":1,\"last_seq\":%Ld,\"consumer_count\":0}}"
-    name (json_strings subjects) storage description max_bytes max_age sealed
-    messages messages messages
+    "{\"config\":{\"name\":%S,\"subjects\":[%s],\"storage\":%S,\"retention\":\"limits\",\"discard\":\"new\",\"description\":%S,\"max_bytes\":%Ld,\"max_age\":%Ld,\"num_replicas\":%d%s,\"compression\":%S,\"metadata\":{%s},\"allow_rollup_hdrs\":true,\"allow_direct\":true,\"sealed\":%b},\"state\":{\"messages\":%Ld,\"bytes\":%Ld,\"first_seq\":1,\"last_seq\":%Ld,\"consumer_count\":0}}"
+    name (json_strings subjects) storage description max_bytes max_age replicas
+    placement compression metadata sealed messages messages messages
 
 let stream_list_wire ~sid responses =
   let payload =
@@ -204,12 +227,26 @@ let () =
   run "nats-eio-object-store"
     [
       test "config and metadata retain caller fields" (fun () ->
+          let placement =
+            match
+              Nats_eio.Object_store.Config.Placement.v
+                ~cluster:"edge-a" ~tags:[ "ssd" ] ()
+            with
+            | Ok value -> value
+            | Error error ->
+                fail
+                  (Format.asprintf "unexpected placement error: %a"
+                     Nats_eio.Jetstream.Error.pp_config error)
+          in
           let config =
             expect_config
               (Nats_eio.Object_store.Config.v ~bucket:"docs"
                  ~description:"uploaded documents" ~ttl:Mtime.Span.(5 * s)
                  ~max_bytes:10_000L
-                 ~storage:Nats_eio.Object_store.Config.Memory ())
+                 ~storage:Nats_eio.Object_store.Config.Memory ~replicas:3
+                 ~placement
+                 ~compression:Nats_eio.Object_store.Config.S2
+                 ~metadata:[ ("team", "infra") ] ())
           in
           equal string "docs" (Nats_eio.Object_store.Config.bucket config);
           equal (option string) (Some "uploaded documents")
@@ -230,6 +267,38 @@ let () =
           (match Nats_eio.Object_store.Config.storage config with
           | Nats_eio.Object_store.Config.Memory -> ()
           | Nats_eio.Object_store.Config.File -> fail "storage changed");
+          equal int 3 (Nats_eio.Object_store.Config.replicas config);
+          (match Nats_eio.Object_store.Config.placement config with
+          | Some value ->
+              equal (option string) (Some "edge-a")
+                (Nats_eio.Object_store.Config.Placement.cluster value)
+          | None -> fail "object-store config lost placement");
+          (match Nats_eio.Object_store.Config.compression config with
+          | Nats_eio.Object_store.Config.S2 -> ()
+          | Nats_eio.Object_store.Config.Off ->
+              fail "object-store config lost compression");
+          equal (list (pair string string)) [ ("team", "infra") ]
+            (Nats_eio.Object_store.Config.metadata config);
+          (match
+             Nats_eio.Object_store.Config.v ~bucket:"invalid-replicas"
+               ~replicas:6 ()
+           with
+          | Error (Nats_eio.Object_store.Error.Invalid_replicas 6) -> ()
+          | Ok _ -> fail "invalid object-store replica count was accepted"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected object-store config error: %a"
+                   Nats_eio.Object_store.Error.pp_config error));
+          (match
+             Nats_eio.Object_store.Config.v ~bucket:"invalid-metadata"
+               ~metadata:[ ("", "value") ] ()
+           with
+          | Error Nats_eio.Object_store.Error.Empty_metadata_key -> ()
+          | Ok _ -> fail "empty object-store metadata key was accepted"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected object-store config error: %a"
+                   Nats_eio.Object_store.Error.pp_config error));
           let headers =
             match Nats.Header.of_list [ ("X-Tag", "a"); ("X-Tag", "b") ] with
             | Ok value -> value
@@ -262,6 +331,62 @@ let () =
                 (Format.asprintf "unexpected metadata error: %a"
                    Nats_eio.Object_store.Error.pp_meta error)
           | Ok _ -> fail "invalid object link was accepted"));
+      test "create sends advanced bucket configuration" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let jetstream = expect_jetstream (Nats_eio.Jetstream.v connection) in
+              let placement =
+                match
+                  Nats_eio.Object_store.Config.Placement.v
+                    ~cluster:"edge-a" ~tags:[ "ssd" ] ()
+                with
+                | Ok value -> value
+                | Error error ->
+                    fail
+                      (Format.asprintf "unexpected placement error: %a"
+                         Nats_eio.Jetstream.Error.pp_config error)
+              in
+              let config =
+                expect_config
+                  (Nats_eio.Object_store.Config.v ~bucket:"docs"
+                     ~description:"documents" ~replicas:3 ~placement
+                     ~compression:Nats_eio.Object_store.Config.S2
+                     ~metadata:[ ("team", "infra") ] ())
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.create jetstream config));
+              yield_n 5;
+              let payload =
+                stream_response_json ~name:"OBJ_docs"
+                  ~subjects:[ "$O.docs.C.>"; "$O.docs.M.>" ]
+                  ~description:"documents"
+                  ~storage:Nats_eio.Object_store.Config.File ~max_bytes:0L
+                  ~max_age:0L ~replicas:3 ~placement
+                  ~compression:Nats_eio.Object_store.Config.S2
+                  ~metadata:[ ("team", "infra") ] ~sealed:false ~messages:0L ()
+              in
+              Eio.Promise.resolve response_u
+                (Ok (response_wire ~sid:1 payload));
+              ignore (expect_store (Eio.Promise.await result));
+              let output = Buffer.contents trace in
+              if
+                not (contains ~needle:"PUB $JS.API.STREAM.CREATE.OBJ_docs" output)
+              then fail "bucket create used the wrong management subject";
+              if not (contains ~needle:{|\"num_replicas\":3|} output) then
+                fail "bucket create lost replicas";
+              if not (contains ~needle:{|\"compression\":\"s2\"|} output)
+              then fail "bucket create lost compression";
+              if not (contains ~needle:{|\"metadata\":{\"team\":\"infra\"}|} output)
+              then fail "bucket create lost metadata";
+              match Nats_eio.Connection.close connection with
+              | Ok () -> Eio.Promise.resolve hold_u (Error End_of_file)
+              | Error error ->
+                  fail (Format.asprintf "%a" Nats_eio.Error.pp error)));
       test "bucket inventory filters object-store streams" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
@@ -276,31 +401,45 @@ let () =
                   Eio.Promise.resolve result_u
                     (Nats_eio.Object_store.list_buckets jetstream));
               yield_n 5;
+              let docs_placement =
+                match
+                  Nats_eio.Object_store.Config.Placement.v
+                    ~cluster:"edge-a" ~tags:[ "ssd" ] ()
+                with
+                | Ok value -> value
+                | Error error ->
+                    fail
+                      (Format.asprintf "unexpected placement error: %a"
+                         Nats_eio.Jetstream.Error.pp_config error)
+              in
               let docs =
                 stream_response_json ~name:"OBJ_docs"
                   ~subjects:[ "$O.docs.C.>"; "$O.docs.M.>" ]
                   ~description:"documents"
                   ~storage:Nats_eio.Object_store.Config.File ~max_bytes:4096L
-                  ~max_age:10_000_000_000L ~sealed:false ~messages:3L
+                  ~max_age:10_000_000_000L ~replicas:3
+                  ~placement:docs_placement
+                  ~compression:Nats_eio.Object_store.Config.S2
+                  ~metadata:[ ("team", "infra") ] ~sealed:false ~messages:3L ()
               in
               let archive =
                 stream_response_json ~name:"OBJ_archive"
                   ~subjects:[ "$O.archive.C.>"; "$O.archive.M.>" ]
                   ~description:"archive"
                   ~storage:Nats_eio.Object_store.Config.Memory ~max_bytes:0L
-                  ~max_age:0L ~sealed:true ~messages:7L
+                  ~max_age:0L ~sealed:true ~messages:7L ()
               in
               let alien =
                 stream_response_json ~name:"OBJ_alien"
                   ~subjects:[ "$O.alien.C.>" ] ~description:"alien"
                   ~storage:Nats_eio.Object_store.Config.File ~max_bytes:0L
-                  ~max_age:0L ~sealed:false ~messages:1L
+                  ~max_age:0L ~sealed:false ~messages:1L ()
               in
               let unrelated =
                 stream_response_json ~name:"ORDERS" ~subjects:[ "orders.>" ]
                   ~description:"not an object store"
                   ~storage:Nats_eio.Object_store.Config.File ~max_bytes:0L
-                  ~max_age:0L ~sealed:false ~messages:2L
+                  ~max_age:0L ~sealed:false ~messages:2L ()
               in
               Eio.Promise.resolve response_u
                 (Ok
@@ -329,6 +468,18 @@ let () =
               equal int64 4096L
                 (Option.get
                    (Nats_eio.Object_store.Config.max_bytes docs_config));
+              equal int 3 (Nats_eio.Object_store.Status.replicas docs_status);
+              (match Nats_eio.Object_store.Status.placement docs_status with
+              | Some value ->
+                  equal (option string) (Some "edge-a")
+                    (Nats_eio.Object_store.Config.Placement.cluster value)
+              | None -> fail "bucket inventory lost placement");
+              (match Nats_eio.Object_store.Status.compression docs_status with
+              | Nats_eio.Object_store.Config.S2 -> ()
+              | Nats_eio.Object_store.Config.Off ->
+                  fail "bucket inventory lost compression");
+              equal (list (pair string string)) [ ("team", "infra") ]
+                (Nats_eio.Object_store.Status.metadata docs_status);
               let archive_status =
                 match
                   List.find_opt
@@ -417,13 +568,27 @@ let () =
                   fail
                     (Format.asprintf "unexpected bucket mismatch: %a"
                        Nats_eio.Object_store.Error.pp error));
+              let placement =
+                match
+                  Nats_eio.Object_store.Config.Placement.v
+                    ~cluster:"edge-b" ~tags:[ "archive" ] ()
+                with
+                | Ok value -> value
+                | Error error ->
+                    fail
+                      (Format.asprintf "unexpected placement error: %a"
+                         Nats_eio.Jetstream.Error.pp_config error)
+              in
               let config =
                 expect_config
                   (Nats_eio.Object_store.Config.v ~bucket:"docs"
                      ~description:"updated"
                      ~ttl:Mtime.Span.(5 * s)
                      ~max_bytes:2048L
-                     ~storage:Nats_eio.Object_store.Config.Memory ())
+                     ~storage:Nats_eio.Object_store.Config.Memory ~replicas:4
+                     ~placement
+                     ~compression:Nats_eio.Object_store.Config.S2
+                     ~metadata:[ ("team", "platform") ] ())
               in
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -435,7 +600,7 @@ let () =
                   ~subjects:[ "$O.docs.C.>"; "$O.docs.M.>" ]
                   ~description:"before"
                   ~storage:Nats_eio.Object_store.Config.File ~max_bytes:1024L
-                  ~max_age:1_000_000_000L ~sealed:true ~messages:3L
+                  ~max_age:1_000_000_000L ~sealed:true ~messages:3L ()
               in
               Eio.Promise.resolve current_u
                 (Ok (response_wire ~sid:1 current_payload));
@@ -448,7 +613,9 @@ let () =
                   ~subjects:[ "$O.docs.C.>"; "$O.docs.M.>" ]
                   ~description:"updated"
                   ~storage:Nats_eio.Object_store.Config.Memory ~max_bytes:2048L
-                  ~max_age:5_000_000_000L ~sealed:true ~messages:4L
+                  ~max_age:5_000_000_000L ~replicas:4 ~placement
+                  ~compression:Nats_eio.Object_store.Config.S2
+                  ~metadata:[ ("team", "platform") ] ~sealed:true ~messages:4L ()
               in
               Eio.Promise.resolve updated_u
                 (Ok (response_wire ~sid:3 updated_payload));
@@ -467,6 +634,18 @@ let () =
               | Nats_eio.Object_store.Config.Memory -> ()
               | Nats_eio.Object_store.Config.File ->
                   fail "bucket update did not change storage");
+              equal int 4 (Nats_eio.Object_store.Status.replicas status);
+              (match Nats_eio.Object_store.Status.placement status with
+              | Some value ->
+                  equal (option string) (Some "edge-b")
+                    (Nats_eio.Object_store.Config.Placement.cluster value)
+              | None -> fail "bucket update lost placement");
+              (match Nats_eio.Object_store.Status.compression status with
+              | Nats_eio.Object_store.Config.S2 -> ()
+              | Nats_eio.Object_store.Config.Off ->
+                  fail "bucket update lost compression");
+              equal (list (pair string string)) [ ("team", "platform") ]
+                (Nats_eio.Object_store.Status.metadata status);
               let output = Buffer.contents trace in
               if
                 not (contains ~needle:"PUB $JS.API.STREAM.INFO.OBJ_docs" output)
@@ -481,6 +660,15 @@ let () =
               then fail "bucket update lost rollup support";
               if not (contains ~needle:{|\"allow_direct\":true|} output) then
                 fail "bucket update lost direct reads";
+              if not (contains ~needle:{|\"num_replicas\":4|} output) then
+                fail "bucket update lost replicas";
+              if not (contains ~needle:{|\"compression\":\"s2\"|} output)
+              then fail "bucket update lost compression";
+              if
+                not
+                  (contains ~needle:{|\"metadata\":{\"team\":\"platform\"}|}
+                     output)
+              then fail "bucket update lost metadata";
               match Nats_eio.Connection.close connection with
               | Ok () -> Eio.Promise.resolve hold_u (Error End_of_file)
               | Error error ->
