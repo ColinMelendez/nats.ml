@@ -74,6 +74,40 @@ let with_connection_traced ~reads f =
   in
   f ~sw ~clock:env#clock ~trace connection
 
+let with_reconnecting_connection_traced ~config ~first_reads ~second_reads f =
+  Eio_mock.Backend.run_full @@ fun env ->
+  let first = Eio_mock.Flow.make "service-server-first" in
+  Eio_mock.Flow.on_read first first_reads;
+  let second = Eio_mock.Flow.make "service-server-second" in
+  Eio_mock.Flow.on_read second second_reads;
+  let net = Eio_mock.Net.make "service-reconnect-network" in
+  Eio_mock.Net.on_getaddrinfo net (List.init 64 (fun _ -> `Return [ address ]));
+  Eio_mock.Net.on_connect net [ `Return first; `Return second ];
+  let trace = Buffer.create 8192 in
+  let debug = Eio.Stdenv.debug env in
+  let tracer =
+    {
+      Eio.Debug.traceln =
+        (fun ?__POS__:_ fmt ->
+          Format.kasprintf
+            (fun message ->
+              Buffer.add_string trace message;
+              Buffer.add_char trace '\n')
+            fmt);
+    }
+  in
+  Eio.Fiber.with_binding debug#traceln tracer @@ fun () ->
+  Eio.Switch.run @@ fun sw ->
+  let connection =
+    match
+      Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock ~config
+        [ endpoint ]
+    with
+    | Ok value -> value
+    | Error error -> fail (Format.asprintf "%a" Nats_eio.Error.pp error)
+  in
+  f ~sw ~clock:env#clock ~mono_clock:env#mono_clock ~trace connection
+
 let contains ~needle value =
   let needle_length = String.length needle in
   let limit = String.length value - needle_length in
@@ -85,6 +119,32 @@ let contains ~needle value =
     incr index
   done;
   !found
+
+let count ~needle value =
+  let needle_length = String.length needle in
+  let limit = String.length value - needle_length in
+  let index = ref 0 in
+  let found = ref 0 in
+  while !index <= limit do
+    if String.equal (String.sub value !index needle_length) needle then
+      incr found;
+    incr index
+  done;
+  !found
+
+let wait_for_trace ~mono_clock ~trace ~needle ~count:expected =
+  let seen = ref 0 in
+  let attempts = ref 0 in
+  while !seen < expected && !attempts < 100 do
+    Eio.Time.Mono.sleep mono_clock 0.001;
+    seen := count ~needle (Buffer.contents trace);
+    incr attempts
+  done;
+  if !seen < expected then
+    fail
+      (Format.asprintf
+         "trace did not contain %d occurrences of %S (saw %d); trace:\n%s"
+         expected needle !seen (Buffer.contents trace))
 
 let () =
   run "nats-eio-service"
@@ -152,6 +212,7 @@ let () =
             (Nats_eio.Service.Endpoint.metadata endpoint));
       test "monitoring, queue policy, request replies, and stats" (fun () ->
           let ping, ping_u = Eio.Promise.create () in
+          let info_request, info_request_u = Eio.Promise.create () in
           let first, first_u = Eio.Promise.create () in
           let second, second_u = Eio.Promise.create () in
           let stats_request, stats_request_u = Eio.Promise.create () in
@@ -161,6 +222,7 @@ let () =
               [
                 `Return info_wire;
                 `Await ping;
+                `Await info_request;
                 `Await first;
                 `Await second;
                 `Await stats_request;
@@ -238,6 +300,11 @@ let () =
                    (request_wire ~sid:1 ~subject:"$SRV.PING"
                       ~reply:"_INBOX.ping" ""));
               yield_n 6;
+              Eio.Promise.resolve info_request_u
+                (Ok
+                   (request_wire ~sid:4 ~subject:"$SRV.INFO"
+                      ~reply:"_INBOX.info" ""));
+              yield_n 6;
               Eio.Promise.resolve first_u
                 (Ok
                    (request_wire ~sid:10 ~subject:"created" ~reply:"_INBOX.ok"
@@ -256,6 +323,12 @@ let () =
               let output = Buffer.contents trace in
               if not (contains ~needle:"io.nats.micro.v1.ping_response" output)
               then fail "PING response was not encoded";
+              if not (contains ~needle:"io.nats.micro.v1.info_response" output)
+              then fail "INFO response was not encoded";
+              if not (contains ~needle:{|description\":\"\"|} output) then
+                fail "INFO response omitted its description";
+              if not (contains ~needle:{|queue_group\":\"\"|} output) then
+                fail "INFO response omitted a disabled queue group";
               if not (contains ~needle:"Nats-Service-Error" output) then
                 fail "service-error response did not carry its headers";
               if not (contains ~needle:{|num_requests\":2|} output) then
@@ -271,6 +344,63 @@ let () =
                 (String.length (Nats_eio.Service.Stats.started service_stats));
               expect_connection_ok (Nats_eio.Connection.close connection);
               expect_ok (Nats_eio.Service.stop service);
+              expect_ok (Nats_eio.Service.stop service);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "replayable service subscriptions survive reconnect" (fun () ->
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let delivery, delivery_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let config =
+            match
+              Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 1)
+                ~reconnect_delay:Mtime.Span.(1 * ns)
+                ~reconnect_max_delay:Mtime.Span.(1 * ns)
+                ()
+            with
+            | Ok value -> value
+            | Error error -> fail (Format.asprintf "%a" Nats_eio.Error.pp error)
+          in
+          with_reconnecting_connection_traced ~config
+            ~first_reads:[ `Return info_wire; `Await disconnect ]
+            ~second_reads:[ `Return info_wire; `Await delivery; `Await hold ]
+            (fun ~sw ~clock ~mono_clock ~trace connection ->
+              let service_config =
+                expect_config
+                  (Nats_eio.Service.Config.v ~name:"orders" ~version:"1.2.3" ())
+              in
+              let service =
+                expect_service
+                  (Nats_eio.Service.v ~sw ~clock
+                     ~random:(Random.State.make [| 7; 8; 9 |])
+                     connection service_config)
+              in
+              let handled, handled_u = Eio.Promise.create () in
+              let endpoint =
+                expect_endpoint
+                  (Nats_eio.Service.Endpoint.v ~name:"created" (fun request ->
+                       expect_ok
+                         (Nats_eio.Service.Request.respond request "after");
+                       Eio.Promise.resolve handled_u ()))
+              in
+              expect_ok (Nats_eio.Service.add_endpoint service endpoint);
+              Eio.Promise.resolve disconnect_u (Error End_of_file);
+              wait_for_trace ~mono_clock ~trace
+                ~needle:"wrote \"SUB created q 10\\r\\n\"" ~count:2;
+              Eio.Promise.resolve delivery_u
+                (Ok
+                   (request_wire ~sid:10 ~subject:"created"
+                      ~reply:"_INBOX.after" "request"));
+              Eio.Promise.await handled;
+              let output = Buffer.contents trace in
+              List.iter
+                (fun subject ->
+                  let needle = Format.asprintf "wrote \"SUB %s" subject in
+                  if count ~needle output < 2 then
+                    fail
+                      (Format.asprintf
+                         "monitoring subscription %s was not replayed" subject))
+                [ "$SRV.PING"; "$SRV.INFO"; "$SRV.STATS" ];
+              expect_connection_ok (Nats_eio.Connection.close connection);
               expect_ok (Nats_eio.Service.stop service);
               Eio.Promise.resolve hold_u (Error End_of_file)));
     ]

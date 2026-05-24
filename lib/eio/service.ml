@@ -594,7 +594,7 @@ let wire_identity_codec =
 type wire_endpoint_info = {
   name : string;
   subject : string;
-  queue_group : string option;
+  queue_group : string;
   metadata : Jsont.json;
 }
 
@@ -604,7 +604,7 @@ let wire_endpoint_info_codec =
       { name; subject; queue_group; metadata })
   |> Jsont.Object.mem "name" Jsont.string ~enc:(fun value -> value.name)
   |> Jsont.Object.mem "subject" Jsont.string ~enc:(fun value -> value.subject)
-  |> Jsont.Object.opt_mem "queue_group" Jsont.string ~enc:(fun value ->
+  |> Jsont.Object.mem "queue_group" Jsont.string ~enc:(fun value ->
       value.queue_group)
   |> Jsont.Object.mem "metadata" Jsont.json ~enc:(fun value -> value.metadata)
   |> Jsont.Object.finish
@@ -614,7 +614,7 @@ type wire_info = {
   name : string;
   id : string;
   version : string;
-  description : string option;
+  description : string;
   metadata : Jsont.json;
   endpoints : wire_endpoint_info list;
 }
@@ -627,7 +627,7 @@ let wire_info_codec =
   |> Jsont.Object.mem "name" Jsont.string ~enc:(fun value -> value.name)
   |> Jsont.Object.mem "id" Jsont.string ~enc:(fun value -> value.id)
   |> Jsont.Object.mem "version" Jsont.string ~enc:(fun value -> value.version)
-  |> Jsont.Object.opt_mem "description" Jsont.string ~enc:(fun value ->
+  |> Jsont.Object.mem "description" Jsont.string ~enc:(fun value ->
       value.description)
   |> Jsont.Object.mem "metadata" Jsont.json ~enc:(fun value -> value.metadata)
   |> Jsont.Object.mem "endpoints" (Jsont.list wire_endpoint_info_codec)
@@ -637,7 +637,7 @@ let wire_info_codec =
 type wire_endpoint_stats = {
   name : string;
   subject : string;
-  queue_group : string option;
+  queue_group : string;
   metadata : Jsont.json;
   num_requests : int64;
   num_errors : int64;
@@ -672,7 +672,7 @@ let wire_endpoint_stats_codec =
       })
   |> Jsont.Object.mem "name" Jsont.string ~enc:(fun value -> value.name)
   |> Jsont.Object.mem "subject" Jsont.string ~enc:(fun value -> value.subject)
-  |> Jsont.Object.opt_mem "queue_group" Jsont.string ~enc:(fun value ->
+  |> Jsont.Object.mem "queue_group" Jsont.string ~enc:(fun value ->
       value.queue_group)
   |> Jsont.Object.mem "metadata" Jsont.json ~enc:(fun value -> value.metadata)
   |> Jsont.Object.mem "num_requests" Jsont.int64 ~enc:(fun value ->
@@ -721,7 +721,8 @@ let wire_endpoint_info_of_info (endpoint : Info.endpoint) =
     name = Info.endpoint_name endpoint;
     subject = Nats.Subject.Filter.to_string (Info.endpoint_subject endpoint);
     queue_group =
-      Option.map Nats.Queue_group.to_string (Info.endpoint_queue endpoint);
+      Option.value ~default:""
+        (Option.map Nats.Queue_group.to_string (Info.endpoint_queue endpoint));
     metadata = metadata_or_null (Info.endpoint_metadata endpoint);
   }
 
@@ -730,7 +731,8 @@ let wire_endpoint_stats_of_stats (endpoint : Stats.endpoint) =
     name = Stats.endpoint_name endpoint;
     subject = Nats.Subject.Filter.to_string (Stats.endpoint_subject endpoint);
     queue_group =
-      Option.map Nats.Queue_group.to_string (Stats.endpoint_queue endpoint);
+      Option.value ~default:""
+        (Option.map Nats.Queue_group.to_string (Stats.endpoint_queue endpoint));
     metadata = metadata_or_null (Stats.endpoint_metadata endpoint);
     num_requests = Stats.num_requests endpoint;
     num_errors = Stats.num_errors endpoint;
@@ -757,7 +759,7 @@ let control_payload (service : service) = function
           name = Info.name value;
           id = Info.id value;
           version = Info.version value;
-          description = Info.description value;
+          description = Option.value ~default:"" (Info.description value);
           metadata = metadata_json (Info.metadata value);
           endpoints = List.map wire_endpoint_info_of_info (Info.endpoints value);
         }
