@@ -311,6 +311,10 @@ module Status = struct
     sealed : bool;
   }
 
+  let config value =
+    Config.v ~bucket:value.bucket ?description:value.description ?ttl:value.ttl
+      ?max_bytes:value.max_bytes ~storage:value.storage ()
+
   let bucket value = value.bucket
   let description value = value.description
   let values value = value.values
@@ -340,6 +344,38 @@ let bucket value = value.bucket
 let stream_name bucket = "OBJ_" ^ bucket
 let chunk_prefix bucket = "$O." ^ bucket ^ ".C."
 let meta_prefix bucket = "$O." ^ bucket ^ ".M."
+let object_stream_name_prefix = "OBJ_"
+
+let object_stream_subjects bucket =
+  [ chunk_prefix bucket ^ ">"; meta_prefix bucket ^ ">" ]
+
+let has_subject expected subjects =
+  List.exists
+    (fun subject ->
+      String.equal expected (Nats.Subject.Filter.to_string subject))
+    subjects
+
+let bucket_of_stream_info info =
+  let config = Jetstream.Stream.Info.config info in
+  let name = Jetstream.Stream.Config.name config in
+  let prefix_length = String.length object_stream_name_prefix in
+  if String.length name <= prefix_length then None
+  else if
+    not
+      (String.equal object_stream_name_prefix (String.sub name 0 prefix_length))
+  then None
+  else
+    let bucket =
+      String.sub name prefix_length (String.length name - prefix_length)
+    in
+    match validate_bucket bucket with
+    | Error _ -> None
+    | Ok () ->
+        let subjects = Jetstream.Stream.Config.subjects config in
+        let required = object_stream_subjects bucket in
+        if List.for_all (fun subject -> has_subject subject subjects) required
+        then Some bucket
+        else None
 
 let encoded_name name =
   Base64.encode_string ~pad:true ~alphabet:Base64.uri_safe_alphabet name
@@ -402,30 +438,95 @@ let delete_bucket value =
   | Ok () -> Ok ()
   | Error error -> Error (map_jetstream_error error)
 
+let status_of_stream_info ~bucket info =
+  let config = Jetstream.Stream.Info.config info in
+  let storage =
+    match Jetstream.Stream.Config.storage config with
+    | Jetstream.Stream.Config.Memory -> Config.Memory
+    | Jetstream.Stream.Config.File -> Config.File
+  in
+  {
+    Status.bucket;
+    description = Jetstream.Stream.Config.description config;
+    values = Jetstream.Stream.Info.messages info;
+    bytes = Jetstream.Stream.Info.bytes info;
+    first_sequence = Jetstream.Stream.Info.first_sequence info;
+    last_sequence = Jetstream.Stream.Info.last_sequence info;
+    consumer_count = Jetstream.Stream.Info.consumer_count info;
+    ttl = Jetstream.Stream.Config.max_age config;
+    max_bytes = Jetstream.Stream.Config.max_bytes config;
+    storage;
+    sealed = Jetstream.Stream.Info.sealed info;
+  }
+
 let status value =
   match Jetstream.Stream.info value.stream with
   | Error error -> Error (map_jetstream_error error)
-  | Ok info ->
-      let config = Jetstream.Stream.Info.config info in
-      let storage =
-        match Jetstream.Stream.Config.storage config with
-        | Jetstream.Stream.Config.Memory -> Config.Memory
-        | Jetstream.Stream.Config.File -> Config.File
-      in
-      Ok
-        {
-          Status.bucket = value.bucket;
-          description = Jetstream.Stream.Config.description config;
-          values = Jetstream.Stream.Info.messages info;
-          bytes = Jetstream.Stream.Info.bytes info;
-          first_sequence = Jetstream.Stream.Info.first_sequence info;
-          last_sequence = Jetstream.Stream.Info.last_sequence info;
-          consumer_count = Jetstream.Stream.Info.consumer_count info;
-          ttl = Jetstream.Stream.Config.max_age config;
-          max_bytes = Jetstream.Stream.Config.max_bytes config;
-          storage;
-          sealed = Jetstream.Stream.Info.sealed info;
-        }
+  | Ok info -> Ok (status_of_stream_info ~bucket:value.bucket info)
+
+let stream_config_for_update ~current config =
+  let result =
+    match
+      Jetstream.Stream.Config.with_description current
+        (Config.description config)
+    with
+    | Error error -> Error error
+    | Ok value -> (
+        match
+          Jetstream.Stream.Config.with_storage value
+            (match Config.storage config with
+            | Config.Memory -> Jetstream.Stream.Config.Memory
+            | Config.File -> Jetstream.Stream.Config.File)
+        with
+        | Error error -> Error error
+        | Ok value -> (
+            match
+              Jetstream.Stream.Config.with_max_bytes value
+                (Config.max_bytes config)
+            with
+            | Error error -> Error error
+            | Ok value ->
+                Jetstream.Stream.Config.with_max_age value (Config.ttl config)))
+  in
+  match result with
+  | Ok value -> Ok value
+  | Error error ->
+      Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
+
+let update value config =
+  if not (String.equal value.bucket (Config.bucket config)) then
+    Error
+      (Error.Unexpected_bucket
+         { expected = value.bucket; actual = Config.bucket config })
+  else
+    match Jetstream.Stream.info value.stream with
+    | Error error -> Error (map_jetstream_error error)
+    | Ok current -> (
+        match
+          stream_config_for_update
+            ~current:(Jetstream.Stream.Info.config current)
+            config
+        with
+        | Error error -> Error error
+        | Ok stream_config -> (
+            match Jetstream.Stream.update value.stream stream_config with
+            | Error error -> Error (map_jetstream_error error)
+            | Ok info -> Ok (status_of_stream_info ~bucket:value.bucket info)))
+
+let list_buckets jetstream =
+  let subject = Nats.Subject.Filter.literal "$O.>" in
+  match Jetstream.Stream.list ~subject jetstream with
+  | Error error -> Error (map_jetstream_error error)
+  | Ok infos ->
+      let statuses = ref [] in
+      List.iter
+        (fun info ->
+          match bucket_of_stream_info info with
+          | None -> ()
+          | Some bucket ->
+              statuses := status_of_stream_info ~bucket info :: !statuses)
+        infos;
+      Ok (List.rev !statuses)
 
 type wire_link = { bucket : string; name : string option }
 

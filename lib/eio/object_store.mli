@@ -118,6 +118,12 @@ end
 module Status : sig
   type t
 
+  val config : t -> (Config.t, Error.config) result
+  (** [config status] converts the modeled status fields into a configuration
+      suitable for a full-replacement bucket update. The sealed state is not
+      part of the returned configuration; {!update} preserves it from the
+      server-side stream. *)
+
   val bucket : t -> string
   val description : t -> string option
   val values : t -> int64
@@ -137,6 +143,11 @@ type t
 val create : Jetstream.t -> Config.t -> (t, Error.t) result
 (** [create jetstream config] creates the [OBJ_<bucket>] JetStream stream. *)
 
+val list_buckets : Jetstream.t -> (Status.t list, Error.t) result
+(** [list_buckets jetstream] returns statuses for all recognized Object Store
+    buckets. Streams outside the Object Store subject convention are ignored;
+    incomplete JetStream pages and malformed responses remain errors. *)
+
 val open_ : Jetstream.t -> bucket:string -> (t, Error.t) result
 (** [open_ jetstream ~bucket] opens an existing object-store bucket. *)
 
@@ -146,6 +157,11 @@ val bind : Jetstream.t -> bucket:string -> (t, Error.t) result
 
 val bucket : t -> string
 val status : t -> (Status.t, Error.t) result
+
+val update : t -> Config.t -> (Status.t, Error.t) result
+(** [update bucket config] replaces the modeled bucket configuration. The
+    bucket name must match, and the current sealed state and Object Store
+    invariants are preserved. *)
 val delete_bucket : t -> (unit, Error.t) result
 
 val get_info :

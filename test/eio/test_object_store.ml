@@ -130,6 +130,18 @@ let yield_n count =
     decr count
   done
 
+let contains ~needle value =
+  let needle_length = String.length needle in
+  let limit = String.length value - needle_length in
+  let index = ref 0 in
+  let found = ref false in
+  while (not !found) && !index <= limit do
+    if String.equal (String.sub value !index needle_length) needle then
+      found := true;
+    incr index
+  done;
+  !found
+
 let expect_config = function
   | Ok value -> value
   | Error error ->
@@ -164,6 +176,29 @@ let object_info_json ?(digest = "") ?(deleted = false) ?(headers = "{}")
   Format.asprintf
     "{\"name\":%S,\"description\":\"\",\"headers\":%s,\"metadata\":{},\"options\":%s,\"bucket\":%S,\"nuid\":%S,\"size\":%Ld,\"mtime\":\"\",\"chunks\":%Ld,\"digest\":%S,\"deleted\":%b}"
     name headers options bucket nuid size chunks digest deleted
+
+let json_strings values =
+  String.concat "," (List.map (fun value -> Format.asprintf "%S" value) values)
+
+let stream_response_json ~name ~subjects ~description ~storage ~max_bytes
+    ~max_age ~sealed ~messages =
+  let storage =
+    match storage with
+    | Nats_eio.Object_store.Config.Memory -> "memory"
+    | Nats_eio.Object_store.Config.File -> "file"
+  in
+  Format.asprintf
+    "{\"config\":{\"name\":%S,\"subjects\":[%s],\"storage\":%S,\"retention\":\"limits\",\"discard\":\"new\",\"description\":%S,\"max_bytes\":%Ld,\"max_age\":%Ld,\"allow_rollup_hdrs\":true,\"allow_direct\":true,\"sealed\":%b},\"state\":{\"messages\":%Ld,\"bytes\":%Ld,\"first_seq\":1,\"last_seq\":%Ld,\"consumer_count\":0}}"
+    name (json_strings subjects) storage description max_bytes max_age sealed
+    messages messages messages
+
+let stream_list_wire ~sid responses =
+  let payload =
+    Format.asprintf "{\"total\":%d,\"offset\":0,\"limit\":100,\"streams\":[%s]}"
+      (List.length responses)
+      (String.concat "," responses)
+  in
+  response_wire ~sid payload
 
 let () =
   run "nats-eio-object-store"
@@ -227,6 +262,229 @@ let () =
                 (Format.asprintf "unexpected metadata error: %a"
                    Nats_eio.Object_store.Error.pp_meta error)
           | Ok _ -> fail "invalid object link was accepted"));
+      test "bucket inventory filters object-store streams" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw connection ->
+              let jetstream =
+                expect_jetstream (Nats_eio.Jetstream.v connection)
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.list_buckets jetstream));
+              yield_n 5;
+              let docs =
+                stream_response_json ~name:"OBJ_docs"
+                  ~subjects:[ "$O.docs.C.>"; "$O.docs.M.>" ]
+                  ~description:"documents"
+                  ~storage:Nats_eio.Object_store.Config.File ~max_bytes:4096L
+                  ~max_age:10_000_000_000L ~sealed:false ~messages:3L
+              in
+              let archive =
+                stream_response_json ~name:"OBJ_archive"
+                  ~subjects:[ "$O.archive.C.>"; "$O.archive.M.>" ]
+                  ~description:"archive"
+                  ~storage:Nats_eio.Object_store.Config.Memory ~max_bytes:0L
+                  ~max_age:0L ~sealed:true ~messages:7L
+              in
+              let alien =
+                stream_response_json ~name:"OBJ_alien"
+                  ~subjects:[ "$O.alien.C.>" ] ~description:"alien"
+                  ~storage:Nats_eio.Object_store.Config.File ~max_bytes:0L
+                  ~max_age:0L ~sealed:false ~messages:1L
+              in
+              let unrelated =
+                stream_response_json ~name:"ORDERS" ~subjects:[ "orders.>" ]
+                  ~description:"not an object store"
+                  ~storage:Nats_eio.Object_store.Config.File ~max_bytes:0L
+                  ~max_age:0L ~sealed:false ~messages:2L
+              in
+              Eio.Promise.resolve response_u
+                (Ok
+                   (stream_list_wire ~sid:1 [ docs; archive; alien; unrelated ]));
+              let statuses = expect_store (Eio.Promise.await result) in
+              equal int 2 (List.length statuses);
+              let docs_status =
+                match
+                  List.find_opt
+                    (fun status ->
+                      String.equal "docs"
+                        (Nats_eio.Object_store.Status.bucket status))
+                    statuses
+                with
+                | Some value -> value
+                | None -> fail "docs bucket was not listed"
+              in
+              equal (option string) (Some "documents")
+                (Nats_eio.Object_store.Status.description docs_status);
+              equal int64 3L (Nats_eio.Object_store.Status.values docs_status);
+              let docs_config =
+                expect_config (Nats_eio.Object_store.Status.config docs_status)
+              in
+              equal string "docs"
+                (Nats_eio.Object_store.Config.bucket docs_config);
+              equal int64 4096L
+                (Option.get
+                   (Nats_eio.Object_store.Config.max_bytes docs_config));
+              let archive_status =
+                match
+                  List.find_opt
+                    (fun status ->
+                      String.equal "archive"
+                        (Nats_eio.Object_store.Status.bucket status))
+                    statuses
+                with
+                | Some value -> value
+                | None -> fail "archive bucket was not listed"
+              in
+              if not (Nats_eio.Object_store.Status.sealed archive_status) then
+                fail "sealed bucket lost its status";
+              match Nats_eio.Connection.close connection with
+              | Ok () -> Eio.Promise.resolve hold_u (Error End_of_file)
+              | Error error ->
+                  fail (Format.asprintf "%a" Nats_eio.Error.pp error)));
+      test "bucket inventory rejects incomplete stream pages" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw connection ->
+              let jetstream = expect_jetstream (Nats_eio.Jetstream.v connection) in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.list_buckets jetstream));
+              yield_n 5;
+              Eio.Promise.resolve response_u
+                (Ok
+                   (response_wire ~sid:1
+                      {|{"total":1,"offset":0,"limit":100,"streams":[],"missing":["OBJ_docs"]}|}));
+              (match Eio.Promise.await result with
+              | Error
+                  (Nats_eio.Object_store.Error.Jetstream
+                     (Nats_eio.Jetstream.Error.Incomplete_list
+                        { kind = Nats_eio.Jetstream.Error.Streams;
+                          missing = [ "OBJ_docs" ] })) ->
+                  ()
+              | Ok _ -> fail "incomplete bucket inventory was accepted"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected inventory error: %a"
+                       Nats_eio.Object_store.Error.pp error));
+              match Nats_eio.Connection.close connection with
+              | Ok () -> Eio.Promise.resolve hold_u (Error End_of_file)
+              | Error error ->
+                  fail (Format.asprintf "%a" Nats_eio.Error.pp error)));
+      test "bucket update preserves object-store invariants" (fun () ->
+          let current, current_u = Eio.Promise.create () in
+          let current_again, current_again_u = Eio.Promise.create () in
+          let updated, updated_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await current;
+                `Await current_again;
+                `Await updated;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream (Nats_eio.Jetstream.v connection)
+              in
+              let store =
+                expect_store
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"docs")
+              in
+              let mismatch =
+                expect_config
+                  (Nats_eio.Object_store.Config.v ~bucket:"other"
+                     ~description:"wrong" ())
+              in
+              (match Nats_eio.Object_store.update store mismatch with
+              | Error
+                  (Nats_eio.Object_store.Error.Unexpected_bucket
+                     { expected; actual })
+                when String.equal expected "docs" && String.equal actual "other"
+                ->
+                  ()
+              | Ok _ -> fail "bucket update accepted a different bucket"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected bucket mismatch: %a"
+                       Nats_eio.Object_store.Error.pp error));
+              let config =
+                expect_config
+                  (Nats_eio.Object_store.Config.v ~bucket:"docs"
+                     ~description:"updated"
+                     ~ttl:Mtime.Span.(5 * s)
+                     ~max_bytes:2048L
+                     ~storage:Nats_eio.Object_store.Config.Memory ())
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.update store config));
+              yield_n 5;
+              let current_payload =
+                stream_response_json ~name:"OBJ_docs"
+                  ~subjects:[ "$O.docs.C.>"; "$O.docs.M.>" ]
+                  ~description:"before"
+                  ~storage:Nats_eio.Object_store.Config.File ~max_bytes:1024L
+                  ~max_age:1_000_000_000L ~sealed:true ~messages:3L
+              in
+              Eio.Promise.resolve current_u
+                (Ok (response_wire ~sid:1 current_payload));
+              yield_n 5;
+              Eio.Promise.resolve current_again_u
+                (Ok (response_wire ~sid:2 current_payload));
+              yield_n 5;
+              let updated_payload =
+                stream_response_json ~name:"OBJ_docs"
+                  ~subjects:[ "$O.docs.C.>"; "$O.docs.M.>" ]
+                  ~description:"updated"
+                  ~storage:Nats_eio.Object_store.Config.Memory ~max_bytes:2048L
+                  ~max_age:5_000_000_000L ~sealed:true ~messages:4L
+              in
+              Eio.Promise.resolve updated_u
+                (Ok (response_wire ~sid:3 updated_payload));
+              let status = expect_store (Eio.Promise.await result) in
+              equal (option string) (Some "updated")
+                (Nats_eio.Object_store.Status.description status);
+              equal int64 5_000_000_000L
+                (Option.get
+                   (Option.map Mtime.Span.to_uint64_ns
+                      (Nats_eio.Object_store.Status.ttl status)));
+              equal int64 2048L
+                (Option.get (Nats_eio.Object_store.Status.max_bytes status));
+              if not (Nats_eio.Object_store.Status.sealed status) then
+                fail "bucket update cleared the sealed state";
+              (match Nats_eio.Object_store.Status.storage status with
+              | Nats_eio.Object_store.Config.Memory -> ()
+              | Nats_eio.Object_store.Config.File ->
+                  fail "bucket update did not change storage");
+              let output = Buffer.contents trace in
+              if
+                not (contains ~needle:"PUB $JS.API.STREAM.INFO.OBJ_docs" output)
+              then fail "bucket update did not read current stream config";
+              if
+                not
+                  (contains ~needle:"PUB $JS.API.STREAM.UPDATE.OBJ_docs" output)
+              then fail "bucket update did not send stream update";
+              if not (contains ~needle:{|\"sealed\":true|} output) then
+                fail "bucket update did not preserve sealed state";
+              if not (contains ~needle:{|\"allow_rollup_hdrs\":true|} output)
+              then fail "bucket update lost rollup support";
+              if not (contains ~needle:{|\"allow_direct\":true|} output) then
+                fail "bucket update lost direct reads";
+              match Nats_eio.Connection.close connection with
+              | Ok () -> Eio.Promise.resolve hold_u (Error End_of_file)
+              | Error error ->
+                  fail (Format.asprintf "%a" Nats_eio.Error.pp error)));
       test "get_info decodes padded metadata subjects and headers" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
