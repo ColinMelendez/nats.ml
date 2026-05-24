@@ -17,9 +17,11 @@ The first API-stability gate should cover Core NATS and its Eio facade. The
 longer-term SDK target is JetStream, Key-Value, Object Store, and Services, but
 those surfaces should stabilize only after the Core NATS connection,
 subscription, reconnect, and drain semantics have been exercised against a
-real server. NATS Streaming is intentionally out of scope. It is a separate,
-legacy protocol and compatibility with its APIs or data formats would weaken a
-new library without helping the NATS design.
+real server. The local Eio implementation now includes the planned Object
+Store transfer and metadata slice; its cluster-only options and cross-SDK
+acceptance remain open. NATS Streaming is intentionally out of scope. It is a
+separate, legacy protocol and compatibility with its APIs or data formats would
+weaken a new library without helping the NATS design.
 
 ## 1. Research scope
 
@@ -674,8 +676,11 @@ These modules should be layered over `Connection.request` and
   value, revision, RFC3339 timestamp, and operation (`put`, `delete`, or
   `purge`).
 - `Nats_eio.Object_store` provides streaming put/get, metadata, list, watch,
-  update, link, and seal. Large objects must be transferred incrementally and
-  not assembled into one mandatory in-memory string.
+  update, delete, link, and seal. Large objects are transferred incrementally
+  and are not assembled into one mandatory in-memory string. Metadata subjects
+  use the padded URL-safe encoding used by the first-party clients; chunk
+  uploads are acknowledged before the next source read, and failed or
+  superseded chunk subjects are purged.
 - `Nats_eio.Service` provides endpoint and group definitions, queue-backed
   workers, typed request handlers, service metadata, and automatic responses to
   discovery/monitoring subjects. It should compose from core subscriptions and
@@ -706,9 +711,20 @@ acknowledgement verbs, one-shot fetch, and persistent pull sessions. Stream
 updates preserve unknown server configuration through an INFO/read-modify-write
 cycle; list operations consume server pagination and fail explicitly on an
 incomplete page. The management prefix is configurable for JetStream domains,
-while application subjects remain ordinary Core NATS subjects. KV, Object
-Store, Services, and other advanced flow-control features remain later layers
-over the same connection.
+while application subjects remain ordinary Core NATS subjects. KV and the
+Object Store surface are layered over the same connection; Services,
+bucket inventory/configuration extensions, replicated/compressed/placed Object
+Store buckets, and other advanced flow-control features remain later work.
+
+The local Object Store implementation uses the same typed stream capability.
+It models the two retained subject families (`$O.<bucket>.C.>` for chunks and
+`$O.<bucket>.M.>` for metadata), publishes metadata as a subject rollup, and
+uses ordered consumers for exact chunk reads and cancellable metadata watches.
+Reads verify the advertised SHA-256 digest and size before succeeding. Links
+are resolved recursively with explicit cycle, deleted-target, and bucket-link
+errors. The mock-transport suite covers empty and chunked uploads, repeated
+headers, exact subject validation, digest-checked reads, deletion/purge,
+listing, watch initial markers, timeout resumption, and cleanup sequencing.
 
 ## 6. Testing and interoperability
 

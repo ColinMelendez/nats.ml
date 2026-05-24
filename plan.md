@@ -92,11 +92,16 @@ sequence. KV now provides bucket configuration/status, direct reads, put/create/
 update/delete/purge compare-and-set operations, typed cancellable watches over
 the owned push path, finite live-key enumeration, and retained per-key history
 reads. Finite reads use ephemeral pull consumers with pending-aware draining and
-cancellation-protected cleanup. Broader KV expiry and reconnect acceptance
-remain ahead; Object Store and Services remain later work. Real cluster and
-cross-SDK interop coverage is deliberately deferred
-to the final acceptance phase; current confidence comes from local mock
-transport and pure-boundary tests.
+cancellation-protected cleanup. The Eio Object Store slice now also provides
+validated bucket configuration/status and lifecycle, padded URL-safe metadata
+subjects, repeated-header metadata, incremental acknowledged chunk uploads,
+digest/size-checked reads, partial-upload and overwrite cleanup, tombstones,
+latest-object listing, cancellable ordered watches, object and bucket links,
+metadata updates, and sealing. Local confidence comes from pure-boundary tests
+and Eio mock-transport black-box tests. Real cluster and cross-SDK interop
+coverage is deliberately deferred to the final acceptance phase. Bucket
+inventory/configuration extensions, replication, placement, compression, and
+Services remain planned work.
 The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
@@ -535,10 +540,16 @@ semantics before calling the feature complete.
 
 ### Workstream 5B — Object Store
 
-- Implement metadata, streaming put/get, list, watch, update, link, and seal.
-- Transfer chunks incrementally; never require a whole object as one `string`.
-- Define cancellation, digest/size verification, partial-failure, and cleanup
-  behavior for interrupted transfers.
+- Completed locally: implement validated bucket configuration/status and
+  create/open/bind/delete lifecycle.
+- Completed locally: implement metadata, padded URL-safe name subjects,
+  repeated headers, streaming put/get, digest/size verification, list, watch,
+  metadata update, delete, object/bucket links, and seal.
+- Completed locally: transfer chunks incrementally with per-chunk JetStream
+  acknowledgement; publish metadata only after EOF; purge partial uploads and
+  superseded chunk subjects; preserve link/chunk-size metadata on updates.
+- Remaining: bucket inventory and configuration-update helpers, replicated or
+  compressed/placed buckets, and real-server/cross-SDK acceptance.
 
 ### Acceptance tests
 
@@ -548,7 +559,9 @@ semantics before calling the feature complete.
 - Watch cancellation and ordering under reconnect remain a real-server and
   cross-SDK acceptance item.
 - Large Object Store transfer, metadata, listing, linking, sealing, and
-  interrupted-transfer cleanup.
+  interrupted-transfer cleanup are covered locally through the mock transport;
+  real-server behavior and cross-SDK wire compatibility remain acceptance
+  work.
 - No direct dependence by these modules on a private socket or private
   connection lifecycle.
 

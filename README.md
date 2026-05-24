@@ -49,7 +49,11 @@ NATS request/reply. Push sessions consume idle heartbeats, answer flow-control
 requests including stalled-heartbeat replies, and restore replayable delivery
 subscriptions across reconnects. Ordered sessions use client-managed
 ephemeral pull consumers, validate consecutive consumer sequences, and resume
-from the next stream sequence after recovery. KV, Object Store, Services, and
+from the next stream sequence after recovery. `Nats_eio.Key_value` provides
+bucket operations, finite reads, history, and cancellable watches. The
+`Nats_eio.Object_store` surface provides incremental put/get, metadata,
+listing, watches, links, deletion, updates, and sealing. Services, bucket
+inventory/configuration extensions, cluster-only Object Store options, and
 real cluster/interop coverage remain later implementation phases.
 
 The project uses Dune package management. No compatibility layer for NATS
