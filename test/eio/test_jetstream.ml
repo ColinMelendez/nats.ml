@@ -317,18 +317,6 @@ let contains_substring ~needle value =
   done;
   !found
 
-let index_substring ~needle value =
-  let needle_length = String.length needle in
-  let limit = String.length value - needle_length in
-  let index = ref 0 in
-  let found = ref None in
-  while Option.is_none !found && !index <= limit do
-    if String.equal (String.sub value !index needle_length) needle then
-      found := Some !index;
-    incr index
-  done;
-  !found
-
 let count_substring ~needle value =
   let needle_length = String.length needle in
   let limit = String.length value - needle_length in
@@ -373,113 +361,47 @@ let rec yield_n count =
 let () =
   run "nats-eio-jetstream"
     [
-      test "stream config models direct and per-subject limits" (fun () ->
+      test "stream config retains direct and per-subject limits" (fun () ->
           let subject = Nats.Subject.Filter.literal "$KV.users.>" in
           let config =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Stream.Config.v ~name:"KV_users"
-                 ~subjects:[ subject ] ~max_msgs_per_subject:5L
-                 ~description:"user values" ~allow_rollup:true
-                 ~allow_direct:true ~sealed:true ())
+                 ~subjects:[ subject ] ~description:"user values"
+                 ~max_msgs_per_subject:5L ~allow_rollup:true ~allow_direct:true
+                 ())
           in
-          (match
-             Nats_eio.Jetstream.Stream.Config.max_msgs_per_subject config
-           with
-          | Some value -> equal int64 5L value
-          | None -> fail "stream config lost per-subject limit");
-          equal bool true (Nats_eio.Jetstream.Stream.Config.allow_rollup config);
-          equal bool true (Nats_eio.Jetstream.Stream.Config.allow_direct config);
           equal (option string) (Some "user values")
             (Nats_eio.Jetstream.Stream.Config.description config);
-          equal bool true (Nats_eio.Jetstream.Stream.Config.sealed config);
-          let unsealed =
+          let described =
             expect_jetstream_config_ok
-              (Nats_eio.Jetstream.Stream.Config.with_sealed config false)
+              (Nats_eio.Jetstream.Stream.Config.with_description config
+                 (Some "updated values"))
+          in
+          equal (option string) (Some "updated values")
+            (Nats_eio.Jetstream.Stream.Config.description described);
+          equal (option int64) (Some 5L)
+            (Nats_eio.Jetstream.Stream.Config.max_msgs_per_subject config);
+          equal bool true (Nats_eio.Jetstream.Stream.Config.allow_rollup config);
+          equal bool true (Nats_eio.Jetstream.Stream.Config.allow_direct config);
+          let updated =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_max_msgs_per_subject config
+                 None)
+          in
+          equal (option int64) None
+            (Nats_eio.Jetstream.Stream.Config.max_msgs_per_subject updated);
+          let updated =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_allow_rollup updated false)
           in
           equal bool false
-            (Nats_eio.Jetstream.Stream.Config.sealed unsealed);
-          let no_description =
+            (Nats_eio.Jetstream.Stream.Config.allow_rollup updated);
+          let updated =
             expect_jetstream_config_ok
-              (Nats_eio.Jetstream.Stream.Config.with_description unsealed None)
+              (Nats_eio.Jetstream.Stream.Config.with_allow_direct updated false)
           in
-          equal (option string) None
-            (Nats_eio.Jetstream.Stream.Config.description no_description));
-      test "stream config validates placement and metadata" (fun () ->
-          let placement =
-            match
-              Nats_eio.Jetstream.Stream.Config.Placement.v
-                ~cluster:"edge-a" ~tags:[ "ssd"; "fast" ] ()
-            with
-            | Ok value -> value
-            | Error error ->
-                fail
-                  (Format.asprintf "unexpected placement error: %a"
-                     Nats_eio.Jetstream.Error.pp_config error)
-          in
-          let config =
-            expect_jetstream_config_ok
-              (Nats_eio.Jetstream.Stream.Config.v ~name:"ARCHIVE"
-                 ~subjects:[ Nats.Subject.Filter.literal "archive.>" ]
-                 ~replicas:3 ~placement
-                 ~compression:Nats_eio.Jetstream.Stream.Config.S2
-                 ~metadata:[ ("team", "infra"); ("tier", "cold") ] ())
-          in
-          equal int 3
-            (Nats_eio.Jetstream.Stream.Config.replicas config);
-          (match
-             Nats_eio.Jetstream.Stream.Config.placement config
-           with
-          | Some value ->
-              equal (option string) (Some "edge-a")
-                (Nats_eio.Jetstream.Stream.Config.Placement.cluster value);
-              equal (list string) [ "ssd"; "fast" ]
-                (Nats_eio.Jetstream.Stream.Config.Placement.tags value)
-          | None -> fail "stream config lost placement");
-          equal bool true
-            (match
-               Nats_eio.Jetstream.Stream.Config.compression config
-             with
-            | Nats_eio.Jetstream.Stream.Config.S2 -> true
-            | Nats_eio.Jetstream.Stream.Config.Off -> false);
-          equal (list (pair string string))
-            [ ("team", "infra"); ("tier", "cold") ]
-            (Nats_eio.Jetstream.Stream.Config.metadata config);
-          (match
-             Nats_eio.Jetstream.Stream.Config.Placement.v ~tags:[] ()
-           with
-          | Error Nats_eio.Jetstream.Error.Empty_placement -> ()
-          | Ok _ -> fail "empty placement was accepted"
-          | Error error ->
-              fail
-                (Format.asprintf "unexpected placement error: %a"
-                   Nats_eio.Jetstream.Error.pp_config error));
-          (match
-             Nats_eio.Jetstream.Stream.Config.Placement.v ~tags:[ "" ] ()
-           with
-          | Error (Nats_eio.Jetstream.Error.Empty_placement_tag 0) -> ()
-          | Ok _ -> fail "empty placement tag was accepted"
-          | Error error ->
-              fail
-                (Format.asprintf "unexpected placement error: %a"
-                   Nats_eio.Jetstream.Error.pp_config error));
-          (match
-             Nats_eio.Jetstream.Stream.Config.with_replicas config 6
-           with
-          | Error (Nats_eio.Jetstream.Error.Invalid_replicas 6) -> ()
-          | Ok _ -> fail "invalid replica count was accepted"
-          | Error error ->
-              fail
-                (Format.asprintf "unexpected replica error: %a"
-                   Nats_eio.Jetstream.Error.pp_config error));
-          match
-            Nats_eio.Jetstream.Stream.Config.with_metadata config [ ("", "x") ]
-          with
-          | Error Nats_eio.Jetstream.Error.Empty_metadata_key -> ()
-          | Ok _ -> fail "empty metadata key was accepted"
-          | Error error ->
-              fail
-                (Format.asprintf "unexpected metadata error: %a"
-                   Nats_eio.Jetstream.Error.pp_config error));
+          equal bool false
+            (Nats_eio.Jetstream.Stream.Config.allow_direct updated));
       test "stream direct reads preserve stored message metadata" (fun () ->
           let first_response, first_response_u = Eio.Promise.create () in
           let second_response, second_response_u = Eio.Promise.create () in
@@ -611,68 +533,6 @@ let () =
           | Some true -> ()
           | Some false -> fail "consumer config changed flow control"
           | None -> fail "consumer config lost flow control");
-      test "owned push subscribes before creation and deletes on close"
-        (fun () ->
-          let create_response, create_response_u = Eio.Promise.create () in
-          let delete_response, delete_response_u = Eio.Promise.create () in
-          let hold, hold_u = Eio.Promise.create () in
-          with_connection_traced
-            ~reads:
-              [
-                `Return info_wire;
-                `Await create_response;
-                `Await delete_response;
-                `Await hold;
-              ]
-            (fun ~sw ~trace connection ->
-              let jetstream =
-                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
-              in
-              let stream =
-                expect_jetstream_ok
-                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
-              in
-              let config =
-                expect_jetstream_config_ok
-                  (Nats_eio.Jetstream.Consumer.Config.v
-                     ~deliver_subject:(Nats.Subject.literal "orders.push")
-                     ~ack_policy:Nats_eio.Jetstream.Consumer.Config.No_ack ())
-              in
-              let push_result, push_result_u = Eio.Promise.create () in
-              Eio.Fiber.fork ~sw (fun () ->
-                  Eio.Promise.resolve push_result_u
-                    (Nats_eio.Jetstream.Consumer.Push.create ~sw stream config));
-              yield_n 5;
-              Eio.Promise.resolve create_response_u
-                (Ok (ephemeral_push_create_wire_with_sid ~sid:2));
-              let push = expect_jetstream_ok (Eio.Promise.await push_result) in
-              let trace_output = Buffer.contents trace in
-              (match
-                 ( index_substring ~needle:"wrote \"SUB orders.push 1\\r\\n\""
-                     trace_output,
-                   index_substring
-                     ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS"
-                     trace_output )
-               with
-              | Some subscribe, Some create
-                when Int.compare subscribe create < 0 ->
-                  ()
-              | _ -> fail "owned push created its consumer before subscribing");
-              let close_result, close_result_u = Eio.Promise.create () in
-              Eio.Fiber.fork ~sw (fun () ->
-                  Eio.Promise.resolve close_result_u
-                    (Nats_eio.Jetstream.Consumer.Push.close push));
-              yield_n 5;
-              Eio.Promise.resolve delete_response_u (Ok (api_ok_wire ~sid:3));
-              expect_jetstream_ok (Eio.Promise.await close_result);
-              if
-                not
-                  (contains_substring
-                     ~needle:"wrote \"PUB $JS.API.CONSUMER.DELETE.ORDERS.worker"
-                     (Buffer.contents trace))
-              then fail "owned push close did not delete its consumer";
-              expect_ok (Nats_eio.Connection.close connection);
-              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "push subscribes using the server consumer configuration" (fun () ->
           let info_response, info_response_u = Eio.Promise.create () in
           let delivery, delivery_u = Eio.Promise.create () in

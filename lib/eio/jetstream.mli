@@ -6,11 +6,6 @@ module Error : sig
     | Invalid_name_character of { position : int; character : char }
     | Empty_subjects
     | Invalid_limit of { field : string; value : int64 }
-    | Invalid_replicas of int
-    | Empty_placement
-    | Empty_placement_tag of int
-    | Empty_metadata_key
-    | Duplicate_metadata_key of string
     | Invalid_max_age
     | Empty_consumer_name
     | Invalid_consumer_name_character of { position : int; character : char }
@@ -77,21 +72,6 @@ module Stream : sig
     type storage = Memory | File
     type retention = Limits | Interest | Work_queue
     type discard = Old | New
-    type compression = Off | S2
-
-    module Placement : sig
-      type t
-
-      val v :
-        ?cluster:string ->
-        tags:string list ->
-        unit ->
-        (t, Error.config) result
-
-      val cluster : t -> string option
-      val tags : t -> string list
-    end
-
     type t
     type error = Error.config
 
@@ -107,13 +87,8 @@ module Stream : sig
       ?max_bytes:int64 ->
       ?max_age:Mtime.Span.t ->
       ?max_msg_size:int64 ->
-      ?replicas:int ->
-      ?placement:Placement.t ->
-      ?compression:compression ->
-      ?metadata:(string * string) list ->
       ?allow_rollup:bool ->
       ?allow_direct:bool ->
-      ?sealed:bool ->
       unit ->
       (t, error) result
     (** [v] validates a stream name, capture filters, and limits. Limits use
@@ -130,13 +105,8 @@ module Stream : sig
     val max_bytes : t -> int64 option
     val max_age : t -> Mtime.Span.t option
     val max_msg_size : t -> int64 option
-    val replicas : t -> int
-    val placement : t -> Placement.t option
-    val compression : t -> compression
-    val metadata : t -> (string * string) list
     val allow_rollup : t -> bool
     val allow_direct : t -> bool
-    val sealed : t -> bool
 
     val with_name : t -> string -> (t, error) result
     (** [with_name config name] validates [name] while preserving the other
@@ -180,20 +150,6 @@ module Stream : sig
     (** [with_max_msg_size config value] validates and replaces the per-message
         size limit. [None] means unlimited. *)
 
-    val with_replicas : t -> int -> (t, error) result
-    (** [with_replicas config value] validates and replaces the replica count. *)
-
-    val with_placement :
-      t -> Placement.t option -> (t, error) result
-    (** [with_placement config value] replaces the placement constraint. *)
-
-    val with_compression : t -> compression -> (t, error) result
-    (** [with_compression config value] replaces the storage compression. *)
-
-    val with_metadata :
-      t -> (string * string) list -> (t, error) result
-    (** [with_metadata config value] validates and replaces stream metadata. *)
-
     val with_allow_rollup : t -> bool -> (t, error) result
     (** [with_allow_rollup config value] replaces whether rollup headers are
         accepted by the stream. *)
@@ -201,9 +157,6 @@ module Stream : sig
     val with_allow_direct : t -> bool -> (t, error) result
     (** [with_allow_direct config value] replaces whether direct message reads
         are accepted by the stream. *)
-
-    val with_sealed : t -> bool -> (t, error) result
-    (** [with_sealed config value] replaces whether the stream is sealed. *)
   end
 
   module Info : sig
@@ -215,7 +168,6 @@ module Stream : sig
     val first_sequence : t -> int64
     val last_sequence : t -> int64
     val consumer_count : t -> int
-    val sealed : t -> bool
     val pp : Format.formatter -> t -> unit
   end
 
@@ -269,17 +221,6 @@ module Stream : sig
       exact subject through JetStream's direct message API. *)
 
   val delete : t -> (unit, Error.t) result
-
-  val purge :
-    ?timeout:Mtime.Span.t ->
-    ?filter:Nats.Subject.Filter.t ->
-    ?sequence:int64 ->
-    ?keep:int64 ->
-    t ->
-    (unit, Error.t) result
-  (** [purge stream] removes all retained messages. [filter] limits the purge
-      to matching subjects; [sequence] removes messages before that stream
-      sequence, and [keep] retains the newest number of matching messages. *)
 end
 
 module Msg : sig
@@ -481,13 +422,6 @@ module Consumer : sig
     type consumer = t
     type t
 
-    val create :
-      sw:Eio.Switch.t -> stream -> Config.t -> (t, Error.t) result
-    (** [create ~sw stream config] subscribes to the configured delivery
-        subject before creating an ephemeral push consumer. The returned
-        session owns that consumer and deletes it when [close] or [sw]
-        releases it. *)
-
     val v : sw:Eio.Switch.t -> consumer -> (t, Error.t) result
     (** [v ~sw consumer] subscribes to the delivery subject configured on a
         push consumer. It reads the server-side configuration and returns
@@ -501,9 +435,6 @@ module Consumer : sig
         with [info], while missing ephemeral consumers are recreated from
         their last configuration. The session is single-owner: do not call
         [next] or [next_with_timeout] concurrently on one value. *)
-
-    val consumer : t -> consumer
-    (** [consumer push] is the current server-side consumer owned by [push]. *)
 
     val next : t -> (Msg.t, Error.t) result
     (** [next push] waits for the next delivered message. Messages are not
@@ -572,9 +503,6 @@ module Consumer : sig
     (** [close ordered] stops the pull session, best-effort deletes its current
         ephemeral consumer, and is idempotent. Explicit closure returns
         [Ordered_closed] from subsequent reads. *)
-
-    val info : t -> (Info.t, Error.t) result
-    (** [info ordered] reads the current server-side consumer information. *)
   end
 
   val info : ?timeout:Mtime.Span.t -> t -> (Info.t, Error.t) result
