@@ -1,4 +1,4 @@
 (library
  (name nats_eio)
  (public_name nats-eio)
- (libraries nats bytesrw jsont jsont.bytesrw eio cstruct base64 digestif tls-eio mtime unix))
+ (libraries nats bytesrw jsont jsont.bytesrw eio cstruct tls-eio mtime))

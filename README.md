@@ -43,22 +43,15 @@ and cleanup. The JetStream test uses a per-run stream name; set
 debugging.
 
 The first JetStream layer is available through `Nats_eio.Jetstream`: typed
-stream and consumer management, one-shot fetch, durable publish and message
-acknowledgements, and switch-owned Eio pull/push sessions over ordinary Core
-NATS request/reply. Push sessions consume idle heartbeats, answer flow-control
-requests including stalled-heartbeat replies, and restore replayable delivery
-subscriptions across reconnects. Ordered sessions use client-managed
-ephemeral pull consumers, validate consecutive consumer sequences, and resume
-from the next stream sequence after recovery. `Nats_eio.Key_value` provides
-bucket operations, finite reads, history, and cancellable watches. The
-`Nats_eio.Object_store` surface provides incremental put/get, metadata,
-listing, watches, links, deletion, updates, and sealing. The local
-`Nats_eio.Service` surface provides validated service/endpoint/group values,
-queue-backed workers, Core request replies, service-error responses, and
-`$SRV.PING`/`INFO`/`STATS` monitoring. Object Store also supports bucket
-inventory and modeled configuration updates while preserving server-side
-invariants. Cluster-only Object Store options and real cluster/interop coverage
-remain later implementation phases.
+stream configuration and management, direct stored-message reads, one-shot
+fetch, durable publish and message acknowledgements, and switch-owned Eio
+pull/push sessions over ordinary Core NATS request/reply. Push sessions
+consume idle heartbeats, answer flow-control requests including stalled-
+heartbeat replies, and restore replayable delivery subscriptions across
+reconnects. Ordered sessions use client-managed ephemeral pull consumers,
+validate consecutive consumer sequences, and resume from the next stream
+sequence after recovery. KV, Object Store, Services, and real cluster/interop
+coverage remain later implementation phases.
 
 The project uses Dune package management. No compatibility layer for NATS
 Streaming is planned.

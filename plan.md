@@ -68,10 +68,11 @@ ahead of the G2 stability gate. Authentication capabilities now cover anonymous,
 token, username/password, NKey, and JWT credentials; nonce signing is repeated
 for every INFO, while private-key parsing and NKey/JWT server acceptance remain
 later work. The JetStream foundation now adds a typed, resource-free capability
-over the connection, stream configuration/info and
-create/bind/update/list/info/delete operations, publish acknowledgements with
-message ids, API error envelopes, and an opt-in real-server acceptance path for
-management, deduplication, and cleanup. The consumer slice now includes
+over the connection, stream configuration/info including per-subject limits and
+direct/rollup flags, stream create/bind/update/list/info/delete and direct
+stored-message reads, publish acknowledgements with message ids, API error
+envelopes, and an opt-in real-server acceptance path for management,
+deduplication, and cleanup. The consumer slice now includes
 consumer management and inventory, one-shot fetch, typed message
 acknowledgements, and a persistent single-owner
 `Consumer.Pull` session with batch accounting, local timeout/resumption,
@@ -82,30 +83,16 @@ single-owner `Consumer.Push` session with delivery-subject and queue-group
 configuration, explicit acknowledgement, local timeout/resumption, and
 fail-closed handling of unsupported status frames. Push sessions consume idle
 heartbeats, answer flow-control requests, track heartbeat liveness, and preserve
-absolute caller timeouts across control traffic. Owned push sessions subscribe
-before creating ephemeral consumers, delete them on close, and resume from the
-next stream sequence after recreation. Ordered sessions now use client-managed
-ephemeral pull consumers, force no-ack memory-backed configuration, validate
-consumer sequence continuity, and recreate consumers after gaps, liveness loss,
-deletion, or non-replayed disconnects while resuming from the next stream
-sequence. KV now provides bucket configuration/status, direct reads, put/create/
-update/delete/purge compare-and-set operations, typed cancellable watches over
-the owned push path, finite live-key enumeration, and retained per-key history
-reads. Finite reads use ephemeral pull consumers with pending-aware draining and
-cancellation-protected cleanup. The Eio Object Store slice now also provides
-validated bucket configuration/status and lifecycle, bucket inventory and
-configuration updates, padded URL-safe metadata subjects, repeated-header
-metadata, incremental acknowledged chunk uploads,
-digest/size-checked reads, partial-upload and overwrite cleanup, tombstones,
-latest-object listing, cancellable ordered watches, object and bucket links,
-metadata updates, and sealing. Local confidence comes from pure-boundary tests
-and Eio mock-transport black-box tests. Real cluster and cross-SDK interop
-coverage is deliberately deferred to the final acceptance phase. Replication,
-placement, compression, and bucket metadata are now modeled through the shared
-JetStream stream configuration and covered locally; server-version and cluster
-behavior remain acceptance work.
-Services now have their first local Eio implementation and black-box coverage;
-real-server acceptance remains.
+absolute caller timeouts across control traffic. Ordered sessions now use
+client-managed ephemeral pull consumers, force no-ack memory-backed
+configuration, validate consumer sequence continuity, and recreate consumers
+after gaps, liveness loss, deletion, or non-replayed disconnects while resuming
+from the next stream sequence. KV, Object Store, and Services remain later
+work. Push reconnect restoration is implemented through replayable subscription
+recovery, including durable confirmation and ephemeral recreation. Real cluster
+and cross-SDK interop coverage is deliberately deferred to the final acceptance
+phase; current consumer confidence comes from local mock transport and
+pure-boundary tests.
 The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
@@ -448,11 +435,13 @@ request/reply and subscription primitives.
   projection does not expose them.
 - Completed: model stream configuration/info, API responses, and structured
   JetStream errors separately from `Nats.Error`; implement stream
-  create/bind/update/list/delete/info, consumer create/bind/info/list/delete,
-  and durable publish acknowledgements with message-id options over application
-  subjects. Stream updates preserve unknown server configuration through an
-  INFO/read-modify-write cycle, and list operations fail with a structured
-  error rather than silently returning an incomplete page.
+  create/bind/update/list/delete/info and direct stored-message reads, consumer
+  create/bind/info/list/delete, and durable publish acknowledgements with
+  message-id options over application subjects. Stream configuration retains
+  per-subject limits and direct/rollup flags. Stream updates preserve unknown
+  server configuration through an INFO/read-modify-write cycle, and list
+  operations fail with a structured error rather than silently returning an
+  incomplete page.
 - Extend publish acknowledgements with all server status fields and feature
   gates where supported.
 - Gate features by server version and return structured unsupported-feature
@@ -527,57 +516,25 @@ semantics before calling the feature complete.
 
 ### Workstream 5A — Key-Value
 
-- Completed locally: add bucket create/open/bind/status/delete and typed
-  entry/operation/revision values, with validated bucket configuration.
-- Completed locally: implement direct get/get-revision, put, create/update
-  compare-and-set, delete, and purge with structured tombstone and revision
-  errors.
-- Completed locally: implement cancellable `New`, `Last_per_subject`, and
-  `All` watches with exact/wildcard key filters, one ordered `Initial_done`
-  event, metadata-only delivery, and typed put/delete/purge entries.
-- Completed locally: add finite live-key enumeration with bucket-relative
-  filters and explicit retained per-key history, including put/delete/purge
-  entries. One-shot consumers drain by pending metadata, retry transient empty
-  fetches, and are deleted on every completion path.
-- Remaining: server-expiry assertions and watch ordering/cancellation coverage
-  through reconnect and cross-SDK acceptance.
+- Add bucket create/open/status and typed entry/operation/revision values.
+- Implement get, put, create/update compare-and-set, delete, purge, history,
+  keys, TTL, and cancellable watches.
+- Preserve watch ordering and expose bucket/key/value/revision/timestamp/
+  operation without requiring callers to parse JetStream messages.
 
 ### Workstream 5B — Object Store
 
-- Completed locally: implement validated bucket configuration/status and
-  create/open/bind/delete lifecycle.
-- Completed locally: implement metadata, padded URL-safe name subjects,
-  repeated headers, streaming put/get, digest/size verification, list, watch,
-  metadata update, delete, object/bucket links, and seal.
-- Completed locally: transfer chunks incrementally with per-chunk JetStream
-  acknowledgement; publish metadata only after EOF; purge partial uploads and
-  superseded chunk subjects; preserve link/chunk-size metadata on updates.
-- Completed locally: add bucket inventory and configuration-update helpers.
-  Inventory returns recognized statuses, propagates incomplete pages, and
-  ignores unrelated streams. Updates preserve Object Store stream invariants
-  and unknown server fields through JetStream read-modify-write.
-- Completed locally: expose replica count, shared placement values, S2
-  compression, and bucket metadata in create, inventory/status, and full-
-  replacement update operations. Validation rejects invalid replica counts,
-  empty placement tags, empty metadata keys, and duplicate metadata keys.
-- Remaining: real-server/cross-SDK acceptance, including server-version gates
-  and cluster placement/replication behavior.
+- Implement metadata, streaming put/get, list, watch, update, link, and seal.
+- Transfer chunks incrementally; never require a whole object as one `string`.
+- Define cancellation, digest/size verification, partial-failure, and cleanup
+  behavior for interrupted transfers.
 
 ### Acceptance tests
 
-- KV CAS success/failure, revisions, deletes/purges, finite key/history reads,
-  and watch ordering are covered locally through the Eio mock transport; watch
-  history and TTL expiry assertions remain acceptance work.
-- Watch cancellation and ordering under reconnect remain a real-server and
-  cross-SDK acceptance item.
+- KV CAS success/failure, revisions, history, TTL, deletes/purges, and watches.
+- Watch cancellation and ordering under reconnect.
 - Large Object Store transfer, metadata, listing, linking, sealing, and
-  interrupted-transfer cleanup are covered locally through the mock transport;
-  real-server behavior and cross-SDK wire compatibility remain acceptance
-  work.
-- Bucket inventory filtering, incomplete-page errors, status/configuration
-  round-trips, sealed configuration updates, and advanced cluster-backed
-  configuration fields are covered locally; server-version and real cluster
-  behavior remain acceptance work.
+  interrupted-transfer cleanup.
 - No direct dependence by these modules on a private socket or private
   connection lifecycle.
 
@@ -603,35 +560,12 @@ subscriptions, queue groups, and request/reply.
 - Make service shutdown use the same subscription and connection drain
   semantics; do not introduce a second lifecycle manager.
 
-The first implementation slice fixes these interoperability and ownership
-invariants:
-
-- Queue policy is `Default | Queue q | Disabled`, with inheritance from
-  service to group to endpoint. The final default queue is `q`.
-- Each service instance owns nine non-queued monitoring subscriptions: the
-  general, service-name, and service-name/instance-id subject for each of
-  `PING`, `INFO`, and `STATS`.
-- Endpoint workers process one request at a time. A request can publish one
-  Core reply or one structured service-error reply; a missing reply and a
-  failed reply are observable endpoint errors.
-- The instance id and UTC `started` value survive reconnect. Processing
-  durations use the connection's monotonic clock and are emitted as integer
-  nanoseconds.
-- `stop` drains only Service-owned subscriptions, waits for in-flight
-  handlers, and never drains the parent connection. Switch release performs
-  the same cleanup.
-- Reset, a discovery client, response JSON helpers, and per-endpoint pending
-  limits remain later extensions rather than parallel concepts in the first
-  API.
-
 ### Acceptance tests and gate G6
 
 Run discovery, request handling, monitoring, queue balancing, reconnect, and
 drain tests against a real server. Services may start after G2 and do not block
 JetStream, KV, or Object Store. Stabilize only after confirming that all
-service behavior composes with the Core connection ownership model. The local
-Service slice is implemented and mock-covered; this gate is now the live
-interoperability and drain boundary.
+service behavior composes with the Core connection ownership model.
 
 ## Phase 7 — Operational polish and optional integrations
 

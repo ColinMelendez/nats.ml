@@ -17,12 +17,9 @@ The first API-stability gate should cover Core NATS and its Eio facade. The
 longer-term SDK target is JetStream, Key-Value, Object Store, and Services, but
 those surfaces should stabilize only after the Core NATS connection,
 subscription, reconnect, and drain semantics have been exercised against a
-real server. The local Eio implementation now includes the planned Object
-Store transfer/metadata slice and a first Services endpoint/monitoring slice;
-cluster-only options and cross-SDK acceptance remain open. NATS Streaming is
-intentionally out of scope. It is a
-separate, legacy protocol and compatibility with its APIs or data formats would
-weaken a new library without helping the NATS design.
+real server. NATS Streaming is intentionally out of scope. It is a separate,
+legacy protocol and compatibility with its APIs or data formats would weaken a
+new library without helping the NATS design.
 
 ## 1. Research scope
 
@@ -299,10 +296,7 @@ nats
 nats-eio
 ├── Nats_eio.Connection
 ├── Nats_eio.Subscription
-├── Nats_eio.Jetstream
-├── Nats_eio.Key_value
-├── Nats_eio.Object_store
-└── Nats_eio.Service
+└── Nats_eio.Jetstream
 ```
 
 `nats` must not depend on Eio, Lwt, Unix, TLS, DNS, or a particular socket
@@ -665,29 +659,11 @@ These modules should be layered over `Connection.request` and
   the next stream sequence after recovery. Push sessions restore replayable
   delivery subscriptions after reconnect, recheck durable consumers, and
   recreate ephemeral consumers when the server reports consumer-not-found.
-  Owned push sessions subscribe before ephemeral creation, delete their
-  consumers on close, and recreate from the next delivered stream sequence.
   Other advanced consumer behavior remains a planned extension.
-- `Nats_eio.Key_value` provides bucket creation/opening, validated bucket
-  configuration/status, get/get-revision, put, create/update compare-and-set,
-  delete/purge, finite live-key enumeration, retained per-key history, and
-  cancellable `New`, `Last_per_subject`, and `All` watches. Finite reads use
-  short-lived pull consumers and preserve server delivery order without
-  claiming an atomic bucket snapshot. Watch entries preserve bucket, key,
-  value, revision, RFC3339 timestamp, and operation (`put`, `delete`, or
-  `purge`).
-- `Nats_eio.Object_store` provides streaming put/get, metadata, list, watch,
-  update, delete, link, and seal. Large objects are transferred incrementally
-  and are not assembled into one mandatory in-memory string. Metadata subjects
-  use the padded URL-safe encoding used by the first-party clients; chunk
-  uploads are acknowledged before the next source read, and failed or
-  superseded chunk subjects are purged.
-- `Nats_eio.Service` provides validated endpoint and group definitions,
-  explicit queue inheritance, sequential queue-backed workers, typed request
-  values, service-error responses, immutable metadata/statistics snapshots,
-  and automatic `$SRV.PING`, `$SRV.INFO`, and `$SRV.STATS` responses. It
-  composes from core subscriptions and request/reply; `stop` drains only the
-  Service-owned subscriptions and waits for in-flight handlers.
+- `Nats_eio.Key_value`, `Nats_eio.Object_store`, and `Nats_eio.Service` are
+  planned later layers over the same connection. Their eventual contracts are
+  described by the implementation plan; they are not part of the current
+  package surface and must not be treated as implemented by this design.
 
 JetStream consumers deserve particular care. Pull consumption is the default
 for new code because it makes demand and backpressure explicit; push consumers
@@ -708,27 +684,17 @@ unknown fields must not be silently reset.
 The implemented JetStream slice follows this boundary in `nats-eio`: a
 resource-free `Jetstream` capability uses `Jsont`/`bytesrw` at the Eio boundary,
 decodes management success/error envelopes, and exposes typed stream
-configuration, stream create/bind/update/list/info/delete, consumer
+configuration (including per-subject limits and direct/rollup flags), stream
+create/bind/update/list/info/delete and direct message reads through
+`Stream.Message`, `get`, and `get_last`, consumer
 create/bind/info/list/delete, durable publish acknowledgements, message
 acknowledgement verbs, one-shot fetch, and persistent pull sessions. Stream
 updates preserve unknown server configuration through an INFO/read-modify-write
 cycle; list operations consume server pagination and fail explicitly on an
 incomplete page. The management prefix is configurable for JetStream domains,
-while application subjects remain ordinary Core NATS subjects. KV, the
-Object Store surface, and the local Services implementation are layered over
-the same connection; bucket inventory/configuration extensions,
-replicated/compressed/placed Object Store buckets, and other advanced
-flow-control features remain later work.
-
-The local Object Store implementation uses the same typed stream capability.
-It models the two retained subject families (`$O.<bucket>.C.>` for chunks and
-`$O.<bucket>.M.>` for metadata), publishes metadata as a subject rollup, and
-uses ordered consumers for exact chunk reads and cancellable metadata watches.
-Reads verify the advertised SHA-256 digest and size before succeeding. Links
-are resolved recursively with explicit cycle, deleted-target, and bucket-link
-errors. The mock-transport suite covers empty and chunked uploads, repeated
-headers, exact subject validation, digest-checked reads, deletion/purge,
-listing, watch initial markers, timeout resumption, and cleanup sequencing.
+while application subjects remain ordinary Core NATS subjects. KV, Object
+Store, Services, and other advanced flow-control features remain later layers
+over the same connection.
 
 ## 6. Testing and interoperability
 
@@ -747,13 +713,14 @@ through individual helper functions:
 - run in-memory client/server transition tests to verify the state machine
   without a network;
 - run black-box integration tests against a real `nats-server` for reconnect,
-  cluster discovery, TLS/authentication, queue groups, JetStream, KV, Object
-  Store, and Services. The current opt-in Docker harness enables its
-  JetStream slice with `NATS_TEST_JETSTREAM=1` and covers stream management,
-  stream update/list, consumer inventory, unknown-config preservation, publish
-  acknowledgements, duplicate message ids, one-shot and persistent pull
-  delivery, idle-heartbeat behavior, timeout/expiry behavior, max-bytes errors,
-  and cleanup;
+  cluster discovery, TLS/authentication, queue groups, and JetStream. The
+  current opt-in Docker harness enables its JetStream slice with
+  `NATS_TEST_JETSTREAM=1` and covers stream management, stream update/list,
+  consumer inventory, unknown-config preservation, publish acknowledgements,
+  duplicate message ids, one-shot and persistent pull delivery,
+  idle-heartbeat behavior, timeout/expiry behavior, max-bytes errors, and
+  cleanup. KV, Object Store, and Services acceptance begins only after those
+  modules are implemented.
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 
