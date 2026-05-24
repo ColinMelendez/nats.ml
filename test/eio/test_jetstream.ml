@@ -404,6 +404,82 @@ let () =
           in
           equal (option string) None
             (Nats_eio.Jetstream.Stream.Config.description no_description));
+      test "stream config validates placement and metadata" (fun () ->
+          let placement =
+            match
+              Nats_eio.Jetstream.Stream.Config.Placement.v
+                ~cluster:"edge-a" ~tags:[ "ssd"; "fast" ] ()
+            with
+            | Ok value -> value
+            | Error error ->
+                fail
+                  (Format.asprintf "unexpected placement error: %a"
+                     Nats_eio.Jetstream.Error.pp_config error)
+          in
+          let config =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.v ~name:"ARCHIVE"
+                 ~subjects:[ Nats.Subject.Filter.literal "archive.>" ]
+                 ~replicas:3 ~placement
+                 ~compression:Nats_eio.Jetstream.Stream.Config.S2
+                 ~metadata:[ ("team", "infra"); ("tier", "cold") ] ())
+          in
+          equal int 3
+            (Nats_eio.Jetstream.Stream.Config.replicas config);
+          (match
+             Nats_eio.Jetstream.Stream.Config.placement config
+           with
+          | Some value ->
+              equal (option string) (Some "edge-a")
+                (Nats_eio.Jetstream.Stream.Config.Placement.cluster value);
+              equal (list string) [ "ssd"; "fast" ]
+                (Nats_eio.Jetstream.Stream.Config.Placement.tags value)
+          | None -> fail "stream config lost placement");
+          equal bool true
+            (match
+               Nats_eio.Jetstream.Stream.Config.compression config
+             with
+            | Nats_eio.Jetstream.Stream.Config.S2 -> true
+            | Nats_eio.Jetstream.Stream.Config.Off -> false);
+          equal (list (pair string string))
+            [ ("team", "infra"); ("tier", "cold") ]
+            (Nats_eio.Jetstream.Stream.Config.metadata config);
+          (match
+             Nats_eio.Jetstream.Stream.Config.Placement.v ~tags:[] ()
+           with
+          | Error Nats_eio.Jetstream.Error.Empty_placement -> ()
+          | Ok _ -> fail "empty placement was accepted"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected placement error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
+          (match
+             Nats_eio.Jetstream.Stream.Config.Placement.v ~tags:[ "" ] ()
+           with
+          | Error (Nats_eio.Jetstream.Error.Empty_placement_tag 0) -> ()
+          | Ok _ -> fail "empty placement tag was accepted"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected placement error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
+          (match
+             Nats_eio.Jetstream.Stream.Config.with_replicas config 6
+           with
+          | Error (Nats_eio.Jetstream.Error.Invalid_replicas 6) -> ()
+          | Ok _ -> fail "invalid replica count was accepted"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected replica error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
+          match
+            Nats_eio.Jetstream.Stream.Config.with_metadata config [ ("", "x") ]
+          with
+          | Error Nats_eio.Jetstream.Error.Empty_metadata_key -> ()
+          | Ok _ -> fail "empty metadata key was accepted"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected metadata error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
       test "stream direct reads preserve stored message metadata" (fun () ->
           let first_response, first_response_u = Eio.Promise.create () in
           let second_response, second_response_u = Eio.Promise.create () in

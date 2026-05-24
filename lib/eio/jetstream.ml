@@ -6,6 +6,11 @@ module Error = struct
     | Invalid_name_character of { position : int; character : char }
     | Empty_subjects
     | Invalid_limit of { field : string; value : int64 }
+    | Invalid_replicas of int
+    | Empty_placement
+    | Empty_placement_tag of int
+    | Empty_metadata_key
+    | Duplicate_metadata_key of string
     | Invalid_max_age
     | Empty_consumer_name
     | Invalid_consumer_name_character of { position : int; character : char }
@@ -58,6 +63,17 @@ module Error = struct
         Format.pp_print_string ppf "a stream must capture at least one subject"
     | Invalid_limit { field; value } ->
         Format.fprintf ppf "invalid %s limit %Ld" field value
+    | Invalid_replicas value ->
+        Format.fprintf ppf "invalid JetStream replica count %d" value
+    | Empty_placement ->
+        Format.pp_print_string ppf
+          "JetStream placement needs a cluster or at least one tag"
+    | Empty_placement_tag position ->
+        Format.fprintf ppf "JetStream placement tag %d is empty" position
+    | Empty_metadata_key ->
+        Format.pp_print_string ppf "JetStream metadata keys must not be empty"
+    | Duplicate_metadata_key key ->
+        Format.fprintf ppf "JetStream metadata repeats key %S" key
     | Invalid_max_age ->
         Format.pp_print_string ppf "stream max age must not be negative"
     | Empty_consumer_name -> Format.pp_print_string ppf "consumer name is empty"
@@ -207,6 +223,34 @@ module Stream = struct
     type storage = Memory | File
     type retention = Limits | Interest | Work_queue
     type discard = Old | New
+    type compression = Off | S2
+
+    module Placement = struct
+      type t = { cluster : string option; tags : string list }
+
+      let v ?cluster ~tags () =
+        let cluster =
+          match cluster with
+          | Some value when String.equal value "" -> None
+          | value -> value
+        in
+        let empty_tag = ref None in
+        List.iteri
+          (fun position tag ->
+            match !empty_tag with
+            | Some _ -> ()
+            | None when String.equal tag "" -> empty_tag := Some position
+            | None -> ())
+          tags;
+        match !empty_tag with
+        | Some position -> Error (Error.Empty_placement_tag position)
+        | None when Option.is_none cluster && List.is_empty tags ->
+            Error Error.Empty_placement
+        | None -> Ok { cluster; tags }
+
+      let cluster value = value.cluster
+      let tags value = value.tags
+    end
 
     type t = {
       name : string;
@@ -220,6 +264,10 @@ module Stream = struct
       max_bytes : int64 option;
       max_age : Mtime.Span.t option;
       max_msg_size : int64 option;
+      replicas : int;
+      placement : Placement.t option;
+      compression : compression;
+      metadata : (string * string) list;
       allow_rollup : bool;
       allow_direct : bool;
       sealed : bool;
@@ -255,68 +303,93 @@ module Stream = struct
       | Some value when Int64.compare value (-1L) >= 0 -> Ok ()
       | Some value -> Error (Error.Invalid_limit { field; value })
 
+    let validate_replicas value =
+      if Int.compare value 1 < 0 || Int.compare value 5 > 0 then
+        Error (Error.Invalid_replicas value)
+      else Ok ()
+
+    let validate_metadata metadata =
+      let seen = ref [] in
+      let invalid = ref None in
+      List.iter
+        (fun pair ->
+          match !invalid with
+          | Some _ -> ()
+          | None ->
+              let key = fst pair in
+              if String.equal key "" then
+                invalid := Some Error.Empty_metadata_key
+              else if List.exists (String.equal key) !seen then
+                invalid := Some (Error.Duplicate_metadata_key key)
+              else seen := key :: !seen)
+        metadata;
+      match !invalid with None -> Ok () | Some error -> Error error
+
     let v_internal ~allow_empty_subjects ~name ~subjects ?description
         ?(storage = File)
         ?(retention = Limits) ?(discard = Old) ?max_msgs ?max_msgs_per_subject
-        ?max_bytes ?max_age ?max_msg_size ?(allow_rollup = false)
+        ?max_bytes ?max_age ?max_msg_size ?(replicas = 1) ?placement
+        ?(compression = Off) ?(metadata = []) ?(allow_rollup = false)
         ?(allow_direct = false) ?(sealed = false) () =
       let max_age =
         match max_age with
         | Some value when Int.equal (Mtime.Span.compare value Mtime.Span.zero) 0
           ->
-            None
+          None
         | value -> value
       in
-      match validate_name name with
-      | Error error -> Error error
-      | Ok ()
-        when Int.equal (List.length subjects) 0 && not allow_empty_subjects ->
+      let ( let* ) value f =
+        match value with Error error -> Error error | Ok value -> f value
+      in
+      let* () = validate_name name in
+      let* () =
+        if Int.equal (List.length subjects) 0 && not allow_empty_subjects then
           Error Error.Empty_subjects
-      | Ok () -> (
-          match validate_limit "max_msgs" max_msgs with
-          | Error error -> Error error
-          | Ok () -> (
-              match validate_limit "max_bytes" max_bytes with
-              | Error error -> Error error
-              | Ok () -> (
-                  match
-                    validate_limit "max_msgs_per_subject" max_msgs_per_subject
-                  with
-                  | Error error -> Error error
-                  | Ok () -> (
-                      match validate_limit "max_msg_size" max_msg_size with
-                      | Error error -> Error error
-                      | Ok () -> (
-                          match max_age with
-                          | Some value
-                            when Mtime.Span.compare value Mtime.Span.zero < 0 ->
-                              Error Error.Invalid_max_age
-                          | _ ->
-                              Ok
-                                {
-                                  name;
-                                  subjects;
-                                  description;
-                                  storage;
-                                  retention;
-                                  discard;
-                                  max_msgs;
-                                  max_msgs_per_subject;
-                                  max_bytes;
-                                  max_age;
-                                  max_msg_size;
-                                  allow_rollup;
-                                  allow_direct;
-                                  sealed;
-                                })))))
+        else Ok ()
+      in
+      let* () = validate_replicas replicas in
+      let* () = validate_metadata metadata in
+      let* () = validate_limit "max_msgs" max_msgs in
+      let* () = validate_limit "max_bytes" max_bytes in
+      let* () = validate_limit "max_msgs_per_subject" max_msgs_per_subject in
+      let* () = validate_limit "max_msg_size" max_msg_size in
+      let* () =
+        match max_age with
+        | Some value when Mtime.Span.compare value Mtime.Span.zero < 0 ->
+            Error Error.Invalid_max_age
+        | _ -> Ok ()
+      in
+      Ok
+        {
+          name;
+          subjects;
+          description;
+          storage;
+          retention;
+          discard;
+          max_msgs;
+          max_msgs_per_subject;
+          max_bytes;
+          max_age;
+          max_msg_size;
+          replicas;
+          placement;
+          compression;
+          metadata;
+          allow_rollup;
+          allow_direct;
+          sealed;
+        }
 
     let v ~name ~subjects ?description ?storage ?retention ?discard ?max_msgs
-        ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size ?allow_rollup
-        ?allow_direct ?sealed () =
+        ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size ?replicas
+        ?placement ?compression ?metadata ?allow_rollup ?allow_direct ?sealed
+        () =
       v_internal ~allow_empty_subjects:false ~name ~subjects ?description
         ?storage ?retention
         ?discard ?max_msgs ?max_msgs_per_subject ?max_bytes ?max_age
-        ?max_msg_size ?allow_rollup ?allow_direct ?sealed ()
+        ?max_msg_size ?replicas ?placement ?compression ?metadata ?allow_rollup
+        ?allow_direct ?sealed ()
 
     let name value = value.name
     let subjects value = value.subjects
@@ -329,18 +402,32 @@ module Stream = struct
     let max_bytes value = value.max_bytes
     let max_age value = value.max_age
     let max_msg_size value = value.max_msg_size
+    let replicas value = value.replicas
+    let placement value = value.placement
+    let compression value = value.compression
+    let metadata value = value.metadata
     let allow_rollup value = value.allow_rollup
     let allow_direct value = value.allow_direct
     let sealed value = value.sealed
 
-    let rebuild value ~name ~subjects ~description ~storage ~retention ~discard ~max_msgs
-        ~max_msgs_per_subject ~max_bytes ~max_age ~max_msg_size ~allow_rollup
-        ~allow_direct ~sealed =
+    let rebuild_with_fields value ~name ~subjects ~description ~storage ~retention ~discard
+        ~max_msgs ~max_msgs_per_subject ~max_bytes ~max_age ~max_msg_size
+        ~replicas ~placement ~compression ~metadata ~allow_rollup ~allow_direct
+        ~sealed =
       v_internal
         ~allow_empty_subjects:(Int.equal (List.length value.subjects) 0)
         ~name ~subjects ?description ~storage ~retention ~discard ?max_msgs ?max_bytes
-        ?max_msgs_per_subject ?max_age ?max_msg_size ~allow_rollup ~allow_direct
-        ~sealed ()
+        ?max_msgs_per_subject ?max_age ?max_msg_size ~replicas ?placement
+        ~compression ~metadata ~allow_rollup ~allow_direct ~sealed ()
+
+    let rebuild value ~name ~subjects ~description ~storage ~retention ~discard
+        ~max_msgs ~max_msgs_per_subject ~max_bytes ~max_age ~max_msg_size
+        ~allow_rollup ~allow_direct ~sealed =
+      rebuild_with_fields value ~name ~subjects ~description ~storage ~retention
+        ~discard ~max_msgs ~max_msgs_per_subject ~max_bytes ~max_age
+        ~max_msg_size ~replicas:value.replicas ~placement:value.placement
+        ~compression:value.compression ~metadata:value.metadata ~allow_rollup
+        ~allow_direct ~sealed
 
     let with_name value name =
       rebuild value ~name ~subjects:value.subjects
@@ -437,6 +524,33 @@ module Stream = struct
         ~allow_rollup:value.allow_rollup ~allow_direct:value.allow_direct
         ~sealed:value.sealed
 
+    let with_advanced value ~replicas ~placement ~compression ~metadata =
+      rebuild_with_fields value ~name:value.name ~subjects:value.subjects
+        ~description:value.description ~storage:value.storage
+        ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~replicas ~placement ~compression
+        ~metadata ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~sealed:value.sealed
+
+    let with_replicas value replicas =
+      with_advanced value ~replicas ~placement:value.placement
+        ~compression:value.compression ~metadata:value.metadata
+
+    let with_placement value placement =
+      with_advanced value ~replicas:value.replicas ~placement
+        ~compression:value.compression ~metadata:value.metadata
+
+    let with_compression value compression =
+      with_advanced value ~replicas:value.replicas ~placement:value.placement
+        ~compression ~metadata:value.metadata
+
+    let with_metadata value metadata =
+      with_advanced value ~replicas:value.replicas ~placement:value.placement
+        ~compression:value.compression ~metadata
+
     let with_max_msgs_per_subject value max_msgs_per_subject =
       rebuild value ~name:value.name ~subjects:value.subjects
         ~description:value.description ~storage:value.storage
@@ -519,6 +633,8 @@ module Stream = struct
   type jetstream = t
   type t = { jetstream : jetstream; name : string }
 
+  type wire_placement = { cluster : string; tags : string list }
+
   type wire_config = {
     name : string;
     subjects : string list;
@@ -531,6 +647,10 @@ module Stream = struct
     max_bytes : int64 option;
     max_age : int64 option;
     max_msg_size : int64 option;
+    replicas : int;
+    placement : wire_placement option;
+    compression : Config.compression;
+    metadata : (string * string) list;
     allow_rollup : bool;
     allow_direct : bool;
     sealed : bool;
@@ -550,6 +670,31 @@ module Stream = struct
 
   let discard_codec = Jsont.enum [ ("old", Config.Old); ("new", Config.New) ]
 
+  let compression_codec =
+    Jsont.enum [ ("none", Config.Off); ("s2", Config.S2) ]
+
+  let placement_codec =
+    Jsont.Object.map ~kind:"JetStream placement"
+      (fun cluster tags ->
+        { cluster; tags = Option.value ~default:[] tags })
+    |> Jsont.Object.mem "cluster" Jsont.string ~enc:(fun value ->
+        value.cluster)
+    |> Jsont.Object.opt_mem "tags" (Jsont.list Jsont.string)
+         ~enc:(fun value ->
+           match value.tags with [] -> None | tags -> Some tags)
+    |> Jsont.Object.finish
+
+  module String_map = Map.Make (String)
+
+  let metadata_map values =
+    List.fold_left
+      (fun result pair -> String_map.add (fst pair) (snd pair) result)
+      String_map.empty values
+
+  let metadata_codec =
+    Jsont.map (Jsont.Object.as_string_map Jsont.string)
+      ~dec:String_map.bindings ~enc:metadata_map
+
   let wire_config_codec =
     Jsont.Object.map ~kind:"JetStream stream config"
       (fun
@@ -564,6 +709,10 @@ module Stream = struct
         max_bytes
         max_age
         max_msg_size
+        replicas
+        placement
+        compression
+        metadata
         allow_rollup
         allow_direct
         sealed
@@ -581,6 +730,10 @@ module Stream = struct
           max_bytes;
           max_age;
           max_msg_size;
+          replicas;
+          placement;
+          compression;
+          metadata;
           allow_rollup = Option.value ~default:false allow_rollup;
           allow_direct = Option.value ~default:false allow_direct;
           sealed = Option.value ~default:false sealed;
@@ -608,6 +761,14 @@ module Stream = struct
         value.max_age)
     |> Jsont.Object.opt_mem "max_msg_size" Jsont.int64 ~enc:(fun value ->
         value.max_msg_size)
+    |> Jsont.Object.mem ~dec_absent:1 "num_replicas" Jsont.int ~enc:(fun value ->
+        value.replicas)
+    |> Jsont.Object.opt_mem "placement" placement_codec ~enc:(fun value ->
+        value.placement)
+    |> Jsont.Object.mem ~dec_absent:Config.Off "compression" compression_codec
+         ~enc:(fun value -> value.compression)
+    |> Jsont.Object.mem ~dec_absent:[] "metadata" metadata_codec ~enc:(fun value ->
+        value.metadata)
     |> Jsont.Object.opt_mem "allow_rollup_hdrs" Jsont.bool ~enc:(fun value ->
         Some value.allow_rollup)
     |> Jsont.Object.opt_mem "allow_direct" Jsont.bool ~enc:(fun value ->
@@ -717,6 +878,12 @@ module Stream = struct
     |> Jsont.Object.opt_mem "keep" Jsont.int64 ~enc:(fun value -> value.keep)
     |> Jsont.Object.finish
 
+  let wire_placement value =
+    {
+      cluster = Option.value ~default:"" (Config.Placement.cluster value);
+      tags = Config.Placement.tags value;
+    }
+
   let wire_config value =
     {
       name = Config.name value;
@@ -730,6 +897,10 @@ module Stream = struct
       max_bytes = Config.max_bytes value;
       max_age = Option.map Mtime.Span.to_uint64_ns (Config.max_age value);
       max_msg_size = Config.max_msg_size value;
+      replicas = Config.replicas value;
+      placement = Option.map wire_placement (Config.placement value);
+      compression = Config.compression value;
+      metadata = Config.metadata value;
       allow_rollup = Config.allow_rollup value;
       allow_direct = Config.allow_direct value;
       sealed = Config.sealed value;
@@ -759,6 +930,10 @@ module Stream = struct
              (Option.map Mtime.Span.to_uint64_ns (Config.max_age value)));
       max_msg_size =
         Some (Option.value ~default:(-1L) (Config.max_msg_size value));
+      replicas = Config.replicas value;
+      placement = Option.map wire_placement (Config.placement value);
+      compression = Config.compression value;
+      metadata = Config.metadata value;
       allow_rollup = Config.allow_rollup value;
       allow_direct = Config.allow_direct value;
       sealed = Config.sealed value;
@@ -799,16 +974,32 @@ module Stream = struct
           | None | Some 0L -> None
           | Some nanoseconds -> Some (Mtime.Span.of_uint64_ns nanoseconds)
         in
-        match
-          Config.v_internal ~allow_empty_subjects:true ~name:value.name
-            ~subjects ?description:value.description ~storage:value.storage
-            ~retention:value.retention
-            ~discard:value.discard ?max_msgs ?max_msgs_per_subject ?max_bytes
-            ?max_age ?max_msg_size ~allow_rollup:value.allow_rollup
-            ~allow_direct:value.allow_direct ~sealed:value.sealed ()
-        with
-        | Ok config -> Ok config
-        | Error error -> Error (Error.Invalid_config error))
+        let placement =
+          match value.placement with
+          | None -> Ok None
+          | Some { cluster; tags } ->
+              let cluster =
+                if String.equal cluster "" then None else Some cluster
+              in
+              (match Config.Placement.v ?cluster ~tags () with
+              | Ok placement -> Ok (Some placement)
+              | Error error -> Error error)
+        in
+        match placement with
+        | Error error -> Error (Error.Invalid_config error)
+        | Ok placement -> (
+            match
+              Config.v_internal ~allow_empty_subjects:true ~name:value.name
+                ~subjects ?description:value.description ~storage:value.storage
+                ~retention:value.retention
+                ~discard:value.discard ?max_msgs ?max_msgs_per_subject
+                ?max_bytes ?max_age ?max_msg_size ~replicas:value.replicas
+                ?placement ~compression:value.compression
+                ~metadata:value.metadata ~allow_rollup:value.allow_rollup
+                ~allow_direct:value.allow_direct ~sealed:value.sealed ()
+            with
+            | Ok config -> Ok config
+            | Error error -> Error (Error.Invalid_config error)))
 
   let decode_response message =
     match decode response_codec message with

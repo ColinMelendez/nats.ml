@@ -6,6 +6,11 @@ module Error : sig
     | Invalid_name_character of { position : int; character : char }
     | Empty_subjects
     | Invalid_limit of { field : string; value : int64 }
+    | Invalid_replicas of int
+    | Empty_placement
+    | Empty_placement_tag of int
+    | Empty_metadata_key
+    | Duplicate_metadata_key of string
     | Invalid_max_age
     | Empty_consumer_name
     | Invalid_consumer_name_character of { position : int; character : char }
@@ -72,6 +77,21 @@ module Stream : sig
     type storage = Memory | File
     type retention = Limits | Interest | Work_queue
     type discard = Old | New
+    type compression = Off | S2
+
+    module Placement : sig
+      type t
+
+      val v :
+        ?cluster:string ->
+        tags:string list ->
+        unit ->
+        (t, Error.config) result
+
+      val cluster : t -> string option
+      val tags : t -> string list
+    end
+
     type t
     type error = Error.config
 
@@ -87,6 +107,10 @@ module Stream : sig
       ?max_bytes:int64 ->
       ?max_age:Mtime.Span.t ->
       ?max_msg_size:int64 ->
+      ?replicas:int ->
+      ?placement:Placement.t ->
+      ?compression:compression ->
+      ?metadata:(string * string) list ->
       ?allow_rollup:bool ->
       ?allow_direct:bool ->
       ?sealed:bool ->
@@ -106,6 +130,10 @@ module Stream : sig
     val max_bytes : t -> int64 option
     val max_age : t -> Mtime.Span.t option
     val max_msg_size : t -> int64 option
+    val replicas : t -> int
+    val placement : t -> Placement.t option
+    val compression : t -> compression
+    val metadata : t -> (string * string) list
     val allow_rollup : t -> bool
     val allow_direct : t -> bool
     val sealed : t -> bool
@@ -151,6 +179,20 @@ module Stream : sig
     val with_max_msg_size : t -> int64 option -> (t, error) result
     (** [with_max_msg_size config value] validates and replaces the per-message
         size limit. [None] means unlimited. *)
+
+    val with_replicas : t -> int -> (t, error) result
+    (** [with_replicas config value] validates and replaces the replica count. *)
+
+    val with_placement :
+      t -> Placement.t option -> (t, error) result
+    (** [with_placement config value] replaces the placement constraint. *)
+
+    val with_compression : t -> compression -> (t, error) result
+    (** [with_compression config value] replaces the storage compression. *)
+
+    val with_metadata :
+      t -> (string * string) list -> (t, error) result
+    (** [with_metadata config value] validates and replaces stream metadata. *)
 
     val with_allow_rollup : t -> bool -> (t, error) result
     (** [with_allow_rollup config value] replaces whether rollup headers are
