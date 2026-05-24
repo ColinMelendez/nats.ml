@@ -52,9 +52,12 @@ ephemeral pull consumers, validate consecutive consumer sequences, and resume
 from the next stream sequence after recovery. `Nats_eio.Key_value` provides
 bucket operations, finite reads, history, and cancellable watches. The
 `Nats_eio.Object_store` surface provides incremental put/get, metadata,
-listing, watches, links, deletion, updates, and sealing. Services, bucket
-inventory/configuration extensions, cluster-only Object Store options, and
-real cluster/interop coverage remain later implementation phases.
+listing, watches, links, deletion, updates, and sealing. The local
+`Nats_eio.Service` surface provides validated service/endpoint/group values,
+queue-backed workers, Core request replies, service-error responses, and
+`$SRV.PING`/`INFO`/`STATS` monitoring. Bucket inventory/configuration
+extensions, cluster-only Object Store options, and real cluster/interop
+coverage remain later implementation phases.
 
 The project uses Dune package management. No compatibility layer for NATS
 Streaming is planned.

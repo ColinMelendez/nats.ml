@@ -18,8 +18,9 @@ longer-term SDK target is JetStream, Key-Value, Object Store, and Services, but
 those surfaces should stabilize only after the Core NATS connection,
 subscription, reconnect, and drain semantics have been exercised against a
 real server. The local Eio implementation now includes the planned Object
-Store transfer and metadata slice; its cluster-only options and cross-SDK
-acceptance remain open. NATS Streaming is intentionally out of scope. It is a
+Store transfer/metadata slice and a first Services endpoint/monitoring slice;
+cluster-only options and cross-SDK acceptance remain open. NATS Streaming is
+intentionally out of scope. It is a
 separate, legacy protocol and compatibility with its APIs or data formats would
 weaken a new library without helping the NATS design.
 
@@ -681,10 +682,12 @@ These modules should be layered over `Connection.request` and
   use the padded URL-safe encoding used by the first-party clients; chunk
   uploads are acknowledged before the next source read, and failed or
   superseded chunk subjects are purged.
-- `Nats_eio.Service` provides endpoint and group definitions, queue-backed
-  workers, typed request handlers, service metadata, and automatic responses to
-  discovery/monitoring subjects. It should compose from core subscriptions and
-  request/reply, so Services do not become a second lifecycle system.
+- `Nats_eio.Service` provides validated endpoint and group definitions,
+  explicit queue inheritance, sequential queue-backed workers, typed request
+  values, service-error responses, immutable metadata/statistics snapshots,
+  and automatic `$SRV.PING`, `$SRV.INFO`, and `$SRV.STATS` responses. It
+  composes from core subscriptions and request/reply; `stop` drains only the
+  Service-owned subscriptions and waits for in-flight handlers.
 
 JetStream consumers deserve particular care. Pull consumption is the default
 for new code because it makes demand and backpressure explicit; push consumers
@@ -711,10 +714,11 @@ acknowledgement verbs, one-shot fetch, and persistent pull sessions. Stream
 updates preserve unknown server configuration through an INFO/read-modify-write
 cycle; list operations consume server pagination and fail explicitly on an
 incomplete page. The management prefix is configurable for JetStream domains,
-while application subjects remain ordinary Core NATS subjects. KV and the
-Object Store surface are layered over the same connection; Services,
-bucket inventory/configuration extensions, replicated/compressed/placed Object
-Store buckets, and other advanced flow-control features remain later work.
+while application subjects remain ordinary Core NATS subjects. KV, the
+Object Store surface, and the local Services implementation are layered over
+the same connection; bucket inventory/configuration extensions,
+replicated/compressed/placed Object Store buckets, and other advanced
+flow-control features remain later work.
 
 The local Object Store implementation uses the same typed stream capability.
 It models the two retained subject families (`$O.<bucket>.C.>` for chunks and

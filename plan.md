@@ -100,8 +100,10 @@ latest-object listing, cancellable ordered watches, object and bucket links,
 metadata updates, and sealing. Local confidence comes from pure-boundary tests
 and Eio mock-transport black-box tests. Real cluster and cross-SDK interop
 coverage is deliberately deferred to the final acceptance phase. Bucket
-inventory/configuration extensions, replication, placement, compression, and
-Services remain planned work.
+inventory/configuration extensions, replication, placement, and compression
+remain planned work. Services are now in implementation: the public shape has
+been reviewed against the first-party micro convention, with the remaining
+work limited to the Eio composition and local black-box tests.
 The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
@@ -586,6 +588,27 @@ subscriptions, queue groups, and request/reply.
   responses.
 - Make service shutdown use the same subscription and connection drain
   semantics; do not introduce a second lifecycle manager.
+
+The first implementation slice fixes these interoperability and ownership
+invariants:
+
+- Queue policy is `Default | Queue q | Disabled`, with inheritance from
+  service to group to endpoint. The final default queue is `q`.
+- Each service instance owns nine non-queued monitoring subscriptions: the
+  general, service-name, and service-name/instance-id subject for each of
+  `PING`, `INFO`, and `STATS`.
+- Endpoint workers process one request at a time. A request can publish one
+  Core reply or one structured service-error reply; a missing reply and a
+  failed reply are observable endpoint errors.
+- The instance id and UTC `started` value survive reconnect. Processing
+  durations use the connection's monotonic clock and are emitted as integer
+  nanoseconds.
+- `stop` drains only Service-owned subscriptions, waits for in-flight
+  handlers, and never drains the parent connection. Switch release performs
+  the same cleanup.
+- Reset, a discovery client, response JSON helpers, and per-endpoint pending
+  limits remain later extensions rather than parallel concepts in the first
+  API.
 
 ### Acceptance tests and gate G6
 
