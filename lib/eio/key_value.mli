@@ -137,9 +137,11 @@ module Error : sig
     | Key_deleted of Entry.t
     | Key_exists
     | Revision_mismatch of { expected : int64 }
+    | Closed
   (** Errors returned by bucket operations. [Key_deleted] carries the
       tombstone that hides a key. [Revision_mismatch] is produced only for a
-      server compare-and-set rejection. *)
+      server compare-and-set rejection. [Closed] is returned by a watch after
+      explicit or switch-owned closure. *)
 
   val pp_config : Format.formatter -> config -> unit
   (** [pp_config ppf error] formats a configuration error. *)
@@ -171,6 +173,55 @@ end
 
 type t
 (** A local capability for one bucket. *)
+
+type bucket = t
+(** The bucket capability consumed by {!Watch}. *)
+
+module Watch : sig
+  type delivery = New | Last_per_subject | All
+  (** The retained messages delivered before the initial marker. *)
+
+  type event = Initial_done | Entry of Entry.t
+  (** A watch event. [Initial_done] is emitted once after the retained
+      snapshot selected by [delivery]. *)
+
+  type t
+  (** An owned, cancellable key-value watch. Calls to [next] are single-owner;
+      do not call [next] or [next_with_timeout] concurrently. *)
+
+  val v :
+    sw:Eio.Switch.t ->
+    ?key:string ->
+    ?delivery:delivery ->
+    ?ignore_deletes:bool ->
+    ?meta_only:bool ->
+    bucket ->
+    (t, Error.t) result
+  (** [v ~sw ?key ?delivery ?ignore_deletes ?meta_only value] watches the
+      bucket-relative key filter [key], defaulting to [>]. The default
+      delivery policy is [Last_per_subject]. [Initial_done] follows the
+      retained snapshot; [New] emits it immediately. Delete and purge entries
+      are delivered unless [ignore_deletes] is true. [meta_only] suppresses
+      values while retaining entry metadata. The watch owns an ephemeral
+      server consumer and closes it with [sw]. Delivery order is the order
+      observed by the push session; reconnect recovery does not provide the
+      stronger gap-detection guarantees of an ordered consumer. *)
+
+  val next : t -> (event, Error.t) result
+  (** [next watch] returns the next watch event. *)
+
+  val next_with_timeout :
+    timeout:Mtime.Span.t -> t -> (event, Error.t) result
+  (** [next_with_timeout ~timeout watch] bounds the wait across skipped
+      tombstones and control events. A timeout leaves the watch open. *)
+
+  val iter : t -> f:(event -> unit) -> (unit, Error.t) result
+  (** [iter watch ~f] invokes [f] until the watch is closed or fails. *)
+
+  val close : t -> (unit, Error.t) result
+  (** [close watch] stops delivery, deletes the owned consumer, and is
+      idempotent. *)
+end
 
 val create : Jetstream.t -> Config.t -> (t, Error.t) result
 (** [create jetstream config] creates the bucket's JetStream stream and returns

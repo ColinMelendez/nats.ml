@@ -461,6 +461,10 @@ module Consumer : sig
     (** [consumer push] is the current server-side consumer. An ephemeral
         consumer may change after recovery. *)
 
+    val initial_pending : t -> int64
+    (** [initial_pending push] is the server-reported pending count from the
+        consumer setup that created [push]. *)
+
     val next : t -> (Msg.t, Error.t) result
     (** [next push] waits for the next delivered message. Messages are not
         acknowledged automatically. Idle-heartbeat frames are consumed and

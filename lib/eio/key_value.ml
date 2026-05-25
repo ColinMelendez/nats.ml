@@ -183,6 +183,7 @@ module Error = struct
     | Key_deleted of Entry.t
     | Key_exists
     | Revision_mismatch of { expected : int64 }
+    | Closed
 
   let pp_config ppf = function
     | Config.Empty_bucket -> Format.pp_print_string ppf "bucket name is empty"
@@ -237,6 +238,7 @@ module Error = struct
     | Revision_mismatch { expected } ->
         Format.fprintf ppf "key revision did not match expected revision %Ld"
           expected
+    | Closed -> Format.pp_print_string ppf "key-value watch is closed"
 end
 
 module Status = struct
@@ -270,6 +272,8 @@ type t = {
   stream : Jetstream.Stream.t;
   bucket : string;
 }
+
+type bucket = t
 
 let bucket value = value.bucket
 
@@ -767,3 +771,157 @@ let history value key =
               (Ok []) messages
           in
           match result with Error error -> Error error | Ok entries -> Ok (List.rev entries))
+
+module Watch = struct
+  type delivery = New | Last_per_subject | All
+  type event = Initial_done | Entry of Entry.t
+  type initial = Marker | Retained | Live
+
+  type t = {
+    value : bucket;
+    push : Jetstream.Consumer.Push.t;
+    connection : Connection.t;
+    ignore_deletes : bool;
+    mutable initial : initial;
+    initial_pending : int64 option;
+    mutable initial_received : int64;
+  }
+
+  let map_error = function
+    | Jetstream.Error.Connection error -> Error.Connection error
+    | Jetstream.Error.Push_closed -> Error.Closed
+    | error -> Error.Jetstream error
+
+  let watch_config value ~filter ~delivery ~meta_only =
+    let connection = Jetstream.connection value.jetstream in
+    let deliver_subject = Connection.fresh_inbox connection in
+    let deliver_policy =
+      match delivery with
+      | New -> Jetstream.Consumer.Config.New
+      | Last_per_subject -> Jetstream.Consumer.Config.Last_per_subject
+      | All -> Jetstream.Consumer.Config.All
+    in
+    match
+      Jetstream.Consumer.Config.v ~deliver_subject ~deliver_policy
+        ~ack_policy:Jetstream.Consumer.Config.No_ack
+        ~filter_subject:filter ~idle_heartbeat:Mtime.Span.(5 * s)
+        ~flow_control:true ~headers_only:meta_only
+        ~inactive_threshold:Mtime.Span.(5 * min) ~mem_storage:true ()
+    with
+    | Ok config -> Ok config
+    | Error error ->
+        Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
+
+  let v ~sw ?key ?(delivery = Last_per_subject) ?(ignore_deletes = false)
+      ?(meta_only = false) value =
+    match make_filter value key with
+    | Error error -> Error error
+    | Ok filter -> (
+        match watch_config value ~filter ~delivery ~meta_only with
+        | Error error -> Error error
+        | Ok config -> (
+            match Jetstream.Consumer.Push.create ~sw value.stream config with
+            | Error error -> Error (map_error error)
+            | Ok push -> (
+                let initial_pending =
+                  match delivery with
+                  | New -> None
+                  | Last_per_subject | All ->
+                      Some (Jetstream.Consumer.Push.initial_pending push)
+                in
+                let initial =
+                  match initial_pending with
+                  | None | Some 0L -> Marker
+                  | Some _ -> Retained
+                in
+                Ok
+                  {
+                    value;
+                    push;
+                    connection = Jetstream.connection value.jetstream;
+                    ignore_deletes;
+                    initial;
+                    initial_pending;
+                    initial_received = 0L;
+                  })))
+
+  let next_message watch deadline =
+    match deadline with
+    | None -> Jetstream.Consumer.Push.next watch.push
+    | Some deadline ->
+        let now = Connection.now watch.connection in
+        if Mtime.compare now deadline >= 0 then
+          Error (Jetstream.Error.Connection Core_error.Timeout)
+        else
+          Jetstream.Consumer.Push.next_with_timeout
+            ~timeout:(Mtime.span now deadline) watch.push
+
+  let next_until watch deadline =
+    let result = ref None in
+    while Option.is_none !result do
+      match watch.initial with
+      | Marker ->
+          watch.initial <- Live;
+          result := Some (Ok Initial_done)
+      | Retained | Live -> (
+              match next_message watch deadline with
+              | Error error -> result := Some (Error (map_error error))
+              | Ok message ->
+              (match entry_of_delivery watch.value message with
+              | Error error -> result := Some (Error error)
+              | Ok entry ->
+                  let initial_complete =
+                    match watch.initial with
+                    | Retained ->
+                        if
+                          Int64.compare watch.initial_received Int64.max_int
+                          < 0
+                        then watch.initial_received <-
+                          Int64.add watch.initial_received 1L;
+                        let received_enough =
+                          match watch.initial_pending with
+                          | Some pending ->
+                              Int64.compare watch.initial_received pending >= 0
+                          | None -> false
+                        in
+                        received_enough
+                        || Int64.equal
+                             (Jetstream.Msg.num_pending message)
+                             0L
+                    | Marker | Live -> false
+                  in
+                  if initial_complete then watch.initial <- Marker;
+                  match (watch.ignore_deletes, Entry.operation entry) with
+                  | true, (Entry.Delete | Entry.Purge) -> ()
+                  | _ -> result := Some (Ok (Entry entry))))
+    done;
+    match !result with Some result -> result | None -> assert false
+
+  let next watch = next_until watch None
+
+  let next_with_timeout ~timeout watch =
+    if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then
+      Error (Error.Connection (Core_error.Invalid_timeout "watch"))
+    else
+      let deadline =
+        match Mtime.add_span (Connection.now watch.connection) timeout with
+        | Some deadline -> deadline
+        | None -> Mtime.max_stamp
+      in
+      next_until watch (Some deadline)
+
+  let iter watch ~f =
+    let result = ref None in
+    while Option.is_none !result do
+      match next watch with
+      | Ok event -> f event
+      | Error Error.Closed -> result := Some (Ok ())
+      | Error error -> result := Some (Error error)
+    done;
+    match !result with Some result -> result | None -> assert false
+
+  let close watch =
+    match Jetstream.Consumer.Push.close watch.push with
+    | Ok () -> Ok ()
+    | Error error -> Error (map_error error)
+end

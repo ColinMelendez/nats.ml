@@ -2577,6 +2577,7 @@ module Consumer = struct
       mutable state : state;
       mutable hook : Eio.Switch.hook option;
       owns_consumer : bool;
+      initial_pending : int64;
     }
 
     let fail push error =
@@ -2942,7 +2943,8 @@ module Consumer = struct
       done;
       match !result with Some result -> result | None -> assert false
 
-    let make ~sw ~owns_consumer ~consumer ~subscription ~config =
+    let make ~sw ~owns_consumer ~initial_pending ~consumer ~subscription
+        ~config =
       let connection = consumer.jetstream.connection in
       let push =
         {
@@ -2958,6 +2960,7 @@ module Consumer = struct
           state = Open;
           hook = None;
           owns_consumer;
+          initial_pending;
         }
       in
       let hook =
@@ -2986,7 +2989,9 @@ module Consumer = struct
               with
               | Error error -> Error (Error.Connection error)
               | Ok subscription ->
-                  make ~sw ~owns_consumer:false ~consumer ~subscription ~config))
+                  make ~sw ~owns_consumer:false
+                    ~initial_pending:(Info.num_pending info) ~consumer
+                    ~subscription ~config))
 
     let create ~sw (stream : Stream.t) config =
       if Option.is_some (Config.durable_name config) then
@@ -3085,8 +3090,10 @@ module Consumer = struct
                                 | Error error -> Error error
                                 | Ok subscription ->
                                     (match
-                                       make ~sw ~owns_consumer:true ~consumer
-                                         ~subscription ~config:actual_config
+                                       make ~sw ~owns_consumer:true
+                                         ~initial_pending:(Info.num_pending info)
+                                         ~consumer ~subscription
+                                         ~config:actual_config
                                      with
                                     | Error error -> Error error
                                     | Ok push ->
@@ -3094,6 +3101,7 @@ module Consumer = struct
                                         Ok push))))
 
     let consumer push = push.consumer
+    let initial_pending push = push.initial_pending
   end
 
   module Ordered = struct

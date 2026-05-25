@@ -79,7 +79,12 @@ let publish_error_response ~sid ~code ~err_code ~description =
 
 let api_ok_wire ~sid = response_wire_with_sid ~sid "{}"
 
-let consumer_response ~sid ~policy ~headers_only ~pending =
+let consumer_response_named ~sid ~policy ~headers_only ~pending ~name
+    ~deliver_subject =
+  let deliver_subject =
+    if String.equal deliver_subject "" then ""
+    else Format.asprintf ",\"deliver_subject\":\"%s\"" deliver_subject
+  in
   let headers_only =
     if headers_only then ",\"headers_only\":true" else ""
   in
@@ -88,10 +93,14 @@ let consumer_response ~sid ~policy ~headers_only ~pending =
   in
   let payload =
     Format.asprintf
-      {|{"stream_name":"KV_users","name":"scan","config":{"deliver_policy":"%s","ack_policy":"none","replay_policy":"instant"%s}%s}|}
-      policy headers_only pending
+      {|{"stream_name":"KV_users","name":"%s","config":{"deliver_policy":"%s","ack_policy":"none","replay_policy":"instant"%s%s}%s}|}
+      name policy deliver_subject headers_only pending
   in
   response_wire_with_sid ~sid payload
+
+let consumer_response ~sid ~policy ~headers_only ~pending =
+  consumer_response_named ~sid ~policy ~headers_only ~pending ~name:"scan"
+    ~deliver_subject:""
 
 let consumer_delivery_wire ~sid ~consumer ~key ~stream_sequence
     ~consumer_sequence ~pending ?operation payload =
@@ -202,11 +211,41 @@ let contains_substring ~needle value =
   done;
   !found
 
+let substring_position ~needle value =
+  let needle_length = String.length needle in
+  let limit = String.length value - needle_length in
+  let index = ref 0 in
+  let result = ref None in
+  while Option.is_none !result && !index <= limit do
+    if String.equal (String.sub value !index needle_length) needle then
+      result := Some !index
+    else incr index
+  done;
+  !result
+
 let require_trace ~trace ~needle =
   if not (contains_substring ~needle (Buffer.contents trace)) then
     fail
       (Format.asprintf "trace did not contain %S; trace:\n%s" needle
          (Buffer.contents trace))
+
+let trace_field ~trace ~field =
+  let value = Buffer.contents trace in
+  let needle = field ^ "\\\":\\\"" in
+  match substring_position ~needle value with
+  | None ->
+      fail
+        (Format.asprintf "trace did not contain field %S; trace:\n%s" field
+           value)
+  | Some position ->
+      let start = position + String.length needle in
+      let remainder = String.sub value start (String.length value - start) in
+      (match substring_position ~needle:"\\\"" remainder with
+      | None ->
+          fail
+            (Format.asprintf "trace field %S was not terminated; trace:\n%s"
+               field value)
+      | Some length -> String.sub remainder 0 length)
 
 let wait_for_trace ~trace ~needle =
   let attempts = ref 0 in
@@ -631,6 +670,231 @@ let () =
                   Nats_eio.Key_value.Entry.Purge;
                 ] -> ()
               | _ -> fail "history did not retain operation order");
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "watch emits retained entries, marker, and live updates" (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let first_info_response, first_info_response_u = Eio.Promise.create () in
+          let delivery_response, delivery_response_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await first_info_response;
+                `Await delivery_response;
+                `Await delete_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let value =
+                expect_kv_ok
+                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+              in
+              let watch_result, watch_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve watch_result_u
+                    (Nats_eio.Key_value.Watch.v ~sw ~key:"alice" value));
+              yield_n 5;
+              let deliver_subject = trace_field ~trace ~field:"deliver_subject" in
+              require_trace ~trace ~needle:"deliver_policy\\\":\\\"last_per_subject";
+              require_trace ~trace ~needle:"filter_subject\\\":\\\"$KV.users.alice";
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (consumer_response_named ~sid:2 ~policy:"last_per_subject"
+                      ~headers_only:false ~pending:None ~name:"watch"
+                      ~deliver_subject));
+              yield_n 5;
+              Eio.Promise.resolve first_info_response_u
+                (Ok
+                   (consumer_response_named ~sid:3 ~policy:"last_per_subject"
+                      ~headers_only:false ~pending:(Some 2L) ~name:"watch"
+                      ~deliver_subject));
+              let watch = expect_kv_ok (Eio.Promise.await watch_result) in
+              Eio.Promise.resolve delivery_response_u
+                (Ok
+                   (consumer_delivery_wire ~sid:1 ~consumer:"watch"
+                      ~key:"alice" ~stream_sequence:1L ~consumer_sequence:1L
+                      ~pending:1L "one"
+                   ^ consumer_delivery_wire ~sid:1 ~consumer:"watch"
+                       ~key:"alice" ~stream_sequence:2L
+                       ~consumer_sequence:2L ~pending:1L ~operation:"DEL" ""
+                   ^ consumer_delivery_wire ~sid:1 ~consumer:"watch"
+                       ~key:"alice" ~stream_sequence:3L
+                       ~consumer_sequence:3L ~pending:0L "three"));
+              let entry =
+                match expect_kv_ok (Nats_eio.Key_value.Watch.next watch) with
+                | Nats_eio.Key_value.Watch.Entry entry -> entry
+                | Nats_eio.Key_value.Watch.Initial_done ->
+                    fail "watch emitted its initial marker too early"
+              in
+              equal string "one" (Nats_eio.Key_value.Entry.value entry);
+              let tombstone =
+                match expect_kv_ok (Nats_eio.Key_value.Watch.next watch) with
+                | Nats_eio.Key_value.Watch.Entry entry -> entry
+                | Nats_eio.Key_value.Watch.Initial_done ->
+                    fail "watch omitted a retained tombstone"
+              in
+              (match Nats_eio.Key_value.Entry.operation tombstone with
+              | Nats_eio.Key_value.Entry.Delete -> ()
+              | _ -> fail "watch returned the wrong retained operation");
+              (match expect_kv_ok (Nats_eio.Key_value.Watch.next watch) with
+              | Nats_eio.Key_value.Watch.Initial_done -> ()
+              | Nats_eio.Key_value.Watch.Entry _ ->
+                  fail "watch omitted its initial marker");
+              let live =
+                match expect_kv_ok (Nats_eio.Key_value.Watch.next watch) with
+                | Nats_eio.Key_value.Watch.Entry entry -> entry
+                | Nats_eio.Key_value.Watch.Initial_done ->
+                    fail "watch emitted a second initial marker"
+              in
+              equal string "three" (Nats_eio.Key_value.Entry.value live);
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Key_value.Watch.close watch));
+              wait_for_trace ~trace
+                ~needle:"PUB $JS.API.CONSUMER.DELETE.KV_users.watch";
+              Eio.Promise.resolve delete_response_u (Ok (api_ok_wire ~sid:4));
+              expect_kv_ok (Eio.Promise.await close_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "watch can ignore tombstones and suppress values" (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let first_info_response, first_info_response_u = Eio.Promise.create () in
+          let delivery_response, delivery_response_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await first_info_response;
+                `Await delivery_response;
+                `Await delete_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let value =
+                expect_kv_ok
+                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+              in
+              let watch_result, watch_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve watch_result_u
+                    (Nats_eio.Key_value.Watch.v ~sw ~key:"alice"
+                       ~delivery:Nats_eio.Key_value.Watch.All
+                       ~ignore_deletes:true ~meta_only:true value));
+              yield_n 5;
+              let deliver_subject = trace_field ~trace ~field:"deliver_subject" in
+              require_trace ~trace ~needle:"deliver_policy\\\":\\\"all";
+              require_trace ~trace ~needle:"headers_only\\\":true";
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (consumer_response_named ~sid:2 ~policy:"all" ~headers_only:true
+                      ~pending:None ~name:"watch" ~deliver_subject));
+              yield_n 5;
+              Eio.Promise.resolve first_info_response_u
+                (Ok
+                   (consumer_response_named ~sid:3 ~policy:"all" ~headers_only:true
+                      ~pending:(Some 3L) ~name:"watch" ~deliver_subject));
+              let watch = expect_kv_ok (Eio.Promise.await watch_result) in
+              Eio.Promise.resolve delivery_response_u
+                (Ok
+                   (consumer_delivery_wire ~sid:1 ~consumer:"watch"
+                      ~key:"alice" ~stream_sequence:1L ~consumer_sequence:1L
+                      ~pending:2L ""
+                   ^ consumer_delivery_wire ~sid:1 ~consumer:"watch"
+                       ~key:"alice" ~stream_sequence:2L
+                       ~consumer_sequence:2L ~pending:1L ~operation:"DEL" ""
+                   ^ consumer_delivery_wire ~sid:1 ~consumer:"watch"
+                       ~key:"alice" ~stream_sequence:3L
+                       ~consumer_sequence:3L ~pending:0L ~operation:"PURGE"
+                       ""));
+              let entry =
+                match expect_kv_ok (Nats_eio.Key_value.Watch.next watch) with
+                | Nats_eio.Key_value.Watch.Entry entry -> entry
+                | Nats_eio.Key_value.Watch.Initial_done ->
+                    fail "metadata-only watch emitted its marker too early"
+              in
+              equal string "" (Nats_eio.Key_value.Entry.value entry);
+              (match expect_kv_ok (Nats_eio.Key_value.Watch.next watch) with
+              | Nats_eio.Key_value.Watch.Initial_done -> ()
+              | Nats_eio.Key_value.Watch.Entry _ ->
+                  fail "watch did not skip tombstones before its marker");
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Key_value.Watch.close watch));
+              wait_for_trace ~trace
+                ~needle:"PUB $JS.API.CONSUMER.DELETE.KV_users.watch";
+              Eio.Promise.resolve delete_response_u (Ok (api_ok_wire ~sid:4));
+              expect_kv_ok (Eio.Promise.await close_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "new watch emits its marker without retained messages" (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let first_info_response, first_info_response_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await first_info_response;
+                `Await delete_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let value =
+                expect_kv_ok
+                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+              in
+              let watch_result, watch_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve watch_result_u
+                    (Nats_eio.Key_value.Watch.v ~sw
+                       ~delivery:Nats_eio.Key_value.Watch.New value));
+              yield_n 5;
+              let deliver_subject = trace_field ~trace ~field:"deliver_subject" in
+              require_trace ~trace ~needle:"deliver_policy\\\":\\\"new";
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (consumer_response_named ~sid:2 ~policy:"new"
+                      ~headers_only:false ~pending:None ~name:"watch"
+                      ~deliver_subject));
+              yield_n 5;
+              Eio.Promise.resolve first_info_response_u
+                (Ok
+                   (consumer_response_named ~sid:3 ~policy:"new"
+                      ~headers_only:false ~pending:None ~name:"watch"
+                      ~deliver_subject));
+              let watch = expect_kv_ok (Eio.Promise.await watch_result) in
+              (match expect_kv_ok (Nats_eio.Key_value.Watch.next watch) with
+              | Nats_eio.Key_value.Watch.Initial_done -> ()
+              | Nats_eio.Key_value.Watch.Entry _ ->
+                  fail "new watch did not emit its initial marker");
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Key_value.Watch.close watch));
+              wait_for_trace ~trace
+                ~needle:"PUB $JS.API.CONSUMER.DELETE.KV_users.watch";
+              Eio.Promise.resolve delete_response_u (Ok (api_ok_wire ~sid:4));
+              expect_kv_ok (Eio.Promise.await close_result);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "CAS errors are mapped and create resurrects tombstones" (fun () ->
