@@ -34,5 +34,7 @@
   cstruct
   tls-eio
   mtime
+  base64
+  digestif
   (eio_main :with-test)
   (windtrap :with-test)))

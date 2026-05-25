@@ -1,3 +1,4 @@
 (tests
- (names test_eio test_jetstream test_key_value)
- (libraries nats nats-eio eio eio.mock tls x509 mirage-crypto-rng.unix windtrap))
+ (names test_eio test_jetstream test_key_value test_object_store)
+ (libraries nats nats-eio eio eio.mock tls x509 mirage-crypto-rng.unix windtrap
+  base64))
