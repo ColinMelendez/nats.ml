@@ -231,6 +231,15 @@ module Stream : sig
   (** [get_last stream ~subject] retrieves the latest stored message for an
       exact subject through JetStream's direct message API. *)
 
+  val purge :
+    ?timeout:Mtime.Span.t ->
+    ?subject:Nats.Subject.Filter.t ->
+    t ->
+    (int64, Error.t) result
+  (** [purge ?subject stream] removes messages from [stream]. With [subject],
+      only messages matching the subject filter are removed. The result is the
+      number of messages the server purged. *)
+
   val delete : t -> (unit, Error.t) result
 end
 

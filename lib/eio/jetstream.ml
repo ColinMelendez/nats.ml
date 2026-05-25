@@ -977,6 +977,45 @@ module Stream = struct
     | Error error -> Error error
     | Ok message -> stored_message stream message
 
+  type purge_request = { filter : string option }
+
+  let purge_request_codec =
+    Jsont.Object.map ~kind:"JetStream stream purge request" (fun filter ->
+        { filter })
+    |> Jsont.Object.opt_mem "filter" Jsont.string ~enc:(fun value ->
+        value.filter)
+    |> Jsont.Object.finish
+
+  type purge_response = { error : api_error option; purged : int64 }
+
+  let purge_response_codec =
+    Jsont.Object.map ~kind:"JetStream stream purge response"
+      (fun error purged -> { error; purged })
+    |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
+        value.error)
+    |> Jsont.Object.mem "purged" Jsont.int64 ~enc:(fun value -> value.purged)
+    |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+
+  let purge ?timeout ?subject stream =
+    let request =
+      { filter = Option.map Nats.Subject.Filter.to_string subject }
+    in
+    match encode purge_request_codec request with
+    | Error error -> Error error
+    | Ok payload ->
+        let subject =
+          api_subject stream.jetstream [ "STREAM"; "PURGE"; stream.name ]
+        in
+        (match
+           request_msg ?timeout stream.jetstream (Nats.Message.v ~subject payload)
+         with
+        | Error error -> Error error
+        | Ok message -> (
+            match decode purge_response_codec message with
+            | Error error -> Error error
+            | Ok { error = Some error; _ } -> Error (Error.Api error)
+            | Ok { error = None; purged } -> Ok purged))
+
   let list ?subject jetstream =
     let offset = ref 0 in
     let infos = ref [] in

@@ -611,6 +611,42 @@ let () =
                 | _ -> false);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "stream purge sends a filtered request and returns the count" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"OBJ_assets")
+              in
+              let filter = Nats.Subject.Filter.literal "$O.assets.C.nuid" in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Stream.purge stream ~subject:filter));
+              yield_n 5;
+              let trace = Buffer.contents trace in
+              if
+                not
+                  (contains_substring ~needle:"STREAM.PURGE.OBJ_assets" trace)
+              then fail "stream purge was not sent";
+              if
+                not
+                  (contains_substring
+                     ~needle:"filter\\\":\\\"$O.assets.C.nuid\\\"" trace)
+              then fail "stream purge omitted the subject filter";
+              Eio.Promise.resolve response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"success":true,"purged":3}|}));
+              equal int64 3L (expect_jetstream_ok (Eio.Promise.await result));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream direct reads preserve stored message metadata" (fun () ->
           let first_response, first_response_u = Eio.Promise.create () in
           let second_response, second_response_u = Eio.Promise.create () in
