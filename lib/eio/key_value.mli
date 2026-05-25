@@ -222,3 +222,13 @@ val get_revision :
 (** [get_revision value key ~revision] returns the exact retained revision for
     [key]. [revision] must be positive. A revision belonging to another key
     returns [Key_not_found]. *)
+
+val keys : ?filter:string -> t -> (Key.t list, Error.t) result
+(** [keys ?filter value] returns live keys in server delivery order.
+
+    [filter] is a bucket-relative NATS filter using exact tokens, [*], and a
+    terminal [>]. It defaults to [>]. Tombstoned keys are omitted. *)
+
+val history : t -> Key.t -> (Entry.t list, Error.t) result
+(** [history value key] returns retained entries for [key], oldest first.
+    Put, delete, and purge entries are included. *)

@@ -510,3 +510,260 @@ let purge ?expected_revision value key =
       match expected_revision with
       | Some expected -> map_cas_error ~expected error
       | None -> Error error)
+
+module Key_set = Set.Make (String)
+
+let make_filter value pattern =
+  let pattern = Option.value pattern ~default:">" in
+  let subject = "$KV." ^ value.bucket ^ "." ^ pattern in
+  match Nats.Subject.Filter.of_string subject with
+  | Error reason -> Error (Error.Invalid_filter { value = pattern; reason })
+  | Ok filter ->
+      let tokens = String.split_on_char '.' pattern in
+      let invalid = ref None in
+      List.iter
+        (fun token ->
+          match !invalid with
+          | Some _ -> ()
+          | None when String.equal token "*" || String.equal token ">" -> ()
+          | None -> (
+              match Key.of_string token with
+              | Ok _ -> ()
+              | Error reason ->
+                  invalid := Some (Error.Invalid_key { value = token; reason })))
+        tokens;
+      match !invalid with None -> Ok filter | Some error -> Error error
+
+let timestamp_of_nanoseconds value =
+  if Int64.compare value 0L < 0 then Error (Error.Invalid_timestamp value)
+  else
+    let billion = 1_000_000_000L in
+    let day_seconds = 86_400L in
+    let seconds = Int64.div value billion in
+    let fraction = Int64.rem value billion in
+    let days = Int64.div seconds day_seconds in
+    let seconds_in_day = Int64.rem seconds day_seconds in
+    let z = Int64.add days 719_468L in
+    let era = Int64.div z 146_097L in
+    let doe = Int64.sub z (Int64.mul era 146_097L) in
+    let yoe =
+      Int64.div
+        (Int64.sub
+           (Int64.add
+              (Int64.sub doe (Int64.div doe 1_460L))
+              (Int64.div doe 36_524L))
+           (Int64.div doe 146_096L))
+        365L
+    in
+    let year = Int64.add yoe (Int64.mul era 400L) in
+    let doy =
+      Int64.sub doe
+        (Int64.sub
+           (Int64.add (Int64.mul 365L yoe) (Int64.div yoe 4L))
+           (Int64.div yoe 100L))
+    in
+    let month_part = Int64.div (Int64.add (Int64.mul 5L doy) 2L) 153L in
+    let day =
+      Int64.add
+        (Int64.sub doy (Int64.div (Int64.add (Int64.mul 153L month_part) 2L) 5L))
+        1L
+    in
+    let month =
+      Int64.add month_part (if Int64.compare month_part 10L < 0 then 3L else -9L)
+    in
+    let year =
+      Int64.add year (if Int64.compare month 2L <= 0 then 1L else 0L)
+    in
+    let hour = Int64.div seconds_in_day 3_600L in
+    let minute = Int64.div (Int64.rem seconds_in_day 3_600L) 60L in
+    let second = Int64.rem seconds_in_day 60L in
+    Ok
+      (Format.asprintf "%04Ld-%02Ld-%02LdT%02Ld:%02Ld:%02Ld.%09LdZ" year
+         month day hour minute second fraction)
+
+let key_of_delivery value message =
+  let subject = Nats.Subject.to_string (Jetstream.Msg.subject message) in
+  let prefix = "$KV." ^ value.bucket ^ "." in
+  let prefix_length = String.length prefix in
+  if
+    String.length subject <= prefix_length
+    || not (String.equal prefix (String.sub subject 0 prefix_length))
+  then Error (Error.Invalid_message_subject subject)
+  else
+    let key =
+      String.sub subject prefix_length (String.length subject - prefix_length)
+    in
+    match Key.of_string key with
+    | Ok key -> Ok key
+    | Error reason -> Error (Error.Invalid_key { value = key; reason })
+
+let entry_of_delivery value message =
+  match key_of_delivery value message with
+  | Error error -> Error error
+  | Ok key -> (
+      match operation_of_headers (Jetstream.Msg.headers message) with
+      | Error error -> Error error
+      | Ok operation -> (
+          match timestamp_of_nanoseconds (Jetstream.Msg.timestamp message) with
+          | Error error -> Error error
+          | Ok timestamp ->
+              Ok
+                {
+                  Entry.bucket = value.bucket;
+                  key;
+                  value = Jetstream.Msg.payload message;
+                  revision = Jetstream.Msg.stream_sequence message;
+                  timestamp;
+                  operation;
+                }))
+
+let one_shot_config ~filter ~deliver_policy ~headers_only =
+  match
+    Jetstream.Consumer.Config.v ~deliver_policy
+      ~ack_policy:Jetstream.Consumer.Config.No_ack ~filter_subject:filter
+      ~headers_only ~inactive_threshold:Mtime.Span.(5 * min) ~mem_storage:true
+      ()
+  with
+  | Ok config -> Ok config
+  | Error error ->
+      Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
+
+let with_temporary_consumer value config f =
+  match Jetstream.Consumer.create value.stream config with
+  | Error error -> Error (map_jetstream_error error)
+  | Ok consumer ->
+      let cleanup_error = ref None in
+      let result =
+        Fun.protect
+          ~finally:(fun () ->
+            cleanup_error :=
+              Some
+                (Eio.Cancel.protect (fun () ->
+                     Jetstream.Consumer.delete consumer)))
+          (fun () -> f consumer)
+      in
+      match (result, !cleanup_error) with
+      | Ok result, Some (Ok ()) -> Ok result
+      | Ok _, Some (Error error) -> Error (map_jetstream_error error)
+      | Error error, _ -> Error error
+      | Ok _, None -> assert false
+
+let one_shot_batch = 256
+let one_shot_expires = Mtime.Span.(1 * s)
+let max_empty_fetches = 3
+
+let drain_messages consumer =
+  let acc = ref [] in
+  let empty_fetches = ref 0 in
+  let result = ref None in
+  while Option.is_none !result do
+    match
+      Jetstream.Consumer.fetch ~expires:one_shot_expires consumer
+        ~batch:one_shot_batch
+    with
+    | Error error -> result := Some (Error (map_jetstream_error error))
+    | Ok messages -> (
+        acc := List.rev_append messages !acc;
+        let last_pending =
+          List.fold_left
+            (fun _ message -> Some (Jetstream.Msg.num_pending message))
+            None messages
+        in
+        if
+          match last_pending with
+          | Some pending -> Int64.equal pending 0L
+          | None -> false
+        then result := Some (Ok (List.rev !acc))
+        else
+          match Jetstream.Consumer.info consumer with
+          | Error error -> result := Some (Error (map_jetstream_error error))
+          | Ok info
+            when Int64.equal (Jetstream.Consumer.Info.num_pending info) 0L ->
+              result := Some (Ok (List.rev !acc))
+          | Ok _ ->
+              (match messages with
+              | [] -> incr empty_fetches
+              | _ -> empty_fetches := 0);
+              if Int.compare !empty_fetches max_empty_fetches >= 0 then
+                result := Some (Error (Error.Connection Core_error.Timeout)))
+  done;
+  match !result with Some result -> result | None -> assert false
+
+let collect_messages value config =
+  with_temporary_consumer value config (fun consumer ->
+      match Jetstream.Consumer.info consumer with
+      | Error error -> Error (map_jetstream_error error)
+      | Ok info when Int64.equal (Jetstream.Consumer.Info.num_pending info) 0L
+        ->
+          Ok []
+      | Ok _ -> drain_messages consumer)
+
+let keys ?filter value =
+  match make_filter value filter with
+  | Error error -> Error error
+  | Ok filter -> (
+      match
+        one_shot_config ~filter
+          ~deliver_policy:Jetstream.Consumer.Config.Last_per_subject
+          ~headers_only:true
+      with
+      | Error error -> Error error
+      | Ok config -> (
+          match collect_messages value config with
+          | Error error -> Error error
+          | Ok messages ->
+              let result =
+                List.fold_left
+                  (fun result message ->
+                    match result with
+                    | Error _ -> result
+                    | Ok (seen, keys) -> (
+                        match key_of_delivery value message with
+                        | Error error -> Error error
+                        | Ok key -> (
+                            match
+                              operation_of_headers
+                                (Jetstream.Msg.headers message)
+                            with
+                            | Error error -> Error error
+                            | Ok Entry.Put ->
+                                let key_string = Key.to_string key in
+                                if Key_set.mem key_string seen then
+                                  Ok (seen, keys)
+                                else
+                                  Ok
+                                    (Key_set.add key_string seen, key :: keys)
+                            | Ok (Entry.Delete | Entry.Purge) ->
+                                Ok (seen, keys))))
+                  (Ok (Key_set.empty, [])) messages
+              in
+              match result with
+              | Error error -> Error error
+              | Ok (_, keys) -> Ok (List.rev keys)))
+
+let history value key =
+  let filter =
+    Nats.Subject.Filter.literal
+      (Nats.Subject.to_string (key_subject value key))
+  in
+  match
+    one_shot_config ~filter ~deliver_policy:Jetstream.Consumer.Config.All
+      ~headers_only:false
+  with
+  | Error error -> Error error
+  | Ok config -> (
+      match collect_messages value config with
+      | Error error -> Error error
+      | Ok messages ->
+          let result =
+            List.fold_left
+              (fun result message ->
+                match result with
+                | Error _ -> result
+                | Ok entries -> (
+                    match entry_of_delivery value message with
+                    | Error error -> Error error
+                    | Ok entry -> Ok (entry :: entries)))
+              (Ok []) messages
+          in
+          match result with Error error -> Error error | Ok entries -> Ok (List.rev entries))
