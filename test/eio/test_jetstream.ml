@@ -373,6 +373,7 @@ let () =
               (Nats_eio.Jetstream.Stream.Config.v ~name:"KV_users"
                  ~subjects:[ subject ] ~description:"user values"
                  ~max_msgs_per_subject:5L ~allow_rollup:true ~allow_direct:true
+                 ~deny_delete:true
                  ())
           in
           equal (option string) (Some "user values")
@@ -388,6 +389,8 @@ let () =
             (Nats_eio.Jetstream.Stream.Config.max_msgs_per_subject config);
           equal bool true (Nats_eio.Jetstream.Stream.Config.allow_rollup config);
           equal bool true (Nats_eio.Jetstream.Stream.Config.allow_direct config);
+          equal bool true
+            (Nats_eio.Jetstream.Stream.Config.deny_delete config);
           let updated =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Stream.Config.with_max_msgs_per_subject config
@@ -406,7 +409,13 @@ let () =
               (Nats_eio.Jetstream.Stream.Config.with_allow_direct updated false)
           in
           equal bool false
-            (Nats_eio.Jetstream.Stream.Config.allow_direct updated));
+            (Nats_eio.Jetstream.Stream.Config.allow_direct updated);
+          let updated =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_deny_delete updated false)
+          in
+          equal bool false
+            (Nats_eio.Jetstream.Stream.Config.deny_delete updated));
       test "stream create emits retained config fields" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
@@ -421,7 +430,7 @@ let () =
                   (Nats_eio.Jetstream.Stream.Config.v ~name:"KV_users"
                      ~subjects:[ Nats.Subject.Filter.literal "$KV.users.>" ]
                      ~description:"user values" ~max_msgs_per_subject:5L
-                     ~allow_rollup:true ~allow_direct:true ())
+                     ~allow_rollup:true ~allow_direct:true ~deny_delete:true ())
               in
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -446,10 +455,12 @@ let () =
               then fail "stream create omitted the rollup-header flag";
               if not (contains_substring ~needle:"allow_direct\\\":true" trace)
               then fail "stream create omitted the direct-read flag";
+              if not (contains_substring ~needle:"deny_delete\\\":true" trace)
+              then fail "stream create omitted the deny-delete flag";
               Eio.Promise.resolve response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:1
-                      {|{"config":{"name":"KV_users","subjects":["$KV.users.>"],"description":"user values","storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":5,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":true,"allow_direct":true,"num_replicas":3,"sealed":true,"metadata":{"owner":"test"}}}|}));
+                      {|{"config":{"name":"KV_users","subjects":["$KV.users.>"],"description":"user values","storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":5,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":true,"allow_direct":true,"deny_delete":true,"num_replicas":3,"sealed":true,"metadata":{"owner":"test"}}}|}));
               let stream = expect_jetstream_ok (Eio.Promise.await result) in
               equal string "KV_users" (Nats_eio.Jetstream.Stream.name stream);
               expect_ok (Nats_eio.Connection.close connection);

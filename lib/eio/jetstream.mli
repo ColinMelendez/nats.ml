@@ -89,10 +89,12 @@ module Stream : sig
       ?max_msg_size:int64 ->
       ?allow_rollup:bool ->
       ?allow_direct:bool ->
+      ?deny_delete:bool ->
       unit ->
       (t, error) result
     (** [v] validates a stream name, capture filters, and limits. Limits use
-        [-1] for the JetStream unlimited value when supplied. *)
+        [-1] for the JetStream unlimited value when supplied. [deny_delete]
+        controls whether stream-level message deletion is rejected. *)
 
     val name : t -> string
     val subjects : t -> Nats.Subject.Filter.t list
@@ -107,6 +109,11 @@ module Stream : sig
     val max_msg_size : t -> int64 option
     val allow_rollup : t -> bool
     val allow_direct : t -> bool
+    (** [allow_direct config] is [true] when direct message reads are enabled.
+    *)
+    val deny_delete : t -> bool
+    (** [deny_delete config] is [true] when stream-level message deletion is
+        rejected. *)
 
     val with_name : t -> string -> (t, error) result
     (** [with_name config name] validates [name] while preserving the other
@@ -157,6 +164,10 @@ module Stream : sig
     val with_allow_direct : t -> bool -> (t, error) result
     (** [with_allow_direct config value] replaces whether direct message reads
         are accepted by the stream. *)
+
+    val with_deny_delete : t -> bool -> (t, error) result
+    (** [with_deny_delete config value] replaces whether deleting the stream's
+        messages through the stream API is rejected. *)
   end
 
   module Info : sig
