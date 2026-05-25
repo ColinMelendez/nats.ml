@@ -165,13 +165,14 @@ let delivery_without_ack_wire payload =
   in
   operation_wire (Nats.Op.Hmsg { sid = 1; message; status = None })
 
-let direct_message_wire ~sid ~stream ~subject ~sequence ~timestamp payload =
+let direct_message_wire_with_sequence_header ~sid ~stream ~subject
+    ~sequence_value ~timestamp payload =
   let headers =
     match
       Nats.Header.of_list
         [
           ("JSStream", stream);
-          ("JSSequence", Int64.to_string sequence);
+          ("JSSequence", sequence_value);
           ("JSTimeStamp", timestamp);
           ("JSSubject", subject);
         ]
@@ -185,6 +186,10 @@ let direct_message_wire ~sid ~stream ~subject ~sequence ~timestamp payload =
       ~headers payload
   in
   operation_wire (Nats.Op.Hmsg { sid; message; status = None })
+
+let direct_message_wire ~sid ~stream ~subject ~sequence ~timestamp payload =
+  direct_message_wire_with_sequence_header ~sid ~stream ~subject
+    ~sequence_value:(Int64.to_string sequence) ~timestamp payload
 
 let ack_response_wire ~sid =
   let message =
@@ -523,6 +528,60 @@ let () =
               equal (option string) (Some "updated")
                 (Nats_eio.Jetstream.Stream.Config.description
                    (Nats_eio.Jetstream.Stream.Info.config info));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "stream direct reads reject invalid replies" (fun () ->
+          let first_response, first_response_u = Eio.Promise.create () in
+          let second_response, second_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:
+              [
+                `Return info_wire;
+                `Await first_response;
+                `Await second_response;
+                `Await hold;
+              ]
+            (fun ~sw connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
+              in
+              expect_jetstream_error
+                (Nats_eio.Jetstream.Stream.get stream ~sequence:(-1L)) (function
+                | Nats_eio.Jetstream.Error.Invalid_message_header
+                    { name = "JSSequence"; value = "-1" } ->
+                    true
+                | _ -> false);
+              let first_result, first_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_result_u
+                    (Nats_eio.Jetstream.Stream.get stream ~sequence:7L));
+              yield_n 5;
+              Eio.Promise.resolve first_response_u
+                (Ok (consumer_info_wire_with_sid ~sid:1 ""));
+              expect_jetstream_error (Eio.Promise.await first_result) (function
+                | Nats_eio.Jetstream.Error.Message_not_found -> true
+                | _ -> false);
+              let second_result, second_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve second_result_u
+                    (Nats_eio.Jetstream.Stream.get stream ~sequence:8L));
+              yield_n 5;
+              Eio.Promise.resolve second_response_u
+                (Ok
+                   (direct_message_wire_with_sequence_header ~sid:2
+                      ~stream:"ORDERS" ~subject:"orders.created"
+                      ~sequence_value:"not-a-number"
+                      ~timestamp:"2026-08-11T12:00:00.000000000Z" "malformed"));
+              expect_jetstream_error (Eio.Promise.await second_result) (function
+                | Nats_eio.Jetstream.Error.Invalid_message_header
+                    { name = "JSSequence"; value = "not-a-number" } ->
+                    true
+                | _ -> false);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream direct reads preserve stored message metadata" (fun () ->
