@@ -447,6 +447,20 @@ module Consumer : sig
         their last configuration. The session is single-owner: do not call
         [next] or [next_with_timeout] concurrently on one value. *)
 
+    val create :
+      sw:Eio.Switch.t -> Stream.t -> Config.t -> (t, Error.t) result
+    (** [create ~sw stream config] creates and owns an ephemeral push
+        consumer. If [config] has no delivery subject, a fresh inbox is
+        chosen. Durable names are rejected. A five-minute inactive threshold
+        and memory storage are supplied when absent. The delivery subscription
+        is installed before the consumer is created, so retained messages
+        cannot race the initial subscription. The consumer is deleted when
+        [close] is called or [sw] releases. *)
+
+    val consumer : t -> consumer
+    (** [consumer push] is the current server-side consumer. An ephemeral
+        consumer may change after recovery. *)
+
     val next : t -> (Msg.t, Error.t) result
     (** [next push] waits for the next delivered message. Messages are not
         acknowledged automatically. Idle-heartbeat frames are consumed and
@@ -469,7 +483,8 @@ module Consumer : sig
         single-owner rule as [next]. *)
 
     val close : t -> (unit, Error.t) result
-    (** [close push] stops the subscription and is idempotent. *)
+    (** [close push] stops the subscription, deletes an owned consumer, and is
+        idempotent. *)
   end
 
   module Ordered : sig

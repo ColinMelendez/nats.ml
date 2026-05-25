@@ -63,6 +63,10 @@ let push_consumer_info_wire_with_sid ~sid =
   consumer_info_wire_with_sid ~sid
     {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","deliver_subject":"orders.push","deliver_group":"workers","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant"}}|}
 
+let owned_push_consumer_info_wire_with_sid ~sid =
+  consumer_info_wire_with_sid ~sid
+    {|{"stream_name":"ORDERS","name":"worker","config":{"deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"none","replay_policy":"instant"}}|}
+
 let push_consumer_info_wire_with_sid_and_subject ~sid ~subject =
   let payload =
     Format.asprintf
@@ -321,6 +325,18 @@ let contains_substring ~needle value =
     incr index
   done;
   !found
+
+let substring_position ~needle value =
+  let needle_length = String.length needle in
+  let limit = String.length value - needle_length in
+  let index = ref 0 in
+  let result = ref None in
+  while Option.is_none !result && !index <= limit do
+    if String.equal (String.sub value !index needle_length) needle then
+      result := Some !index
+    else incr index
+  done;
+  !result
 
 let count_substring ~needle value =
   let needle_length = String.length needle in
@@ -768,6 +784,113 @@ let () =
                 | Nats_eio.Jetstream.Error.Push_closed -> true
                 | _ -> false);
               expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Push.close push);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "owned push creates after subscribing and deletes on close" (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let info_response, info_response_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced_clock
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await info_response;
+                `Await delete_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace ~clock connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.v
+                     ~deliver_subject:(Nats.Subject.literal "orders.push")
+                     ~deliver_policy:
+                       Nats_eio.Jetstream.Consumer.Config.All
+                     ~ack_policy:Nats_eio.Jetstream.Consumer.Config.No_ack
+                     ~inactive_threshold:Mtime.Span.(5 * min)
+                     ~mem_storage:true ())
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.Push.create ~sw stream
+                       config));
+              yield_n 5;
+              let trace_value = Buffer.contents trace in
+              let subscription_position =
+                match
+                  substring_position ~needle:"wrote \"SUB orders.push 1\\r\\n\""
+                    trace_value
+                with
+                | Some position -> position
+                | None -> fail "owned push did not subscribe before create"
+              in
+              let create_position =
+                match
+                  substring_position
+                    ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS"
+                    trace_value
+                with
+                | Some position -> position
+                | None -> fail "owned push did not create a consumer"
+              in
+              if Int.compare subscription_position create_position >= 0 then
+                fail "owned push created its consumer before subscribing";
+              Eio.Promise.resolve create_response_u
+                (Ok (owned_push_consumer_info_wire_with_sid ~sid:2));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u
+                (Ok (owned_push_consumer_info_wire_with_sid ~sid:3));
+              let push = expect_jetstream_ok (Eio.Promise.await result) in
+              equal string "worker"
+                (Nats_eio.Jetstream.Consumer.name
+                   (Nats_eio.Jetstream.Consumer.Push.consumer push));
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.close push));
+              yield_n 5;
+              wait_for_trace ~clock ~trace
+                ~needle:"PUB $JS.API.CONSUMER.DELETE.ORDERS.worker" ~count:1;
+              Eio.Promise.resolve delete_response_u (Ok (api_ok_wire ~sid:4));
+              expect_jetstream_ok (Eio.Promise.await close_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "owned push rejects durable consumer configs" (fun () ->
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await hold ]
+            (fun ~sw connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.v
+                     ~durable_name:"worker"
+                     ~deliver_subject:(Nats.Subject.literal "orders.push")
+                     ())
+              in
+              expect_jetstream_error
+                (Nats_eio.Jetstream.Consumer.Push.create ~sw stream config)
+                (function
+                  | Nats_eio.Jetstream.Error.Invalid_config
+                      (Nats_eio.Jetstream.Error.Invalid_consumer_policy
+                        { field }) ->
+                      String.equal field "durable_name"
+                  | _ -> false);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "push restores its subscription after reconnect" (fun () ->

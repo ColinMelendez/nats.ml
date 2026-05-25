@@ -2576,6 +2576,7 @@ module Consumer = struct
       mutable heartbeat_deadline : Mtime.t option;
       mutable state : state;
       mutable hook : Eio.Switch.hook option;
+      owns_consumer : bool;
     }
 
     let fail push error =
@@ -2605,9 +2606,23 @@ module Consumer = struct
             (fun hook -> ignore (Eio.Switch.try_remove_hook hook))
             push.hook;
           push.hook <- None;
-          match release_subscription push.subscription with
-          | None -> Ok ()
-          | Some error -> Error (Error.Connection error))
+          let subscription_result =
+            match release_subscription push.subscription with
+            | None -> Ok ()
+            | Some error -> Error (Error.Connection error)
+          in
+          let consumer_result =
+            if push.owns_consumer then
+              match
+                Eio.Cancel.protect (fun () -> delete push.consumer)
+              with
+              | Ok () -> Ok ()
+              | Error error -> Error error
+            else Ok ()
+          in
+          match subscription_result with
+          | Error error -> Error error
+          | Ok () -> consumer_result)
 
     let heartbeat_missed push =
       match push.heartbeat_deadline with
@@ -2927,6 +2942,31 @@ module Consumer = struct
       done;
       match !result with Some result -> result | None -> assert false
 
+    let make ~sw ~owns_consumer ~consumer ~subscription ~config =
+      let connection = consumer.jetstream.connection in
+      let push =
+        {
+          consumer;
+          connection;
+          subscription;
+          config;
+          last_stream_sequence = None;
+          idle_heartbeat = Config.idle_heartbeat config;
+          recovery_pending = false;
+          heartbeat_deadline =
+            heartbeat_deadline_at connection (Config.idle_heartbeat config);
+          state = Open;
+          hook = None;
+          owns_consumer;
+        }
+      in
+      let hook =
+        Eio.Switch.on_release_cancellable sw (fun () ->
+            Eio.Cancel.protect (fun () -> ignore (close push)))
+      in
+      push.hook <- Some hook;
+      Ok push
+
     let v ~sw consumer =
       match info consumer with
       | Error error -> Error error
@@ -2946,28 +2986,114 @@ module Consumer = struct
               with
               | Error error -> Error (Error.Connection error)
               | Ok subscription ->
-                  let push =
-                    {
-                      consumer;
-                      connection;
-                      subscription;
-                      config;
-                      last_stream_sequence = None;
-                      idle_heartbeat = Config.idle_heartbeat config;
-                      recovery_pending = false;
-                      heartbeat_deadline =
-                        heartbeat_deadline_at connection
-                          (Config.idle_heartbeat config);
-                      state = Open;
-                      hook = None;
-                    }
-                  in
-                  let hook =
-                    Eio.Switch.on_release_cancellable sw (fun () ->
-                        Eio.Cancel.protect (fun () -> ignore (close push)))
-                  in
-                  push.hook <- Some hook;
-                  Ok push))
+                  make ~sw ~owns_consumer:false ~consumer ~subscription ~config))
+
+    let create ~sw (stream : Stream.t) config =
+      if Option.is_some (Config.durable_name config) then
+        Error
+          (Error.Invalid_config
+             (Error.Invalid_consumer_policy
+                {
+                  field = "durable_name";
+                  value = "owned push consumers must be ephemeral";
+                }))
+      else
+        let connection = stream.jetstream.connection in
+        let config =
+          {
+            config with
+            deliver_subject =
+              (match Config.deliver_subject config with
+              | Some subject -> Some subject
+              | None -> Some (Connection.fresh_inbox connection));
+            inactive_threshold =
+              (match config.inactive_threshold with
+              | Some threshold -> Some threshold
+              | None -> Some Mtime.Span.(5 * min));
+            mem_storage =
+              (match config.mem_storage with
+              | Some value -> Some value
+              | None -> Some true);
+          }
+        in
+        match Config.deliver_subject config with
+        | None -> assert false
+        | Some subject ->
+            let filter =
+              Nats.Subject.Filter.literal (Nats.Subject.to_string subject)
+            in
+            (match
+               Connection.subscribe connection
+                 ?queue_group:(Config.deliver_group config)
+                 filter
+             with
+            | Error error -> Error (Error.Connection error)
+            | Ok subscription ->
+                let active_subscription = ref subscription in
+                let created_consumer = ref None in
+                let transferred = ref false in
+                let cleanup () =
+                  if not !transferred then (
+                    transferred := true;
+                    ignore (release_subscription !active_subscription);
+                    match !created_consumer with
+                    | None -> ()
+                    | Some consumer ->
+                        ignore
+                          (Eio.Cancel.protect (fun () -> delete consumer)))
+                in
+                Fun.protect ~finally:cleanup (fun () ->
+                    match create stream config with
+                    | Error error -> Error error
+                    | Ok consumer ->
+                        created_consumer := Some consumer;
+                        (match info consumer with
+                        | Error error -> Error error
+                        | Ok info ->
+                            let actual_config = Info.config info in
+                            match Config.deliver_subject actual_config with
+                            | None -> Error Error.Not_push_consumer
+                            | Some actual_subject ->
+                                let subscription_result =
+                                  if
+                                    Nats.Subject.equal subject actual_subject
+                                    && option_equal Nats.Queue_group.equal
+                                         (Config.deliver_group config)
+                                         (Config.deliver_group actual_config)
+                                  then Ok !active_subscription
+                                  else
+                                    match
+                                      Connection.subscribe connection
+                                        ?queue_group:
+                                          (Config.deliver_group actual_config)
+                                        (Nats.Subject.Filter.literal
+                                           (Nats.Subject.to_string
+                                              actual_subject))
+                                    with
+                                    | Error error ->
+                                        Error (Error.Connection error)
+                                    | Ok replacement ->
+                                        active_subscription := replacement;
+                                        (match
+                                           release_subscription subscription
+                                         with
+                                        | None -> Ok replacement
+                                        | Some error ->
+                                            Error (Error.Connection error))
+                                in
+                                match subscription_result with
+                                | Error error -> Error error
+                                | Ok subscription ->
+                                    (match
+                                       make ~sw ~owns_consumer:true ~consumer
+                                         ~subscription ~config:actual_config
+                                     with
+                                    | Error error -> Error error
+                                    | Ok push ->
+                                        transferred := true;
+                                        Ok push))))
+
+    let consumer push = push.consumer
   end
 
   module Ordered = struct
