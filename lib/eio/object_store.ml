@@ -5,6 +5,8 @@ let ( let* ) value f = match value with Error error -> Error error | Ok value ->
 
 module Config = struct
   type storage = Memory | File
+  type compression = Jetstream.Stream.Config.compression = Uncompressed | S2
+  module Placement = Jetstream.Stream.Config.Placement
 
   type t = {
     bucket : string;
@@ -12,6 +14,10 @@ module Config = struct
     ttl : Mtime.Span.t option;
     max_bytes : int64 option;
     storage : storage;
+    replicas : int;
+    placement : Placement.t option;
+    compression : compression;
+    metadata : (string * string) list;
   }
 
   type error =
@@ -19,6 +25,7 @@ module Config = struct
     | Invalid_bucket_character of { position : int; character : char }
     | Invalid_ttl
     | Invalid_limit of { field : string; value : int64 }
+    | Invalid_replicas of int
 
   let allowed_bucket_character character =
     let code = Char.code character in
@@ -49,7 +56,9 @@ module Config = struct
     | Some value when Int64.compare value (-1L) >= 0 -> Ok ()
     | Some value -> Error (Invalid_limit { field; value })
 
-  let v ~bucket ?description ?ttl ?max_bytes ?(storage = File) () =
+  let v ~bucket ?description ?ttl ?max_bytes ?(storage = File) ?(replicas = 1)
+      ?placement ?(compression = Jetstream.Stream.Config.Uncompressed)
+      ?(metadata = []) () =
     match validate_bucket bucket with
     | Error error -> Error error
     | Ok () -> (
@@ -59,6 +68,8 @@ module Config = struct
         | _ -> (
             match validate_limit "max_bytes" max_bytes with
             | Error error -> Error error
+            | Ok () when replicas < 1 || replicas > 5 ->
+                Error (Invalid_replicas replicas)
             | Ok () ->
                 Ok
                   {
@@ -74,6 +85,10 @@ module Config = struct
                       | value -> value);
                     max_bytes = normalize_limit max_bytes;
                     storage;
+                    replicas;
+                    placement;
+                    compression;
+                    metadata;
                   }))
 
   let bucket value = value.bucket
@@ -81,6 +96,10 @@ module Config = struct
   let ttl value = value.ttl
   let max_bytes value = value.max_bytes
   let storage value = value.storage
+  let replicas value = value.replicas
+  let placement value = value.placement
+  let compression value = value.compression
+  let metadata value = value.metadata
 end
 
 module Name = struct
@@ -207,6 +226,9 @@ module Error = struct
         Format.pp_print_string ppf "object-store TTL must not be negative"
     | Config.Invalid_limit { field; value } ->
         Format.fprintf ppf "invalid object-store %s limit %Ld" field value
+    | Config.Invalid_replicas value ->
+        Format.fprintf ppf "object-store replicas must be between 1 and 5, got %d"
+          value
 
   let pp_name ppf = function
     | Name.Empty_name -> Format.pp_print_string ppf "object name is empty"
@@ -288,6 +310,10 @@ module Status = struct
     ttl : Mtime.Span.t option;
     max_bytes : int64 option;
     storage : Config.storage;
+    replicas : int;
+    placement : Config.Placement.t option;
+    compression : Config.compression;
+    metadata : (string * string) list;
     sealed : bool;
   }
 
@@ -300,6 +326,10 @@ module Status = struct
   let ttl value = value.ttl
   let max_bytes value = value.max_bytes
   let storage value = value.storage
+  let replicas value = value.replicas
+  let placement value = value.placement
+  let compression value = value.compression
+  let metadata value = value.metadata
   let sealed value = value.sealed
 end
 
@@ -424,7 +454,11 @@ let stream_config config =
         | Config.File -> Jetstream.Stream.Config.File)
       ~retention:Jetstream.Stream.Config.Limits
       ~discard:Jetstream.Stream.Config.New ?max_bytes:(Config.max_bytes config)
-      ?max_age:(Config.ttl config) ~allow_rollup:true ~allow_direct:true ()
+      ?max_age:(Config.ttl config) ~replicas:(Config.replicas config)
+      ?placement:(Config.placement config)
+      ~compression:(Config.compression config)
+      ~metadata:(Config.metadata config) ~allow_rollup:true ~allow_direct:true
+      ()
   with
   | Error error -> Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
   | Ok config -> Ok config
@@ -479,6 +513,10 @@ let status value =
           ttl = Jetstream.Stream.Config.max_age config;
           max_bytes = Jetstream.Stream.Config.max_bytes config;
           storage;
+          replicas = Jetstream.Stream.Config.replicas config;
+          placement = Jetstream.Stream.Config.placement config;
+          compression = Jetstream.Stream.Config.compression config;
+          metadata = Jetstream.Stream.Config.metadata config;
           sealed = Jetstream.Stream.Config.sealed config;
         }
 

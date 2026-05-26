@@ -9,6 +9,11 @@ module Config : sig
   type storage = Memory | File
   (** The JetStream storage backend used by the bucket. *)
 
+  type compression = Jetstream.Stream.Config.compression = Uncompressed | S2
+  (** Compression applied by the backing JetStream stream. *)
+
+  module Placement = Jetstream.Stream.Config.Placement
+
   type t
   (** A validated object-store configuration. *)
 
@@ -17,6 +22,7 @@ module Config : sig
     | Invalid_bucket_character of { position : int; character : char }
     | Invalid_ttl
     | Invalid_limit of { field : string; value : int64 }
+    | Invalid_replicas of int
 
   val v :
     bucket:string ->
@@ -24,18 +30,28 @@ module Config : sig
     ?ttl:Mtime.Span.t ->
     ?max_bytes:int64 ->
     ?storage:storage ->
+    ?replicas:int ->
+    ?placement:Placement.t ->
+    ?compression:compression ->
+    ?metadata:(string * string) list ->
     unit ->
     (t, error) result
   (** [v ~bucket ()] validates a bucket configuration.
 
       A zero TTL and [-1] byte limit mean unlimited. The default storage
-      backend is {!File}. *)
+      backend is {!File}. [replicas] must be between 1 and 5. Placement,
+      compression, and metadata are projected to the backing JetStream stream.
+  *)
 
   val bucket : t -> string
   val description : t -> string option
   val ttl : t -> Mtime.Span.t option
   val max_bytes : t -> int64 option
   val storage : t -> storage
+  val replicas : t -> int
+  val placement : t -> Placement.t option
+  val compression : t -> compression
+  val metadata : t -> (string * string) list
 end
 
 module Name : sig
@@ -167,6 +183,10 @@ module Status : sig
   val ttl : t -> Mtime.Span.t option
   val max_bytes : t -> int64 option
   val storage : t -> Config.storage
+  val replicas : t -> int
+  val placement : t -> Config.Placement.t option
+  val compression : t -> Config.compression
+  val metadata : t -> (string * string) list
   val sealed : t -> bool
 end
 

@@ -63,7 +63,7 @@ let direct_response_wire ~sid ~bucket ~name payload =
 let stream_response ~sid ~bucket =
   let payload =
     Format.asprintf
-      {|{"config":{"name":"OBJ_%s","description":"media","subjects":["$O.%s.C.>","$O.%s.M.>"],"storage":"memory","retention":"limits","discard":"new","max_bytes":4096,"max_age":1000000000,"allow_rollup_hdrs":true,"allow_direct":true}}|}
+      {|{"config":{"name":"OBJ_%s","description":"media","subjects":["$O.%s.C.>","$O.%s.M.>"],"storage":"memory","retention":"limits","discard":"new","max_bytes":4096,"max_age":1000000000,"allow_rollup_hdrs":true,"allow_direct":true,"num_replicas":3,"placement":{"cluster":"objects","tags":["ssd"]},"compression":"s2","metadata":{"owner":"object-test"}}}|}
       bucket bucket bucket
   in
   response_wire_with_sid ~sid payload
@@ -72,7 +72,7 @@ let stream_info_response ~sid ~bucket ?(sealed = false) () =
   let sealed_field = if sealed then ",\"sealed\":true" else "" in
   let payload =
     Format.asprintf
-      {|{"config":{"name":"OBJ_%s","description":"media","subjects":["$O.%s.C.>","$O.%s.M.>"],"storage":"memory","retention":"limits","discard":"new","max_bytes":4096,"max_age":1000000000,"allow_rollup_hdrs":true,"allow_direct":true%s},"state":{"messages":4,"bytes":321,"first_seq":3,"last_seq":9,"consumer_count":0}}|}
+      {|{"config":{"name":"OBJ_%s","description":"media","subjects":["$O.%s.C.>","$O.%s.M.>"],"storage":"memory","retention":"limits","discard":"new","max_bytes":4096,"max_age":1000000000,"allow_rollup_hdrs":true,"allow_direct":true,"num_replicas":3,"placement":{"cluster":"objects","tags":["ssd"]},"compression":"s2","metadata":{"owner":"object-test"}%s},"state":{"messages":4,"bytes":321,"first_seq":3,"last_seq":9,"consumer_count":0}}|}
       bucket bucket bucket sealed_field
   in
   response_wire_with_sid ~sid payload
@@ -192,10 +192,22 @@ let trace_json_string ~trace ~field =
       | Some finish -> String.sub value start (finish - start))
 
 let config () =
+  let placement =
+    match
+      Nats_eio.Object_store.Config.Placement.v ~cluster:"objects"
+        ~tags:[ "ssd" ] ()
+    with
+    | Ok value -> value
+    | Error error ->
+        fail
+          (Format.asprintf "%a" Nats_eio.Jetstream.Error.pp_config error)
+  in
   match
     Nats_eio.Object_store.Config.v ~bucket:"assets" ~description:"media"
       ~ttl:Mtime.Span.(1 * s) ~max_bytes:4096L
-      ~storage:Nats_eio.Object_store.Config.Memory ()
+      ~storage:Nats_eio.Object_store.Config.Memory ~replicas:3 ~placement
+      ~compression:Nats_eio.Object_store.Config.S2
+      ~metadata:[ ("owner", "object-test") ] ()
   with
   | Ok value -> value
   | Error error ->
@@ -318,6 +330,15 @@ let () =
               fail
                 (Format.asprintf "unexpected config error: %a"
                    Nats_eio.Object_store.Error.pp_config error));
+          (match
+             Nats_eio.Object_store.Config.v ~bucket:"assets" ~replicas:0 ()
+           with
+          | Ok _ -> fail "object-store config accepted zero replicas"
+          | Error Nats_eio.Object_store.Config.Invalid_replicas 0 -> ()
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected replica error: %a"
+                   Nats_eio.Object_store.Error.pp_config error));
           (match Nats_eio.Object_store.Name.of_string "" with
           | Ok _ -> fail "object-name validation accepted an empty name"
           | Error Nats_eio.Object_store.Name.Empty_name -> ());
@@ -367,6 +388,10 @@ let () =
               require_trace ~trace ~needle:"max_age\\\":1000000000";
               require_trace ~trace ~needle:"allow_rollup_hdrs\\\":true";
               require_trace ~trace ~needle:"allow_direct\\\":true";
+              require_trace ~trace ~needle:"num_replicas\\\":3";
+              require_trace ~trace ~needle:"placement\\\":{\\\"cluster\\\":\\\"objects\\\"";
+              require_trace ~trace ~needle:"compression\\\":\\\"s2";
+              require_trace ~trace ~needle:"metadata\\\":{\\\"owner\\\":\\\"object-test\\\"}";
               Eio.Promise.resolve create_response_u
                 (Ok (stream_response ~sid:1 ~bucket:"assets"));
               let value =
@@ -400,6 +425,21 @@ let () =
                 (Nats_eio.Object_store.Status.last_sequence status);
               equal int64 4096L
                 (Option.get (Nats_eio.Object_store.Status.max_bytes status));
+              equal int 3 (Nats_eio.Object_store.Status.replicas status);
+              (match Nats_eio.Object_store.Status.placement status with
+              | None -> fail "object-store status lost placement"
+              | Some value ->
+                  equal (option string) (Some "objects")
+                    (Nats_eio.Object_store.Config.Placement.cluster value);
+                  equal (list string) [ "ssd" ]
+                    (Nats_eio.Object_store.Config.Placement.tags value));
+              (match Nats_eio.Object_store.Status.compression status with
+              | Nats_eio.Object_store.Config.S2 -> ()
+              | Nats_eio.Object_store.Config.Uncompressed ->
+                  fail "object-store status lost compression");
+              (match Nats_eio.Object_store.Status.metadata status with
+              | [ ("owner", "object-test") ] -> ()
+              | _ -> fail "object-store status lost metadata");
               Eio.Promise.resolve hold_u (Ok "done")))
       ;
       test "metadata update preserves content identity without uploading chunks" (fun () ->
