@@ -68,11 +68,12 @@ let stream_response ~sid ~bucket =
   in
   response_wire_with_sid ~sid payload
 
-let stream_info_response ~sid ~bucket =
+let stream_info_response ~sid ~bucket ?(sealed = false) () =
+  let sealed_field = if sealed then ",\"sealed\":true" else "" in
   let payload =
     Format.asprintf
-      {|{"config":{"name":"OBJ_%s","description":"media","subjects":["$O.%s.C.>","$O.%s.M.>"],"storage":"memory","retention":"limits","discard":"new","max_bytes":4096,"max_age":1000000000,"allow_rollup_hdrs":true,"allow_direct":true},"state":{"messages":4,"bytes":321,"first_seq":3,"last_seq":9,"consumer_count":0}}|}
-      bucket bucket bucket
+      {|{"config":{"name":"OBJ_%s","description":"media","subjects":["$O.%s.C.>","$O.%s.M.>"],"storage":"memory","retention":"limits","discard":"new","max_bytes":4096,"max_age":1000000000,"allow_rollup_hdrs":true,"allow_direct":true%s},"state":{"messages":4,"bytes":321,"first_seq":3,"last_seq":9,"consumer_count":0}}|}
+      bucket bucket bucket sealed_field
   in
   response_wire_with_sid ~sid payload
 
@@ -156,6 +157,40 @@ let wait_for_trace_count ~trace ~needle ~count =
       (Format.asprintf "trace did not contain %d copies of %S; trace:\n%s"
          count needle (Buffer.contents trace))
 
+let trace_json_string ~trace ~field =
+  let value = Buffer.contents trace in
+  let marker = field ^ "\\\":\\\"" in
+  let marker_length = String.length marker in
+  let limit = String.length value - marker_length in
+  let position = ref 0 in
+  let found = ref None in
+  while Option.is_none !found && !position <= limit do
+    if String.equal (String.sub value !position marker_length) marker then
+      found := Some (!position + marker_length)
+    else incr position
+  done;
+  match !found with
+  | None ->
+      fail
+        (Format.asprintf "trace did not contain JSON field %S; trace:\n%s" field
+           value)
+  | Some start ->
+      let finish = ref None in
+      let cursor = ref start in
+      while Option.is_none !finish && !cursor < String.length value - 1 do
+        if
+          Char.equal (String.get value !cursor) '\\'
+          && Char.equal (String.get value (!cursor + 1)) '"'
+        then finish := Some !cursor
+        else incr cursor
+      done;
+      (match !finish with
+      | None ->
+          fail
+            (Format.asprintf "trace field %S was not terminated; trace:\n%s"
+               field value)
+      | Some finish -> String.sub value start (finish - start))
+
 let config () =
   match
     Nats_eio.Object_store.Config.v ~bucket:"assets" ~description:"media"
@@ -183,6 +218,16 @@ let object_meta ~name ~chunk_size =
       fail
         (Format.asprintf "%a" Nats_eio.Object_store.Error.pp_meta error)
 
+let object_meta_description ~description ~name ~chunk_size =
+  match
+    Nats_eio.Object_store.Meta.v ~name:(object_name name) ~description ~chunk_size
+      ()
+  with
+  | Ok value -> value
+  | Error error ->
+      fail
+        (Format.asprintf "%a" Nats_eio.Object_store.Error.pp_meta error)
+
 let uploaded_info_wire ~sid ~name =
   let payload =
     Format.asprintf
@@ -199,19 +244,55 @@ let object_info_wire ~sid ~name ~nuid ~size ~chunks ~digest ~chunk_size =
   in
   direct_response_wire ~sid ~bucket:"assets" ~name payload
 
+let object_link_info_wire ~sid ~name ~target =
+  let payload =
+    Format.asprintf
+      {|{"name":"%s","bucket":"assets","nuid":"link-nuid","size":0,"chunks":0,"options":{"link":{"bucket":"assets","name":"%s"}}}|}
+      name target
+  in
+  direct_response_wire ~sid ~bucket:"assets" ~name payload
+
 let object_ordered_create_wire ~sid =
   response_wire_with_sid ~sid
     {|{"stream_name":"OBJ_assets","name":"ordered-1","config":{"deliver_policy":"all","ack_policy":"none","replay_policy":"instant"}}|}
 
 let object_ordered_delivery_wire ~sid ~stream_sequence ~consumer_sequence
-    ~pending payload =
+    ~pending ?(nuid = "test-nuid") payload =
   let reply_to =
     Format.asprintf "$JS.ACK.OBJ_assets.ordered-1.1.%Ld.%Ld.0.%Ld"
       stream_sequence consumer_sequence pending
   in
   let message =
     Nats.Message.v
-      ~subject:(Nats.Subject.literal "$O.assets.C.test-nuid")
+      ~subject:(Nats.Subject.literal ("$O.assets.C." ^ nuid))
+      ~reply_to:(Nats.Subject.literal reply_to) payload
+  in
+  operation_wire (Nats.Op.Hmsg { sid; message; status = None })
+
+let object_push_create_wire ~sid ~subject ~pending =
+  let payload =
+    Format.asprintf
+      {|{"stream_name":"OBJ_assets","name":"watch-1","config":{"deliver_subject":"%s","deliver_policy":"last_per_subject","ack_policy":"none","replay_policy":"instant","idle_heartbeat":5000000000,"flow_control":true},"num_pending":%Ld}|}
+      subject pending
+  in
+  response_wire_with_sid ~sid payload
+
+let object_watch_delivery_wire ~sid ~stream_sequence ~consumer_sequence
+    ~pending ~name ~nuid ~size ~chunks ~digest ?(deleted = false) () =
+  let encoded_name =
+    Base64.encode_string ~alphabet:Base64.uri_safe_alphabet name
+  in
+  let reply_to =
+    Format.asprintf "$JS.ACK.OBJ_assets.watch-1.1.%Ld.%Ld.0.%Ld"
+      stream_sequence consumer_sequence pending
+  in
+  let payload =
+    Format.asprintf
+      {|{"name":"%s","bucket":"assets","nuid":"%s","size":%Ld,"mtime":"2026-08-12T12:00:00.000000000Z","chunks":%Ld,"digest":"%s","deleted":%s,"options":{"max_chunk_size":2}}|}
+      name nuid size chunks digest (if deleted then "true" else "false")
+  in
+  let message =
+    Nats.Message.v ~subject:(Nats.Subject.literal ("$O.assets.M." ^ encoded_name))
       ~reply_to:(Nats.Subject.literal reply_to) payload
   in
   operation_wire (Nats.Op.Hmsg { sid; message; status = None })
@@ -300,7 +381,7 @@ let () =
                     (Nats_eio.Object_store.status value));
               yield_n 5;
               Eio.Promise.resolve status_response_u
-                (Ok (stream_info_response ~sid:2 ~bucket:"assets"));
+                (Ok (stream_info_response ~sid:2 ~bucket:"assets" ()));
               let status =
                 match Eio.Promise.await status_result with
                 | Ok value -> value
@@ -320,6 +401,278 @@ let () =
               equal int64 4096L
                 (Option.get (Nats_eio.Object_store.Status.max_bytes status));
               Eio.Promise.resolve hold_u (Ok "done")))
+      ;
+      test "metadata update preserves content identity without uploading chunks" (fun () ->
+          let initial_info, initial_info_u = Eio.Promise.create () in
+          let metadata, metadata_u = Eio.Promise.create () in
+          let final_info, final_info_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await initial_info;
+                `Await metadata;
+                `Await final_info;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_object_ok
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"assets")
+              in
+              let meta =
+                object_meta_description ~description:"updated"
+                  ~name:"images/cat.png" ~chunk_size:99
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.update bucket meta));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.DIRECT.GET.OBJ_assets" ~count:1;
+              Eio.Promise.resolve initial_info_u
+                (Ok
+                   (object_info_wire ~sid:1 ~name:"images/cat.png"
+                      ~nuid:"old-nuid" ~size:5L ~chunks:3L ~digest:"SHA-256=old"
+                      ~chunk_size:2));
+              wait_for_trace_count ~trace ~needle:"PUB $O.assets.M." ~count:1;
+              require_trace ~trace ~needle:"description\\\":\\\"updated";
+              require_trace ~trace ~needle:"nuid\\\":\\\"old-nuid";
+              require_trace ~trace ~needle:"size\\\":5";
+              require_trace ~trace ~needle:"chunks\\\":3";
+              require_trace ~trace ~needle:"max_chunk_size\\\":2";
+              Eio.Promise.resolve metadata_u
+                (Ok (response_wire_with_sid ~sid:2 {|{"stream":"OBJ_assets","seq":20}|}));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.DIRECT.GET.OBJ_assets" ~count:2;
+              Eio.Promise.resolve final_info_u
+                (Ok
+                   (object_info_wire ~sid:3 ~name:"images/cat.png"
+                      ~nuid:"old-nuid" ~size:5L ~chunks:3L ~digest:"SHA-256=old"
+                      ~chunk_size:2));
+              let info =
+                match Eio.Promise.await result with
+                | Ok info -> info
+                | Error error ->
+                    fail
+                      (Format.asprintf "%a\ntrace:\n%s"
+                         Nats_eio.Object_store.Error.pp error
+                         (Buffer.contents trace))
+              in
+              equal string "old-nuid" (Nats_eio.Object_store.Info.nuid info);
+              if contains_substring ~needle:"PUB $O.assets.C." (Buffer.contents trace)
+              then fail "metadata update uploaded a chunk";
+              if contains_substring ~needle:"STREAM.PURGE.OBJ_assets"
+                   (Buffer.contents trace)
+              then fail "metadata update purged content"))
+      ;
+      test "metadata update can rename before purging the old subject" (fun () ->
+          let old_info, old_info_u = Eio.Promise.create () in
+          let new_info, new_info_u = Eio.Promise.create () in
+          let metadata, metadata_u = Eio.Promise.create () in
+          let final_info, final_info_u = Eio.Promise.create () in
+          let purge, purge_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await old_info;
+                `Await new_info;
+                `Await metadata;
+                `Await final_info;
+                `Await purge;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_object_ok
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"assets")
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.update
+                       ~name:(object_name "images/cat.png") bucket
+                       (object_meta ~name:"images/new.png" ~chunk_size:99)));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.DIRECT.GET.OBJ_assets" ~count:1;
+              Eio.Promise.resolve old_info_u
+                (Ok
+                   (object_info_wire ~sid:1 ~name:"images/cat.png"
+                      ~nuid:"old-nuid" ~size:5L ~chunks:3L ~digest:"SHA-256=old"
+                      ~chunk_size:2));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.DIRECT.GET.OBJ_assets" ~count:2;
+              Eio.Promise.resolve new_info_u
+                (Ok (response_wire_with_sid ~sid:2 ""));
+              wait_for_trace_count ~trace ~needle:"PUB $O.assets.M." ~count:1;
+              require_trace ~trace
+                ~needle:"PUB $O.assets.M.aW1hZ2VzL25ldy5wbmc=";
+              Eio.Promise.resolve metadata_u
+                (Ok (response_wire_with_sid ~sid:3 {|{"stream":"OBJ_assets","seq":30}|}));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.DIRECT.GET.OBJ_assets" ~count:3;
+              Eio.Promise.resolve final_info_u
+                (Ok
+                   (object_info_wire ~sid:4 ~name:"images/new.png"
+                      ~nuid:"old-nuid" ~size:5L ~chunks:3L ~digest:"SHA-256=old"
+                      ~chunk_size:2));
+              wait_for_trace_count ~trace
+                ~needle:"STREAM.PURGE.OBJ_assets" ~count:1;
+              require_trace ~trace
+                ~needle:"$O.assets.M.aW1hZ2VzL2NhdC5wbmc=";
+              Eio.Promise.resolve purge_u
+                (Ok (response_wire_with_sid ~sid:5 {|{"purged":1}|}));
+              match Eio.Promise.await result with
+              | Ok info ->
+                  equal string "images/new.png"
+                    (Nats_eio.Object_store.Name.to_string
+                       (Nats_eio.Object_store.Info.name info))
+              | Error error ->
+                  fail
+                    (Format.asprintf "%a\ntrace:\n%s"
+                       Nats_eio.Object_store.Error.pp error
+                       (Buffer.contents trace))))
+      ;
+      test "put_link commits a metadata-only object link" (fun () ->
+          let target_info, target_info_u = Eio.Promise.create () in
+          let missing_info, missing_info_u = Eio.Promise.create () in
+          let metadata, metadata_u = Eio.Promise.create () in
+          let final_info, final_info_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await missing_info;
+                `Await target_info;
+                `Await metadata;
+                `Await final_info;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_object_ok
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"assets")
+              in
+              let link =
+                match
+                  Nats_eio.Object_store.Link.v ~bucket:"assets"
+                    ~name:(object_name "images/base.png") ()
+                with
+                | Ok link -> link
+                | Error error ->
+                    fail
+                      (Format.asprintf "%a"
+                         Nats_eio.Object_store.Error.pp_config error)
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.put_link bucket
+                       (object_meta ~name:"images/cat.png" ~chunk_size:2)
+                       link));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.DIRECT.GET.OBJ_assets" ~count:1;
+              Eio.Promise.resolve missing_info_u
+                (Ok (response_wire_with_sid ~sid:1 ""));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.DIRECT.GET.OBJ_assets" ~count:2;
+              Eio.Promise.resolve target_info_u
+                (Ok
+                   (object_info_wire ~sid:2 ~name:"images/base.png"
+                      ~nuid:"base-nuid" ~size:2L ~chunks:1L ~digest:"SHA-256=base"
+                      ~chunk_size:2));
+              wait_for_trace_count ~trace ~needle:"PUB $O.assets.M." ~count:1;
+              require_trace ~trace
+                ~needle:"link\\\":{\\\"bucket\\\":\\\"assets\\\",\\\"name\\\":\\\"images/base.png\\\"";
+              require_trace ~trace ~needle:"chunks\\\":0";
+              if contains_substring ~needle:"max_chunk_size\\\":131072"
+                   (Buffer.contents trace)
+              then fail "put_link invented a chunk-size option";
+              Eio.Promise.resolve metadata_u
+                (Ok (response_wire_with_sid ~sid:3 {|{"stream":"OBJ_assets","seq":21}|}));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.DIRECT.GET.OBJ_assets" ~count:3;
+              Eio.Promise.resolve final_info_u
+                (Ok (object_link_info_wire ~sid:4 ~name:"images/cat.png"
+                       ~target:"images/base.png"));
+              let info =
+                match Eio.Promise.await result with
+                | Ok info -> info
+                | Error error ->
+                    fail
+                      (Format.asprintf "%a\ntrace:\n%s"
+                         Nats_eio.Object_store.Error.pp error
+                         (Buffer.contents trace))
+              in
+              match Nats_eio.Object_store.Info.link info with
+              | None -> fail "link metadata was lost"
+              | Some link ->
+                  equal string "assets"
+                    (Nats_eio.Object_store.Link.bucket link);
+                  equal (option string) (Some "images/base.png")
+                    (Option.map Nats_eio.Object_store.Name.to_string
+                       (Nats_eio.Object_store.Link.name link));
+                  if contains_substring ~needle:"PUB $O.assets.C."
+                       (Buffer.contents trace)
+                  then fail "put_link uploaded content"))
+      ;
+      test "put_link refuses to replace an ordinary object" (fun () ->
+          let existing_info, existing_info_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await existing_info; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_object_ok
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"assets")
+              in
+              let link =
+                match
+                  Nats_eio.Object_store.Link.v ~bucket:"assets"
+                    ~name:(object_name "images/base.png") ()
+                with
+                | Ok link -> link
+                | Error error ->
+                    fail
+                      (Format.asprintf "%a"
+                         Nats_eio.Object_store.Error.pp_config error)
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.put_link bucket
+                       (object_meta ~name:"images/cat.png" ~chunk_size:2)
+                       link));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.DIRECT.GET.OBJ_assets" ~count:1;
+              Eio.Promise.resolve existing_info_u
+                (Ok
+                   (object_info_wire ~sid:1 ~name:"images/cat.png"
+                      ~nuid:"content-nuid" ~size:2L ~chunks:1L
+                      ~digest:"SHA-256=content" ~chunk_size:2));
+              (match Eio.Promise.await result with
+              | Error (Nats_eio.Object_store.Error.Object_already_exists info) ->
+                  equal string "content-nuid"
+                    (Nats_eio.Object_store.Info.nuid info)
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected error: %a"
+                       Nats_eio.Object_store.Error.pp error)
+              | Ok _ -> fail "put_link replaced an ordinary object");
+              if contains_substring ~needle:"PUB $O.assets.M."
+                   (Buffer.contents trace)
+              then fail "put_link published after rejecting an existing object";
+              Eio.Promise.resolve hold_u (Error End_of_file)))
       ;
       test "put preserves reader slices and commits interoperable metadata" (fun () ->
           let initial_info, initial_info_u = Eio.Promise.create () in
@@ -506,6 +859,319 @@ let () =
               require_trace ~trace ~needle:"$O.assets.C.test-nuid";
               require_trace ~trace
                 ~needle:"filter_subject\\\":\\\"$O.assets.C.test-nuid\\\""))
+      ;
+      test "get follows object links before streaming target chunks" (fun () ->
+          let alias_info, alias_info_u = Eio.Promise.create () in
+          let target_info, target_info_u = Eio.Promise.create () in
+          let create_response, create_response_u = Eio.Promise.create () in
+          let delivery, delivery_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await alias_info;
+                `Await target_info;
+                `Await create_response;
+                `Await delivery;
+                `Await delete_response;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_object_ok
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"assets")
+              in
+              let buffer = Buffer.create 0 in
+              let writer = Bytesrw.Bytes.Writer.of_buffer buffer in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.get bucket
+                       (object_name "images/cat.png") writer));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.DIRECT.GET.OBJ_assets" ~count:1;
+              Eio.Promise.resolve alias_info_u
+                (Ok
+                   (object_link_info_wire ~sid:1 ~name:"images/cat.png"
+                      ~target:"images/base.png"));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.DIRECT.GET.OBJ_assets" ~count:2;
+              Eio.Promise.resolve target_info_u
+                (Ok
+                   (object_info_wire ~sid:2 ~name:"images/base.png"
+                      ~nuid:"target-nuid" ~size:2L ~chunks:1L
+                      ~digest:"SHA-256=dppObQADGJx-lsXZt-gQoNEcOhKDJSfslLD4bSd_Uco="
+                      ~chunk_size:2));
+              wait_for_trace_count ~trace
+                ~needle:"CONSUMER.CREATE.OBJ_assets" ~count:1;
+              Eio.Promise.resolve create_response_u
+                (Ok (object_ordered_create_wire ~sid:3));
+              yield_n 5;
+              Eio.Promise.resolve delivery_u
+                (Ok
+                   (object_ordered_delivery_wire ~sid:4 ~nuid:"target-nuid"
+                      ~stream_sequence:1L ~consumer_sequence:1L ~pending:0L
+                      "xy"));
+              wait_for_trace_count ~trace
+                ~needle:"CONSUMER.DELETE.OBJ_assets" ~count:1;
+              Eio.Promise.resolve delete_response_u
+                (Ok (response_wire_with_sid ~sid:5 "{}"));
+              let info =
+                match Eio.Promise.await result with
+                | Ok info -> info
+                | Error error ->
+                    fail
+                      (Format.asprintf "%a\ntrace:\n%s"
+                         Nats_eio.Object_store.Error.pp error
+                         (Buffer.contents trace))
+              in
+              equal string "xy" (Buffer.contents buffer);
+              equal string "target-nuid"
+                (Nats_eio.Object_store.Info.nuid info);
+              require_trace ~trace ~needle:"$O.assets.C.target-nuid"))
+      ;
+      test "watch drains retained metadata and emits an initial marker" (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let info_response, info_response_u = Eio.Promise.create () in
+          let first_delivery, first_delivery_u = Eio.Promise.create () in
+          let second_delivery, second_delivery_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await info_response;
+                `Await first_delivery;
+                `Await second_delivery;
+                `Await delete_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_object_ok
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"assets")
+              in
+              let watch_result, watch_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve watch_result_u
+                    (Nats_eio.Object_store.Watch.v ~sw ~ignore_deletes:true
+                       bucket));
+              wait_for_trace_count ~trace
+                ~needle:"CONSUMER.CREATE.OBJ_assets" ~count:1;
+              let subject =
+                trace_json_string ~trace ~field:"deliver_subject"
+              in
+              Eio.Promise.resolve create_response_u
+                (Ok (object_push_create_wire ~sid:2 ~subject ~pending:2L));
+              wait_for_trace_count ~trace
+                ~needle:"CONSUMER.INFO.OBJ_assets.watch-1" ~count:1;
+              Eio.Promise.resolve info_response_u
+                (Ok (object_push_create_wire ~sid:3 ~subject ~pending:2L));
+              let watch =
+                match Eio.Promise.await watch_result with
+                | Ok watch -> watch
+                | Error error ->
+                    fail
+                      (Format.asprintf "%a\ntrace:\n%s"
+                         Nats_eio.Object_store.Error.pp error
+                         (Buffer.contents trace))
+              in
+              let first_result, first_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_result_u
+                    (Nats_eio.Object_store.Watch.next watch));
+              Eio.Promise.resolve first_delivery_u
+                (Ok
+                   (object_watch_delivery_wire ~sid:1 ~stream_sequence:1L
+                      ~consumer_sequence:1L ~pending:1L ~name:"images/cat.png"
+                      ~nuid:"cat-nuid" ~size:1L ~chunks:1L ~digest:"SHA-256=cat"
+                      ()));
+              let first =
+                match Eio.Promise.await first_result with
+                | Ok event -> event
+                | Error error ->
+                    fail
+                      (Format.asprintf "%a"
+                         Nats_eio.Object_store.Error.pp error)
+              in
+              (match first with
+              | Nats_eio.Object_store.Watch.Initial_done ->
+                  fail "watch emitted its marker before retained metadata"
+              | Nats_eio.Object_store.Watch.Info info ->
+                  equal string "images/cat.png"
+                    (Nats_eio.Object_store.Name.to_string
+                       (Nats_eio.Object_store.Info.name info)));
+              let marker_result, marker_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve marker_result_u
+                    (Nats_eio.Object_store.Watch.next watch));
+              Eio.Promise.resolve second_delivery_u
+                (Ok
+                   (object_watch_delivery_wire ~sid:1 ~stream_sequence:2L
+                      ~consumer_sequence:2L ~pending:0L ~name:"images/old.png"
+                      ~nuid:"old-nuid" ~size:0L ~chunks:0L ~digest:""
+                      ~deleted:true ()));
+              (match Eio.Promise.await marker_result with
+              | Ok Nats_eio.Object_store.Watch.Initial_done -> ()
+              | Ok _ -> fail "watch did not return its initial marker"
+              | Error error ->
+                  fail
+                    (Format.asprintf "%a"
+                       Nats_eio.Object_store.Error.pp error));
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Object_store.Watch.close watch));
+              wait_for_trace_count ~trace
+                ~needle:"CONSUMER.DELETE.OBJ_assets.watch-1" ~count:1;
+              Eio.Promise.resolve delete_response_u
+                (Ok (response_wire_with_sid ~sid:4 "{}"));
+              (match Eio.Promise.await close_result with
+              | Ok () -> ()
+              | Error error ->
+                  fail
+                    (Format.asprintf "%a"
+                       Nats_eio.Object_store.Error.pp error));
+              Eio.Promise.resolve hold_u (Error End_of_file)))
+      ;
+      test "list uses the watch snapshot boundary" (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let info_response, info_response_u = Eio.Promise.create () in
+          let delivery, delivery_u = Eio.Promise.create () in
+          let second_delivery, second_delivery_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await info_response;
+                `Await delivery;
+                `Await second_delivery;
+                `Await delete_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_object_ok
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"assets")
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.list bucket));
+              wait_for_trace_count ~trace
+                ~needle:"CONSUMER.CREATE.OBJ_assets" ~count:1;
+              let subject =
+                trace_json_string ~trace ~field:"deliver_subject"
+              in
+              Eio.Promise.resolve create_response_u
+                (Ok (object_push_create_wire ~sid:2 ~subject ~pending:2L));
+              wait_for_trace_count ~trace
+                ~needle:"CONSUMER.INFO.OBJ_assets.watch-1" ~count:1;
+              Eio.Promise.resolve info_response_u
+                (Ok (object_push_create_wire ~sid:3 ~subject ~pending:2L));
+              Eio.Promise.resolve delivery_u
+                (Ok
+                   (object_watch_delivery_wire ~sid:1 ~stream_sequence:1L
+                      ~consumer_sequence:1L ~pending:1L ~name:"images/cat.png"
+                      ~nuid:"cat-nuid" ~size:1L ~chunks:1L ~digest:"SHA-256=cat"
+                      ()));
+              Eio.Promise.resolve second_delivery_u
+                (Ok
+                   (object_watch_delivery_wire ~sid:1 ~stream_sequence:2L
+                      ~consumer_sequence:2L ~pending:0L ~name:"images/dog.png"
+                      ~nuid:"dog-nuid" ~size:1L ~chunks:1L ~digest:"SHA-256=dog"
+                      ()));
+              wait_for_trace_count ~trace
+                ~needle:"CONSUMER.DELETE.OBJ_assets.watch-1" ~count:1;
+              Eio.Promise.resolve delete_response_u
+                (Ok (response_wire_with_sid ~sid:4 "{}"));
+              let infos =
+                match Eio.Promise.await result with
+                | Ok infos -> infos
+                | Error error ->
+                    fail
+                      (Format.asprintf "%a\ntrace:\n%s"
+                         Nats_eio.Object_store.Error.pp error
+                         (Buffer.contents trace))
+              in
+              (match infos with
+              | [ first; second ] ->
+                  equal string "images/cat.png"
+                    (Nats_eio.Object_store.Name.to_string
+                       (Nats_eio.Object_store.Info.name first));
+                  equal string "images/dog.png"
+                    (Nats_eio.Object_store.Name.to_string
+                       (Nats_eio.Object_store.Info.name second))
+              | _ -> fail "list returned the wrong snapshot");
+              Eio.Promise.resolve hold_u (Error End_of_file)))
+      ;
+      test "seal updates the backing stream and reports sealed status" (fun () ->
+          let first_info, first_info_u = Eio.Promise.create () in
+          let second_info, second_info_u = Eio.Promise.create () in
+          let update_response, update_response_u = Eio.Promise.create () in
+          let third_info, third_info_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await first_info;
+                `Await second_info;
+                `Await update_response;
+                `Await third_info;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_object_ok
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"assets")
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.seal bucket));
+              wait_for_trace_count ~trace
+                ~needle:"STREAM.INFO.OBJ_assets" ~count:1;
+              Eio.Promise.resolve first_info_u
+                (Ok (stream_info_response ~sid:1 ~bucket:"assets" ()));
+              wait_for_trace_count ~trace
+                ~needle:"STREAM.INFO.OBJ_assets" ~count:2;
+              Eio.Promise.resolve second_info_u
+                (Ok (stream_info_response ~sid:2 ~bucket:"assets" ()));
+              wait_for_trace_count ~trace
+                ~needle:"STREAM.UPDATE.OBJ_assets" ~count:1;
+              require_trace ~trace ~needle:"sealed\\\":true";
+              Eio.Promise.resolve update_response_u
+                (Ok (stream_info_response ~sid:3 ~bucket:"assets" ~sealed:true ()));
+              wait_for_trace_count ~trace
+                ~needle:"STREAM.INFO.OBJ_assets" ~count:3;
+              Eio.Promise.resolve third_info_u
+                (Ok (stream_info_response ~sid:4 ~bucket:"assets" ~sealed:true ()));
+              let status =
+                match Eio.Promise.await result with
+                | Ok status -> status
+                | Error error ->
+                    fail
+                      (Format.asprintf "%a\ntrace:\n%s"
+                         Nats_eio.Object_store.Error.pp error
+                         (Buffer.contents trace))
+              in
+              equal bool true (Nats_eio.Object_store.Status.sealed status)))
       ;
       test "replacement commits new metadata before purging old chunks" (fun () ->
           let initial_info, initial_info_u = Eio.Promise.create () in

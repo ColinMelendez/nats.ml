@@ -93,6 +93,19 @@ module Name = struct
   let to_string value = value
 end
 
+module Link = struct
+  type t = { bucket : string; name : Name.t option }
+  type error = Config.error
+
+  let v ~bucket ?name () =
+    match Config.v ~bucket () with
+    | Error error -> Error error
+    | Ok _ -> Ok { bucket; name }
+
+  let bucket value = value.bucket
+  let name value = value.name
+end
+
 module Meta = struct
   type t = {
     name : Name.t;
@@ -116,13 +129,6 @@ module Meta = struct
   let headers value = value.headers
   let metadata value = value.metadata
   let chunk_size value = value.chunk_size
-end
-
-module Link = struct
-  type t = { bucket : string; name : Name.t option }
-
-  let bucket value = value.bucket
-  let name value = value.name
 end
 
 module Info = struct
@@ -176,9 +182,16 @@ module Error = struct
     | Invalid_link_bucket of config
     | Invalid_link_name of { value : string; reason : name }
     | Invalid_metadata of string
+    | Invalid_metadata_subject of string
     | Not_found
     | Deleted of Info.t
-    | Unsupported_link of Info.t
+    | Object_already_exists of Info.t
+    | No_link_to_link
+    | Link_to_bucket of Info.t
+    | Link_to_deleted of { bucket : string; name : string }
+    | Link_cycle of string list
+    | Link_depth_exceeded of { limit : int; info : Info.t }
+    | Closed
     | Size_mismatch of { expected : int64; actual : int64 }
     | Chunk_count_mismatch of { expected : int64; actual : int64 }
     | Digest_mismatch of { expected : string; actual : string }
@@ -227,9 +240,25 @@ module Error = struct
         Format.fprintf ppf "invalid link object name %S: %a" value pp_name reason
     | Invalid_metadata field ->
         Format.fprintf ppf "invalid object metadata field %S" field
+    | Invalid_metadata_subject subject ->
+        Format.fprintf ppf "unexpected object metadata subject %S" subject
     | Not_found -> Format.pp_print_string ppf "object was not found"
     | Deleted _ -> Format.pp_print_string ppf "object is deleted"
-    | Unsupported_link _ -> Format.pp_print_string ppf "object links are unsupported"
+    | Object_already_exists _ ->
+        Format.pp_print_string ppf "an object with that name already exists"
+    | No_link_to_link ->
+        Format.pp_print_string ppf "an object link cannot target another link"
+    | Link_to_bucket info ->
+        Format.fprintf ppf "bucket link %S cannot be read as object content"
+          (Info.bucket info)
+    | Link_to_deleted { bucket; name } ->
+        Format.fprintf ppf "link target %S/%S is deleted" bucket name
+    | Link_cycle path ->
+        Format.fprintf ppf "object link cycle: %s" (String.concat " -> " path)
+    | Link_depth_exceeded { limit; info } ->
+        Format.fprintf ppf "object link depth exceeded %d at %S" limit
+          (Name.to_string (Info.name info))
+    | Closed -> Format.pp_print_string ppf "object-store watch is closed"
     | Size_mismatch { expected; actual } ->
         Format.fprintf ppf "object size %Ld does not match expected %Ld" actual
           expected
@@ -259,6 +288,7 @@ module Status = struct
     ttl : Mtime.Span.t option;
     max_bytes : int64 option;
     storage : Config.storage;
+    sealed : bool;
   }
 
   let bucket value = value.bucket
@@ -270,6 +300,7 @@ module Status = struct
   let ttl value = value.ttl
   let max_bytes value = value.max_bytes
   let storage value = value.storage
+  let sealed value = value.sealed
 end
 
 type t = {
@@ -277,6 +308,8 @@ type t = {
   stream : Jetstream.Stream.t;
   bucket : string;
 }
+
+type bucket = t
 
 type wire_link = { bucket : string; name : string option }
 type wire_options = { chunk_size : int option; link : wire_link option }
@@ -446,6 +479,7 @@ let status value =
           ttl = Jetstream.Stream.Config.max_age config;
           max_bytes = Jetstream.Stream.Config.max_bytes config;
           storage;
+          sealed = Jetstream.Stream.Config.sealed config;
         }
 
 let headers_to_wire headers =
@@ -789,141 +823,564 @@ let put ?timeout value meta reader =
 let put_string ?timeout value meta payload =
   put ?timeout value meta (Bytesrw.Bytes.Reader.of_string payload)
 
-let get ?timeout ?(include_deleted = false) value name writer =
-  let deadline = timeout_deadline value timeout in
-  let info_timeout = remaining_timeout value deadline in
-  match info_timeout with
-  | Error error -> Error error
-  | Ok info_timeout -> (
-      match read_info_raw ?timeout:info_timeout value name with
-      | Error error -> Error error
-      | Ok info when Info.deleted info ->
-          if include_deleted then Error (Error.Deleted info) else Error Error.Not_found
-      | Ok info -> (
-          match Info.link info with
-          | Some _ -> Error (Error.Unsupported_link info)
-          | None ->
-              let expected_size = Info.size info in
-              let expected_chunks = Info.chunks info in
-              let expected_digest = Info.digest info in
-              let verify digest size chunks =
-                let actual_digest = digest_string digest in
-                if Int64.compare size expected_size <> 0 then
-                  Error
-                    (Error.Size_mismatch { expected = expected_size; actual = size })
-                else if Int64.compare chunks expected_chunks <> 0 then
-                  Error
-                    (Error.Chunk_count_mismatch
-                       { expected = expected_chunks; actual = chunks })
-                else if not (String.equal actual_digest expected_digest) then
-                  Error
-                    (Error.Digest_mismatch
-                       { expected = expected_digest; actual = actual_digest })
-                else Ok ()
-              in
-              if Int64.equal expected_chunks 0L then
-                let digest = Digestif.SHA256.init () in
-                match verify digest 0L 0L with
-                | Error error -> Error error
-                | Ok () ->
-                    Bytesrw.Bytes.Writer.write_eod writer;
-                    Ok info
-              else
-                Eio.Switch.run (fun sw ->
-                    let filter =
-                      Nats.Subject.Filter.literal
-                        (chunk_subject value.bucket (Info.nuid info))
-                    in
-                    match
-                      Jetstream.Consumer.Ordered.v ~sw ~batch:1
-                        ?expires:None ?filter_subject:(Some filter) value.stream
-                    with
-                    | Error error -> Error (map_jetstream_error error)
-                    | Ok ordered ->
-                        let digest = ref (Digestif.SHA256.init ()) in
-                        let size = ref 0L in
-                        let chunks = ref 0L in
-                        let result = ref None in
-                        let next_message () =
-                          match remaining_timeout value deadline with
-                          | Error error -> Error error
-                          | Ok None -> (
-                              match Jetstream.Consumer.Ordered.next ordered with
-                              | Ok message -> Ok message
-                              | Error error -> Error (map_jetstream_error error))
-                          | Ok (Some timeout) ->
-                              (match
-                                 Jetstream.Consumer.Ordered.next_with_timeout
-                                   ~timeout ordered
-                               with
-                              | Ok message -> Ok message
-                              | Error error -> Error (map_jetstream_error error))
-                        in
-                        let read_chunks () =
-                          while Int64.compare !chunks expected_chunks < 0
-                                && Option.is_none !result do
-                            match next_message () with
-                            | Error error -> result := Some (Error error)
-                            | Ok message ->
-                                let actual_subject =
-                                  Nats.Subject.to_string
-                                    (Jetstream.Msg.subject message)
-                                in
-                                let expected_subject =
-                                  chunk_subject value.bucket (Info.nuid info)
-                                in
-                                if not (String.equal actual_subject expected_subject) then
-                                  result :=
-                                    Some (Error (Error.Invalid_chunk_subject actual_subject))
-                                else
-                                  let payload = Jetstream.Msg.payload message in
-                                  Bytesrw.Bytes.Writer.write_string writer payload;
-                                  digest := Digestif.SHA256.feed_string !digest payload;
-                                  size :=
-                                    Int64.add !size
-                                      (Int64.of_int (String.length payload));
-                                  chunks := Int64.add !chunks 1L;
-                                  if
-                                    Int64.equal
-                                      (Jetstream.Msg.num_pending message)
-                                      0L
-                                    && Int64.compare !chunks expected_chunks < 0
-                                  then
-                                    result :=
-                                      Some
-                                        (Error
-                                           (Error.Chunk_count_mismatch
-                                              {
-                                                expected = expected_chunks;
-                                                actual = !chunks;
-                                              }))
-                          done
-                        in
-                        let result =
-                          Fun.protect
-                            ~finally:(fun () ->
-                              ignore
-                                (Eio.Cancel.protect (fun () ->
-                                     ignore
-                                       (Jetstream.Consumer.Ordered.close ordered))))
-                            (fun () ->
-                              read_chunks ();
-                              match !result with
-                              | Some result -> result
-                              | None -> verify !digest !size !chunks)
-                        in
-                        (match result with
-                        | Error error -> Error error
-                        | Ok () ->
-                            Bytesrw.Bytes.Writer.write_eod writer;
-                            Ok info))))
+let link_to_wire (link : Link.t) =
+  {
+    bucket = Link.bucket link;
+    name = Option.map Name.to_string (Link.name link);
+  }
 
-let get_string ?timeout ?include_deleted value name =
+let options_of_info info =
+  Some
+    {
+      chunk_size =
+        (match Info.link info with None -> Some (Info.chunk_size info) | Some _ -> None);
+      link = Option.map link_to_wire (Info.link info);
+    }
+
+let timestamp_of_nanoseconds value =
+  if Int64.compare value 0L < 0 then Error (Error.Invalid_metadata "timestamp")
+  else
+    let billion = 1_000_000_000L in
+    let day_seconds = 86_400L in
+    let seconds = Int64.div value billion in
+    let fraction = Int64.rem value billion in
+    let days = Int64.div seconds day_seconds in
+    let seconds_in_day = Int64.rem seconds day_seconds in
+    let z = Int64.add days 719_468L in
+    let era = Int64.div z 146_097L in
+    let doe = Int64.sub z (Int64.mul era 146_097L) in
+    let yoe =
+      Int64.div
+        (Int64.sub
+           (Int64.add
+              (Int64.sub doe (Int64.div doe 1_460L))
+              (Int64.div doe 36_524L))
+           (Int64.div doe 146_096L))
+        365L
+    in
+    let year = Int64.add yoe (Int64.mul era 400L) in
+    let doy =
+      Int64.sub doe
+        (Int64.sub
+           (Int64.add (Int64.mul 365L yoe) (Int64.div yoe 4L))
+           (Int64.div yoe 100L))
+    in
+    let month_part = Int64.div (Int64.add (Int64.mul 5L doy) 2L) 153L in
+    let day =
+      Int64.add
+        (Int64.sub doy (Int64.div (Int64.add (Int64.mul 153L month_part) 2L) 5L))
+        1L
+    in
+    let month =
+      Int64.add month_part (if Int64.compare month_part 10L < 0 then 3L else -9L)
+    in
+    let year =
+      Int64.add year (if Int64.compare month 2L <= 0 then 1L else 0L)
+    in
+    let hour = Int64.div seconds_in_day 3_600L in
+    let minute = Int64.div (Int64.rem seconds_in_day 3_600L) 60L in
+    let second = Int64.rem seconds_in_day 60L in
+    Ok
+      (Format.asprintf "%04Ld-%02Ld-%02LdT%02Ld:%02Ld:%02Ld.%09LdZ" year
+         month day hour minute second fraction)
+
+let get_content ~deadline (value : t) info writer =
+  let expected_size = Info.size info in
+  let expected_chunks = Info.chunks info in
+  let expected_digest = Info.digest info in
+  let verify digest size chunks =
+    let actual_digest = digest_string digest in
+    if Int64.compare size expected_size <> 0 then
+      Error (Error.Size_mismatch { expected = expected_size; actual = size })
+    else if Int64.compare chunks expected_chunks <> 0 then
+      Error
+        (Error.Chunk_count_mismatch { expected = expected_chunks; actual = chunks })
+    else if not (String.equal actual_digest expected_digest) then
+      Error
+        (Error.Digest_mismatch { expected = expected_digest; actual = actual_digest })
+    else Ok ()
+  in
+  if Int64.equal expected_chunks 0L then
+    let digest = Digestif.SHA256.init () in
+    match verify digest 0L 0L with
+    | Error error -> Error error
+    | Ok () ->
+        Bytesrw.Bytes.Writer.write_eod writer;
+        Ok info
+  else
+    Eio.Switch.run (fun sw ->
+        let filter =
+          Nats.Subject.Filter.literal (chunk_subject value.bucket (Info.nuid info))
+        in
+        match
+          Jetstream.Consumer.Ordered.v ~sw ~batch:1 ?expires:None
+            ?filter_subject:(Some filter) value.stream
+        with
+        | Error error -> Error (map_jetstream_error error)
+        | Ok ordered ->
+            let digest = ref (Digestif.SHA256.init ()) in
+            let size = ref 0L in
+            let chunks = ref 0L in
+            let result = ref None in
+            let next_message () =
+              match remaining_timeout value deadline with
+              | Error error -> Error error
+              | Ok None -> (
+                  match Jetstream.Consumer.Ordered.next ordered with
+                  | Ok message -> Ok message
+                  | Error error -> Error (map_jetstream_error error))
+              | Ok (Some timeout) -> (
+                  match
+                    Jetstream.Consumer.Ordered.next_with_timeout ~timeout ordered
+                  with
+                  | Ok message -> Ok message
+                  | Error error -> Error (map_jetstream_error error))
+            in
+            let read_chunks () =
+              while
+                Int64.compare !chunks expected_chunks < 0
+                && Option.is_none !result
+              do
+                match next_message () with
+                | Error error -> result := Some (Error error)
+                | Ok message ->
+                    let actual_subject =
+                      Nats.Subject.to_string (Jetstream.Msg.subject message)
+                    in
+                    let expected_subject =
+                      chunk_subject value.bucket (Info.nuid info)
+                    in
+                    if not (String.equal actual_subject expected_subject) then
+                      result := Some (Error (Error.Invalid_chunk_subject actual_subject))
+                    else
+                      let payload = Jetstream.Msg.payload message in
+                      Bytesrw.Bytes.Writer.write_string writer payload;
+                      digest := Digestif.SHA256.feed_string !digest payload;
+                      size :=
+                        Int64.add !size (Int64.of_int (String.length payload));
+                      chunks := Int64.add !chunks 1L;
+                      if
+                        Int64.equal (Jetstream.Msg.num_pending message) 0L
+                        && Int64.compare !chunks expected_chunks < 0
+                      then
+                        result :=
+                          Some
+                            (Error
+                               (Error.Chunk_count_mismatch
+                                  { expected = expected_chunks; actual = !chunks }))
+              done
+            in
+            let result =
+              Fun.protect
+                ~finally:(fun () ->
+                  ignore
+                    (Eio.Cancel.protect (fun () ->
+                         ignore (Jetstream.Consumer.Ordered.close ordered))))
+                (fun () ->
+                  read_chunks ();
+                  match !result with
+                  | Some result -> result
+                  | None -> verify !digest !size !chunks)
+            in
+            match result with
+            | Error error -> Error error
+            | Ok () ->
+                Bytesrw.Bytes.Writer.write_eod writer;
+                Ok info)
+
+let resolve_link ~max_links value info deadline =
+  let rec loop depth path value info =
+    match Info.link info with
+    | None -> Ok (value, info)
+    | Some link -> (
+        match Link.name link with
+        | None -> Error (Error.Link_to_bucket info)
+        | Some name ->
+            if Int.compare depth max_links >= 0 then
+              Error (Error.Link_depth_exceeded { limit = max_links; info })
+            else
+              let identity = Link.bucket link ^ "/" ^ Name.to_string name in
+              if List.exists (String.equal identity) path then
+                Error (Error.Link_cycle (List.rev (identity :: path)))
+              else
+                match bind value.jetstream ~bucket:(Link.bucket link) with
+                | Error error -> Error error
+                | Ok target -> (
+                    match remaining_timeout target deadline with
+                    | Error error -> Error error
+                    | Ok timeout -> (
+                        match read_info_raw ?timeout target name with
+                        | Error Error.Not_found -> Error Error.Not_found
+                        | Error error -> Error error
+                        | Ok target_info when Info.deleted target_info ->
+                            Error
+                              (Error.Link_to_deleted
+                                 {
+                                   bucket = Link.bucket link;
+                                   name = Name.to_string name;
+                                 })
+                        | Ok target_info ->
+                            loop (Int.add depth 1) (identity :: path) target
+                              target_info)))
+  in
+  let identity = Info.bucket info ^ "/" ^ Name.to_string (Info.name info) in
+  loop 0 [ identity ] value info
+
+let get ?timeout ?(include_deleted = false) ?(max_links = 10) value name writer =
+  if Int.compare max_links 0 < 0 then Error (Error.Invalid_metadata "max_links")
+  else
+    let deadline = timeout_deadline value timeout in
+    match remaining_timeout value deadline with
+    | Error error -> Error error
+    | Ok info_timeout -> (
+        match read_info_raw ?timeout:info_timeout value name with
+        | Error error -> Error error
+        | Ok info when Info.deleted info ->
+            if include_deleted then Error (Error.Deleted info)
+            else Error Error.Not_found
+        | Ok info -> (
+            match resolve_link ~max_links value info deadline with
+            | Error error -> Error error
+            | Ok (resolved_value, resolved_info) ->
+                get_content ~deadline resolved_value resolved_info writer))
+
+let get_string ?timeout ?include_deleted ?max_links value name =
   let buffer = Buffer.create 0 in
   let writer = Bytesrw.Bytes.Writer.of_buffer buffer in
-  match get ?timeout ?include_deleted value name writer with
+  match get ?timeout ?include_deleted ?max_links value name writer with
   | Error error -> Error error
   | Ok _ -> Ok (Buffer.contents buffer)
+
+let publish_metadata ~deadline value name wire =
+  match encode_wire wire with
+  | Error error -> Error error
+  | Ok payload -> (
+      match remaining_timeout value deadline with
+      | Error error -> Error error
+      | Ok timeout -> (
+          match
+            Jetstream.publish ?timeout ~headers:metadata_headers value.jetstream
+              (Nats.Subject.literal (metadata_subject value.bucket name)) payload
+          with
+          | Ok _ -> Ok ()
+          | Error error -> Error (map_jetstream_error error)))
+
+let update ?timeout ?name value meta =
+  let deadline = timeout_deadline value timeout in
+  let old_name = Option.value name ~default:(Meta.name meta) in
+  let new_name = Meta.name meta in
+  let same_name =
+    String.equal (Name.to_string old_name) (Name.to_string new_name)
+  in
+  let check_target () =
+    if same_name then Ok ()
+    else
+      match remaining_timeout value deadline with
+      | Error error -> Error error
+      | Ok timeout -> (
+          match read_info_raw ?timeout value new_name with
+          | Ok info when not (Info.deleted info) ->
+              Error (Error.Object_already_exists info)
+          | Ok _ | Error Error.Not_found -> Ok ()
+          | Error error -> Error error)
+  in
+  match remaining_timeout value deadline with
+  | Error error -> Error error
+  | Ok info_timeout -> (
+      match read_info_raw ?timeout:info_timeout value old_name with
+      | Error error -> Error error
+      | Ok old when Info.deleted old -> Error (Error.Deleted old)
+      | Ok old ->
+          let* () = check_target () in
+          let digest =
+            match Info.link old with
+            | Some _ -> None
+            | None -> Some (Info.digest old)
+          in
+          let wire =
+            wire_of_object ~bucket:value.bucket ~name:new_name
+              ~description:(Meta.description meta) ~headers:(Meta.headers meta)
+              ~metadata:(Meta.metadata meta) ~options:(options_of_info old)
+              ~nuid:(Info.nuid old) ~size:(Info.size old)
+              ~chunks:(Info.chunks old) ~digest ~deleted:false
+          in
+          let* () = publish_metadata ~deadline value new_name wire in
+          let* info_timeout = remaining_timeout value deadline in
+          let* info = read_info_raw ?timeout:info_timeout value new_name in
+          if same_name then Ok info
+          else
+            match remaining_timeout value deadline with
+            | Error _ ->
+                Error
+                  (Error.Cleanup_failed
+                     {
+                       info = Some info;
+                       error = Jetstream.Error.Connection Core_error.Timeout;
+                     })
+            | Ok purge_timeout -> (
+                match
+                  purge_chunks ?timeout:purge_timeout value
+                    (metadata_subject value.bucket old_name)
+                with
+                | Ok () -> Ok info
+                | Error error ->
+                    Error (Error.Cleanup_failed { info = Some info; error })))
+
+let check_link_target ~deadline value link =
+  match Link.name link with
+  | None -> Ok ()
+  | Some name -> (
+      match bind value.jetstream ~bucket:(Link.bucket link) with
+      | Error error -> Error error
+      | Ok target -> (
+          match remaining_timeout target deadline with
+          | Error error -> Error error
+          | Ok timeout -> (
+              match read_info_raw ?timeout target name with
+              | Error error -> Error error
+              | Ok info when Info.deleted info ->
+                  Error
+                    (Error.Link_to_deleted
+                       { bucket = Link.bucket link; name = Name.to_string name })
+              | Ok info when Option.is_some (Info.link info) ->
+                  Error Error.No_link_to_link
+              | Ok _ -> Ok ())))
+
+let put_link ?timeout value meta link =
+  let deadline = timeout_deadline value timeout in
+  let name = Meta.name meta in
+  let existing =
+    match remaining_timeout value deadline with
+    | Error error -> Error error
+    | Ok info_timeout -> (
+        match read_info_raw ?timeout:info_timeout value name with
+        | Error Error.Not_found -> Ok ()
+        | Error error -> Error error
+        | Ok old when Option.is_none (Info.link old) ->
+            Error (Error.Object_already_exists old)
+        | Ok _ -> Ok ())
+  in
+  match existing with
+  | Error error -> Error error
+  | Ok () -> (
+      match check_link_target ~deadline value link with
+      | Error error -> Error error
+      | Ok () ->
+          let nuid = new_nuid value in
+          let wire =
+            wire_of_object ~bucket:value.bucket ~name
+              ~description:(Meta.description meta) ~headers:(Meta.headers meta)
+              ~metadata:(Meta.metadata meta)
+              ~options:(Some { chunk_size = None; link = Some (link_to_wire link) })
+              ~nuid ~size:0L ~chunks:0L ~digest:None ~deleted:false
+          in
+          match publish_metadata ~deadline value name wire with
+          | Error error -> Error error
+          | Ok () ->
+              match remaining_timeout value deadline with
+              | Error error -> Error error
+              | Ok info_timeout ->
+                  match read_info_raw ?timeout:info_timeout value name with
+                  | Error error -> Error error
+                  | Ok info -> Ok info)
+
+let info_of_delivery (value : t) message =
+  match
+    Jsont_bytesrw.decode_string' wire_info_codec (Jetstream.Msg.payload message)
+  with
+  | Error error -> Error (Error.Decode error)
+  | Ok wire -> (
+      match Name.of_string wire.name with
+      | Error reason -> Error (Error.Invalid_name { value = wire.name; reason })
+      | Ok name ->
+          let actual_subject =
+            Nats.Subject.to_string (Jetstream.Msg.subject message)
+          in
+          let expected_subject = metadata_subject value.bucket name in
+          if not (String.equal actual_subject expected_subject) then
+            Error (Error.Invalid_metadata_subject actual_subject)
+          else
+            let* timestamp =
+              timestamp_of_nanoseconds (Jetstream.Msg.timestamp message)
+            in
+            info_of_wire ~bucket:value.bucket ~requested_name:name ~timestamp wire)
+
+module Watch = struct
+  type delivery = New | Last_per_subject | All
+  type event = Initial_done | Info of Info.t
+  type initial = Marker | Retained | Live
+
+  type t = {
+    value : bucket;
+    push : Jetstream.Consumer.Push.t;
+    connection : Connection.t;
+    ignore_deletes : bool;
+    mutable initial : initial;
+  }
+
+  let map_error = function
+    | Jetstream.Error.Connection error -> Error.Connection error
+    | Jetstream.Error.Push_closed -> Error.Closed
+    | error -> Error.Jetstream error
+
+  let v ~sw ?name ?(delivery = Last_per_subject) ?(ignore_deletes = false)
+      (value : bucket) =
+    let filter =
+      match name with
+      | None -> metadata_filter value.bucket
+      | Some name ->
+          Nats.Subject.Filter.literal (metadata_subject value.bucket name)
+    in
+    let connection = Jetstream.connection value.jetstream in
+    let deliver_subject = Connection.fresh_inbox connection in
+    let deliver_policy =
+      match delivery with
+      | New -> Jetstream.Consumer.Config.New
+      | Last_per_subject -> Jetstream.Consumer.Config.Last_per_subject
+      | All -> Jetstream.Consumer.Config.All
+    in
+    match
+      Jetstream.Consumer.Config.v ~deliver_subject ~deliver_policy
+        ~ack_policy:Jetstream.Consumer.Config.No_ack ~filter_subject:filter
+        ~idle_heartbeat:Mtime.Span.(5 * s) ~flow_control:true
+        ~headers_only:false ~inactive_threshold:Mtime.Span.(5 * min)
+        ~mem_storage:true ()
+    with
+    | Error error -> Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
+    | Ok config -> (
+        match Jetstream.Consumer.Push.create ~sw value.stream config with
+        | Error error -> Error (map_error error)
+        | Ok push ->
+            let initial_pending =
+              match delivery with
+              | New -> None
+              | Last_per_subject | All ->
+                  Some (Jetstream.Consumer.Push.initial_pending push)
+            in
+            let initial =
+              match initial_pending with None | Some 0L -> Marker | Some _ -> Retained
+            in
+            Ok
+              {
+                value;
+                push;
+                connection;
+                ignore_deletes;
+                initial;
+              })
+
+  let next_message watch deadline =
+    match deadline with
+    | None -> Jetstream.Consumer.Push.next watch.push
+    | Some deadline ->
+        let now = Connection.now watch.connection in
+        if Mtime.compare now deadline >= 0 then
+          Error (Jetstream.Error.Connection Core_error.Timeout)
+        else
+          Jetstream.Consumer.Push.next_with_timeout
+            ~timeout:(Mtime.span now deadline) watch.push
+
+  let next_until watch deadline =
+    let result = ref None in
+    while Option.is_none !result do
+      match watch.initial with
+      | Marker ->
+          watch.initial <- Live;
+          result := Some (Ok Initial_done)
+      | Retained | Live -> (
+          match next_message watch deadline with
+          | Error error -> result := Some (Error (map_error error))
+          | Ok message -> (
+              match info_of_delivery watch.value message with
+              | Error error -> result := Some (Error error)
+              | Ok info ->
+                  let initial_complete =
+                    match watch.initial with
+                    | Retained -> Int64.equal (Jetstream.Msg.num_pending message) 0L
+                    | Marker | Live -> false
+                  in
+                  if initial_complete then watch.initial <- Marker;
+                  if watch.ignore_deletes && Info.deleted info then ()
+                  else result := Some (Ok (Info info))))
+    done;
+    match !result with Some result -> result | None -> assert false
+
+  let next watch = next_until watch None
+
+  let next_with_timeout ~timeout watch =
+    if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then
+      Error (Error.Connection (Core_error.Invalid_timeout "watch"))
+    else
+      let deadline =
+        match Mtime.add_span (Connection.now watch.connection) timeout with
+        | Some deadline -> deadline
+        | None -> Mtime.max_stamp
+      in
+      next_until watch (Some deadline)
+
+  let iter watch ~f =
+    let result = ref None in
+    while Option.is_none !result do
+      match next watch with
+      | Ok event -> f event
+      | Error Error.Closed -> result := Some (Ok ())
+      | Error error -> result := Some (Error error)
+    done;
+    match !result with Some result -> result | None -> assert false
+
+  let close watch =
+    match Jetstream.Consumer.Push.close watch.push with
+    | Ok () -> Ok ()
+    | Error error -> Error (map_error error)
+end
+
+let list ?timeout ?(include_deleted = false) value =
+  let deadline = timeout_deadline value timeout in
+  Eio.Switch.run (fun sw ->
+      match
+        Watch.v ~sw ~delivery:Watch.Last_per_subject
+          ~ignore_deletes:(not include_deleted) value
+      with
+      | Error error -> Error error
+      | Ok watch ->
+          let result = ref None in
+          let infos = ref [] in
+          let next_event () =
+            match remaining_timeout value deadline with
+            | Error error -> Error error
+            | Ok None -> Watch.next watch
+            | Ok (Some timeout) -> Watch.next_with_timeout ~timeout watch
+          in
+          let collect () =
+            while Option.is_none !result do
+              match next_event () with
+              | Error error -> result := Some (Error error)
+              | Ok Watch.Initial_done -> result := Some (Ok (List.rev !infos))
+              | Ok (Watch.Info info) -> infos := info :: !infos
+            done
+          in
+          let result =
+            Fun.protect
+              ~finally:(fun () -> ignore (Watch.close watch))
+              (fun () ->
+                collect ();
+                match !result with Some result -> result | None -> assert false)
+          in
+          result)
+
+let seal value =
+  match Jetstream.Stream.info value.stream with
+  | Error error -> Error (map_jetstream_error error)
+  | Ok stream_info -> (
+      match
+        Jetstream.Stream.Config.with_sealed
+          (Jetstream.Stream.Info.config stream_info) true
+      with
+      | Error error -> Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
+      | Ok config -> (
+          match Jetstream.Stream.update value.stream config with
+          | Error error -> Error (map_jetstream_error error)
+          | Ok _ -> status value))
 
 let delete ?timeout value name =
   let deadline = timeout_deadline value timeout in
@@ -938,21 +1395,7 @@ let delete ?timeout value name =
         wire_of_object ~bucket:value.bucket ~name:(Info.name info)
           ~description:(Info.description info) ~headers:(Info.headers info)
           ~metadata:(Info.metadata info)
-          ~options:
-            (Some
-               {
-                 chunk_size = Some (Info.chunk_size info);
-                 link =
-                   (match Info.link info with
-                   | None -> None
-                   | Some link ->
-                       Some
-                         {
-                           bucket = Link.bucket link;
-                           name =
-                             Option.map Name.to_string (Link.name link);
-                         });
-               })
+          ~options:(options_of_info info)
           ~nuid:(Info.nuid info) ~size:0L ~chunks:0L ~digest:None ~deleted:true
       in
       (match encode_wire wire with
