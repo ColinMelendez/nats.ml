@@ -384,12 +384,19 @@ let () =
     [
       test "stream config retains direct and per-subject limits" (fun () ->
           let subject = Nats.Subject.Filter.literal "$KV.users.>" in
+          let placement =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.Placement.v ~cluster:"eu-west"
+                 ~tags:[ "ssd" ] ())
+          in
           let config =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Stream.Config.v ~name:"KV_users"
                  ~subjects:[ subject ] ~description:"user values"
                  ~max_msgs_per_subject:5L ~allow_rollup:true ~allow_direct:true
-                 ~deny_delete:true
+                 ~deny_delete:true ~replicas:3 ~placement
+                 ~compression:Nats_eio.Jetstream.Stream.Config.S2
+                 ~metadata:[ ("owner", "users") ]
                  ())
           in
           equal (option string) (Some "user values")
@@ -407,6 +414,57 @@ let () =
           equal bool true (Nats_eio.Jetstream.Stream.Config.allow_direct config);
           equal bool true
             (Nats_eio.Jetstream.Stream.Config.deny_delete config);
+          equal int 3 (Nats_eio.Jetstream.Stream.Config.replicas config);
+          (match Nats_eio.Jetstream.Stream.Config.placement config with
+          | None -> fail "stream config lost placement"
+          | Some value ->
+              equal (option string) (Some "eu-west")
+                (Nats_eio.Jetstream.Stream.Config.Placement.cluster value);
+              equal (list string) [ "ssd" ]
+                (Nats_eio.Jetstream.Stream.Config.Placement.tags value));
+          (match Nats_eio.Jetstream.Stream.Config.compression config with
+          | Nats_eio.Jetstream.Stream.Config.S2 -> ()
+          | Nats_eio.Jetstream.Stream.Config.Uncompressed ->
+              fail "stream config lost compression");
+          (match Nats_eio.Jetstream.Stream.Config.metadata config with
+          | [ ("owner", "users") ] -> ()
+          | _ -> fail "stream config lost metadata");
+          (match Nats_eio.Jetstream.Stream.Config.Placement.v () with
+          | Error Nats_eio.Jetstream.Error.Empty_placement -> ()
+          | Ok _ -> fail "placement accepted no constraints"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected placement error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
+          let rich =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_replicas config 4)
+          in
+          equal int 4 (Nats_eio.Jetstream.Stream.Config.replicas rich);
+          let rich =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_compression rich
+                 Nats_eio.Jetstream.Stream.Config.Uncompressed)
+          in
+          (match Nats_eio.Jetstream.Stream.Config.compression rich with
+          | Nats_eio.Jetstream.Stream.Config.Uncompressed -> ()
+          | Nats_eio.Jetstream.Stream.Config.S2 ->
+              fail "stream config updater retained compression");
+          let rich =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_metadata rich
+                 [ ("team", "platform") ])
+          in
+          (match Nats_eio.Jetstream.Stream.Config.metadata rich with
+          | [ ("team", "platform") ] -> ()
+          | _ -> fail "stream config updater lost metadata");
+          let rich =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_placement rich None)
+          in
+          (match Nats_eio.Jetstream.Stream.Config.placement rich with
+          | None -> ()
+          | Some _ -> fail "stream config updater retained placement");
           let updated =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Stream.Config.with_max_msgs_per_subject config
@@ -436,7 +494,17 @@ let () =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Stream.Config.with_sealed config true)
           in
-          equal bool true (Nats_eio.Jetstream.Stream.Config.sealed sealed));
+          equal bool true (Nats_eio.Jetstream.Stream.Config.sealed sealed);
+          (match
+             Nats_eio.Jetstream.Stream.Config.v ~name:"KV_users"
+               ~subjects:[ subject ] ~replicas:0 ()
+           with
+          | Error Nats_eio.Jetstream.Error.Invalid_replicas 0 -> ()
+          | Ok _ -> fail "stream config accepted zero replicas"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected replica error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error)));
       test "stream create emits retained config fields" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
@@ -451,7 +519,10 @@ let () =
                   (Nats_eio.Jetstream.Stream.Config.v ~name:"KV_users"
                      ~subjects:[ Nats.Subject.Filter.literal "$KV.users.>" ]
                      ~description:"user values" ~max_msgs_per_subject:5L
-                     ~allow_rollup:true ~allow_direct:true ~deny_delete:true ())
+                     ~allow_rollup:true ~allow_direct:true ~deny_delete:true
+                     ~replicas:3
+                     ~compression:Nats_eio.Jetstream.Stream.Config.S2
+                     ~metadata:[ ("owner", "users") ] ())
               in
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -478,6 +549,18 @@ let () =
               then fail "stream create omitted the direct-read flag";
               if not (contains_substring ~needle:"deny_delete\\\":true" trace)
               then fail "stream create omitted the deny-delete flag";
+              if not (contains_substring ~needle:"num_replicas\\\":3" trace)
+              then fail "stream create omitted the replica count";
+              if
+                not
+                  (contains_substring ~needle:"compression\\\":\\\"s2" trace)
+              then fail "stream create omitted compression";
+              if
+                not
+                  (contains_substring
+                     ~needle:"metadata\\\":{\\\"owner\\\":\\\"users\\\"}"
+                     trace)
+              then fail "stream create omitted stream metadata";
               Eio.Promise.resolve response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:1
@@ -511,7 +594,19 @@ let () =
                   (Nats_eio.Jetstream.Stream.Config.v ~name:"ORDERS"
                      ~subjects:[ Nats.Subject.Filter.literal "orders.>" ]
                      ~description:"updated" ~max_msgs_per_subject:5L
-                     ~allow_rollup:true ~allow_direct:true ())
+                     ~allow_rollup:true ~allow_direct:true ~replicas:2
+                     ~compression:Nats_eio.Jetstream.Stream.Config.S2
+                     ~metadata:[ ("owner", "client") ] ())
+              in
+              let placement =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Stream.Config.Placement.v
+                     ~cluster:"east" ())
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Stream.Config.with_placement config
+                     (Some placement))
               in
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -521,7 +616,7 @@ let () =
               Eio.Promise.resolve info_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:1
-                      {|{"config":{"name":"ORDERS","subjects":["orders.>"],"description":"before","storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":-1,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":false,"allow_direct":false,"num_replicas":3,"sealed":true,"metadata":{"owner":"test"}},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}));
+                      {|{"config":{"name":"ORDERS","subjects":["orders.>"],"description":"before","storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":-1,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":false,"allow_direct":false,"num_replicas":3,"sealed":true,"placement":{"cluster":"west"},"metadata":{"owner":"server"},"republish":{"src":"orders.in","dest":"orders.out"}},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}));
               yield_n 5;
               let trace = Buffer.contents trace in
               if not (contains_substring ~needle:"STREAM.UPDATE.ORDERS" trace)
@@ -543,23 +638,37 @@ let () =
               if not (contains_substring ~needle:"allow_direct\\\":true" trace)
               then
                 fail "stream update did not emit the changed direct-read flag";
-              if count_substring ~needle:"num_replicas\\\":3" trace < 2 then
-                fail "stream update discarded an unknown numeric field";
+              if count_substring ~needle:"num_replicas\\\":2" trace < 1 then
+                fail "stream update did not replace the replica count";
               if count_substring ~needle:"sealed\\\":true" trace < 2 then
                 fail "stream update discarded an unknown boolean field";
               if
                 count_substring
-                  ~needle:"metadata\\\":{\\\"owner\\\":\\\"test\\\"}" trace
-                < 2
-              then fail "stream update discarded an unknown object field";
+                  ~needle:"metadata\\\":{\\\"owner\\\":\\\"client\\\"}"
+                  trace < 1
+              then fail "stream update did not replace stream metadata";
+              if
+                count_substring
+                  ~needle:"republish\\\":{\\\"src\\\":\\\"orders.in\\\",\\\"dest\\\":\\\"orders.out\\\"}"
+                  trace < 1
+              then fail "stream update discarded an unmodeled object field";
               Eio.Promise.resolve update_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:2
-                      {|{"config":{"name":"ORDERS","subjects":["orders.>"],"description":"updated","storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":5,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":true,"allow_direct":true,"num_replicas":3,"sealed":true,"metadata":{"owner":"test"}},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}));
+                      {|{"config":{"name":"ORDERS","subjects":["orders.>"],"description":"updated","storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":5,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":true,"allow_direct":true,"num_replicas":2,"sealed":true,"placement":{"cluster":"east"},"compression":"s2","metadata":{"owner":"client"},"republish":{"src":"orders.in","dest":"orders.out"}},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}));
               let info = expect_jetstream_ok (Eio.Promise.await result) in
               equal (option string) (Some "updated")
                 (Nats_eio.Jetstream.Stream.Config.description
                    (Nats_eio.Jetstream.Stream.Info.config info));
+              let config = Nats_eio.Jetstream.Stream.Info.config info in
+              equal int 2 (Nats_eio.Jetstream.Stream.Config.replicas config);
+              (match Nats_eio.Jetstream.Stream.Config.compression config with
+              | Nats_eio.Jetstream.Stream.Config.S2 -> ()
+              | Nats_eio.Jetstream.Stream.Config.Uncompressed ->
+                  fail "stream update lost compression");
+              (match Nats_eio.Jetstream.Stream.Config.metadata config with
+              | [ ("owner", "client") ] -> ()
+              | _ -> fail "stream update lost stream metadata");
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream direct reads reject invalid replies" (fun () ->

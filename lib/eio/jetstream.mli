@@ -7,6 +7,10 @@ module Error : sig
     | Empty_subjects
     | Invalid_limit of { field : string; value : int64 }
     | Invalid_max_age
+    | Invalid_replicas of int
+    | Empty_placement
+    | Empty_placement_cluster
+    | Empty_placement_tag
     | Empty_consumer_name
     | Invalid_consumer_name_character of { position : int; character : char }
     | Invalid_consumer_limit of { field : string; value : int64 }
@@ -72,6 +76,25 @@ module Stream : sig
     type storage = Memory | File
     type retention = Limits | Interest | Work_queue
     type discard = Old | New
+    type compression = Uncompressed | S2
+    (** The server-side stream compression policy. *)
+
+    module Placement : sig
+      type t
+      type error = Error.config
+
+      val v :
+        ?cluster:string ->
+        ?tags:string list ->
+        unit ->
+        (t, error) result
+      (** [v ?cluster ?tags ()] validates a placement constraint. At least one
+          of [cluster] and [tags] must be supplied. *)
+
+      val cluster : t -> string option
+      val tags : t -> string list
+    end
+
     type t
     type error = Error.config
 
@@ -80,6 +103,10 @@ module Stream : sig
       subjects:Nats.Subject.Filter.t list ->
       ?description:string ->
       ?storage:storage ->
+      ?replicas:int ->
+      ?placement:Placement.t ->
+      ?compression:compression ->
+      ?metadata:(string * string) list ->
       ?retention:retention ->
       ?discard:discard ->
       ?max_msgs:int64 ->
@@ -94,13 +121,18 @@ module Stream : sig
       unit ->
       (t, error) result
     (** [v] validates a stream name, capture filters, and limits. Limits use
-        [-1] for the JetStream unlimited value when supplied. [deny_delete]
-        controls whether stream-level message deletion is rejected. *)
+        [-1] for the JetStream unlimited value when supplied. [replicas] must be
+        between 1 and 5. [deny_delete] controls whether stream-level message
+        deletion is rejected. *)
 
     val name : t -> string
     val subjects : t -> Nats.Subject.Filter.t list
     val description : t -> string option
     val storage : t -> storage
+    val replicas : t -> int
+    val placement : t -> Placement.t option
+    val compression : t -> compression
+    val metadata : t -> (string * string) list
     val retention : t -> retention
     val discard : t -> discard
     val max_msgs : t -> int64 option
@@ -132,6 +164,18 @@ module Stream : sig
 
     val with_storage : t -> storage -> (t, error) result
     (** [with_storage config storage] preserves all fields except storage. *)
+
+    val with_replicas : t -> int -> (t, error) result
+    (** [with_replicas config value] validates and replaces the replica count. *)
+
+    val with_placement : t -> Placement.t option -> (t, error) result
+    (** [with_placement config value] replaces the placement constraint. *)
+
+    val with_compression : t -> compression -> (t, error) result
+    (** [with_compression config value] replaces the storage compression mode. *)
+
+    val with_metadata : t -> (string * string) list -> (t, error) result
+    (** [with_metadata config value] replaces bucket-level stream metadata. *)
 
     val with_retention : t -> retention -> (t, error) result
     (** [with_retention config retention] preserves all fields except retention.
