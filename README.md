@@ -52,9 +52,9 @@ reconnects. Ordered sessions use client-managed ephemeral pull consumers,
 validate consecutive consumer sequences, and resume from the next stream
 sequence after recovery. `Nats_eio.Object_store` now provides validated
 buckets, direct metadata, incremental Bytesrw put/get, digest verification,
-deletion, and replacement cleanup. Listing, watches, links, sealing, KV,
-Services, and real cluster/interop coverage remain later implementation
-phases.
+metadata updates and links, snapshot/live watches, listing, deletion,
+replacement cleanup, and sealing. KV, Services, and real cluster/interop
+coverage remain later implementation phases.
 
 The project uses Dune package management. No compatibility layer for NATS
 Streaming is planned.

@@ -660,12 +660,12 @@ These modules should be layered over `Connection.request` and
   delivery subscriptions after reconnect, recheck durable consumers, and
   recreate ephemeral consumers when the server reports consumer-not-found.
   Other advanced consumer behavior remains a planned extension.
-- `Nats_eio.Object_store` now provides the first streaming slice over the same
+- `Nats_eio.Object_store` provides the local streaming lifecycle over the same
   connection: validated bucket capabilities, direct metadata reads,
-  incremental Bytesrw transfers, digest/size/chunk verification, deletion,
-  replacement cleanup, and structured operation deadlines. Listing, watches,
-  metadata-only updates, links, sealing, richer bucket configuration, and
-  server interoperability remain later stability work.
+  incremental Bytesrw transfers, digest/size/chunk verification, metadata
+  updates and links, snapshot/live watches, listing, deletion, replacement
+  cleanup, sealing, and structured operation deadlines. Richer bucket
+  configuration and server interoperability remain later stability work.
 - `Nats_eio.Key_value` and `Nats_eio.Service` remain planned layers over the
   same connection. Their eventual contracts are described by the
   implementation plan and must not be treated as implemented by this design.
@@ -724,8 +724,9 @@ through individual helper functions:
   consumer inventory, unknown-config preservation, publish acknowledgements,
   duplicate message ids, one-shot and persistent pull delivery,
   idle-heartbeat behavior, timeout/expiry behavior, max-bytes errors, and
-  cleanup. Object Store's local transfer and cleanup slice is implemented;
-  listing, linking, sealing, KV, and Services acceptance remains later work.
+  cleanup. Object Store's local transfer, metadata lifecycle, watch/list, link,
+  and seal behavior is implemented; real-server/cross-SDK acceptance, KV, and
+  Services remain later work.
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 

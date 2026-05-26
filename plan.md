@@ -529,10 +529,10 @@ semantics before calling the feature complete.
 
 - Completed locally: validated bucket management, direct metadata reads,
   incremental `Bytesrw.Bytes.Reader`/`Writer` transfers, SHA-256 and size/chunk
-  verification, deletion, replacement cleanup, and structured operation
-  deadlines.
-- Remaining: list, watch, metadata-only update, object and bucket links, seal,
-  richer bucket configuration, and real-server/cross-SDK acceptance.
+  verification, metadata updates and rename, object and bucket links,
+  recursive link reads, deletion, replacement cleanup, snapshot/live watches,
+  listing, sealing, and structured operation deadlines.
+- Remaining: richer bucket configuration and real-server/cross-SDK acceptance.
 - Keep transfer chunks incremental; never require a whole object as one
   `string`.
 - Preserve the metadata rollup as the commit point and define cancellation,
@@ -543,9 +543,9 @@ semantics before calling the feature complete.
 
 - KV CAS success/failure, revisions, history, TTL, deletes/purges, and watches.
 - Watch cancellation and ordering under reconnect.
-- Large Object Store transfer, metadata, replacement/deletion ordering, and
-  interrupted-transfer cleanup are covered locally; listing, linking, sealing,
-  and server interoperability remain acceptance work.
+- Large Object Store transfer, metadata, replacement/deletion ordering,
+  interrupted-transfer cleanup, listing/watch boundaries, links, rename, and
+  sealing are covered locally; server interoperability remains acceptance work.
 - No direct dependence by these modules on a private socket or private
   connection lifecycle.
 
