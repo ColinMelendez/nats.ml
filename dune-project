@@ -36,5 +36,6 @@
   mtime
   base64
   digestif
+  (alcobar :with-test)
   (eio_main :with-test)
   (windtrap :with-test)))
