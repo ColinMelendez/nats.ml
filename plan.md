@@ -87,8 +87,11 @@ absolute caller timeouts across control traffic. Ordered sessions now use
 client-managed ephemeral pull consumers, force no-ack memory-backed
 configuration, validate consumer sequence continuity, and recreate consumers
 after gaps, liveness loss, deletion, or non-replayed disconnects while resuming
-from the next stream sequence. KV, Object Store, and Services remain later
-work. Push reconnect restoration is implemented through replayable subscription
+from the next stream sequence. KV and Services remain later work. Object Store
+now has a first Eio slice with validated bucket management, direct metadata
+reads, incremental Bytesrw transfers, digest/size/chunk verification,
+deletion, replacement cleanup, and structured timeout and cleanup errors. Push
+reconnect restoration is implemented through replayable subscription
 recovery, including durable confirmation and ephemeral recreation. Real cluster
 and cross-SDK interop coverage is deliberately deferred to the final acceptance
 phase; current consumer confidence comes from local mock transport and
@@ -524,17 +527,25 @@ semantics before calling the feature complete.
 
 ### Workstream 5B — Object Store
 
-- Implement metadata, streaming put/get, list, watch, update, link, and seal.
-- Transfer chunks incrementally; never require a whole object as one `string`.
-- Define cancellation, digest/size verification, partial-failure, and cleanup
-  behavior for interrupted transfers.
+- Completed locally: validated bucket management, direct metadata reads,
+  incremental `Bytesrw.Bytes.Reader`/`Writer` transfers, SHA-256 and size/chunk
+  verification, deletion, replacement cleanup, and structured operation
+  deadlines.
+- Remaining: list, watch, metadata-only update, object and bucket links, seal,
+  richer bucket configuration, and real-server/cross-SDK acceptance.
+- Keep transfer chunks incremental; never require a whole object as one
+  `string`.
+- Preserve the metadata rollup as the commit point and define cancellation,
+  partial-failure, digest, and cleanup behavior before each later surface is
+  stabilized.
 
 ### Acceptance tests
 
 - KV CAS success/failure, revisions, history, TTL, deletes/purges, and watches.
 - Watch cancellation and ordering under reconnect.
-- Large Object Store transfer, metadata, listing, linking, sealing, and
-  interrupted-transfer cleanup.
+- Large Object Store transfer, metadata, replacement/deletion ordering, and
+  interrupted-transfer cleanup are covered locally; listing, linking, sealing,
+  and server interoperability remain acceptance work.
 - No direct dependence by these modules on a private socket or private
   connection lifecycle.
 
