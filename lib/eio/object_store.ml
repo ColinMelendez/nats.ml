@@ -492,33 +492,123 @@ let delete_bucket value =
   | Ok () -> Ok ()
   | Error error -> Error (map_jetstream_error error)
 
+let status_of_info (value : t) info =
+  let config = Jetstream.Stream.Info.config info in
+  let storage =
+    match Jetstream.Stream.Config.storage config with
+    | Jetstream.Stream.Config.Memory -> Config.Memory
+    | Jetstream.Stream.Config.File -> Config.File
+  in
+  {
+    Status.bucket = value.bucket;
+    description = Jetstream.Stream.Config.description config;
+    messages = Jetstream.Stream.Info.messages info;
+    bytes = Jetstream.Stream.Info.bytes info;
+    first_sequence = Jetstream.Stream.Info.first_sequence info;
+    last_sequence = Jetstream.Stream.Info.last_sequence info;
+    ttl = Jetstream.Stream.Config.max_age config;
+    max_bytes = Jetstream.Stream.Config.max_bytes config;
+    storage;
+    replicas = Jetstream.Stream.Config.replicas config;
+    placement = Jetstream.Stream.Config.placement config;
+    compression = Jetstream.Stream.Config.compression config;
+    metadata = Jetstream.Stream.Config.metadata config;
+    sealed = Jetstream.Stream.Config.sealed config;
+  }
+
 let status value =
   match Jetstream.Stream.info value.stream with
   | Error error -> Error (map_jetstream_error error)
-  | Ok info ->
-      let config = Jetstream.Stream.Info.config info in
-      let storage =
-        match Jetstream.Stream.Config.storage config with
-        | Jetstream.Stream.Config.Memory -> Config.Memory
-        | Jetstream.Stream.Config.File -> Config.File
-      in
-      Ok
-        {
-          Status.bucket = value.bucket;
-          description = Jetstream.Stream.Config.description config;
-          messages = Jetstream.Stream.Info.messages info;
-          bytes = Jetstream.Stream.Info.bytes info;
-          first_sequence = Jetstream.Stream.Info.first_sequence info;
-          last_sequence = Jetstream.Stream.Info.last_sequence info;
-          ttl = Jetstream.Stream.Config.max_age config;
-          max_bytes = Jetstream.Stream.Config.max_bytes config;
-          storage;
-          replicas = Jetstream.Stream.Config.replicas config;
-          placement = Jetstream.Stream.Config.placement config;
-          compression = Jetstream.Stream.Config.compression config;
-          metadata = Jetstream.Stream.Config.metadata config;
-          sealed = Jetstream.Stream.Config.sealed config;
-        }
+  | Ok info -> Ok (status_of_info value info)
+
+let update_config (value : t) (config : Config.t) =
+  if not (String.equal (Config.bucket config) value.bucket) then
+    Error
+      (Error.Unexpected_bucket
+         { expected = value.bucket; actual = Config.bucket config })
+  else
+    let stream_config_error error =
+      Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
+    in
+    match Jetstream.Stream.info value.stream with
+    | Error error -> Error (map_jetstream_error error)
+    | Ok info ->
+        let current = Jetstream.Stream.Info.config info in
+        let apply result =
+          match result with
+          | Ok value -> Ok value
+          | Error error -> stream_config_error error
+        in
+        let* current =
+          apply
+            (Jetstream.Stream.Config.with_name current
+               (stream_name value.bucket))
+        in
+        let* current =
+          apply
+            (Jetstream.Stream.Config.with_subjects current
+               [ chunk_filter value.bucket; metadata_filter value.bucket ])
+        in
+        let* current =
+          apply
+            (Jetstream.Stream.Config.with_description current
+               (Config.description config))
+        in
+        let* current =
+          apply
+            (Jetstream.Stream.Config.with_storage current
+               (match Config.storage config with
+               | Config.Memory -> Jetstream.Stream.Config.Memory
+               | Config.File -> Jetstream.Stream.Config.File))
+        in
+        let* current =
+          apply
+            (Jetstream.Stream.Config.with_replicas current
+               (Config.replicas config))
+        in
+        let* current =
+          apply
+            (Jetstream.Stream.Config.with_placement current
+               (Config.placement config))
+        in
+        let* current =
+          apply
+            (Jetstream.Stream.Config.with_compression current
+               (Config.compression config))
+        in
+        let* current =
+          apply
+            (Jetstream.Stream.Config.with_metadata current
+               (Config.metadata config))
+        in
+        let* current =
+          apply
+            (Jetstream.Stream.Config.with_max_age current (Config.ttl config))
+        in
+        let* current =
+          apply
+            (Jetstream.Stream.Config.with_max_bytes current
+               (Config.max_bytes config))
+        in
+        let* current =
+          apply
+            (Jetstream.Stream.Config.with_retention current
+               Jetstream.Stream.Config.Limits)
+        in
+        let* current =
+          apply
+            (Jetstream.Stream.Config.with_discard current
+               Jetstream.Stream.Config.New)
+        in
+        let* current =
+          apply (Jetstream.Stream.Config.with_allow_rollup current true)
+        in
+        let* current =
+          apply (Jetstream.Stream.Config.with_allow_direct current true)
+        in
+        match Jetstream.Stream.update value.stream current with
+        | Error error -> Error (map_jetstream_error error)
+        | Ok info -> Ok (status_of_info value info)
 
 let headers_to_wire headers =
   let add map (name, value) =

@@ -212,6 +212,15 @@ val delete_bucket : t -> (unit, Error.t) result
 
 val status : t -> (Status.t, Error.t) result
 
+val update_config : t -> Config.t -> (Status.t, Error.t) result
+(** [update_config bucket config] applies the modeled bucket configuration to
+    the backing stream and returns its resulting status. [Config.bucket config]
+    must name [bucket]. The current stream configuration is read first, so
+    unmodeled stream fields are preserved; Object Store subjects, limits
+    retention, discard-new, rollup, and direct-read invariants are reasserted.
+    Object metadata messages are not rewritten, and a sealed stream remains
+    sealed. *)
+
 val update :
   ?timeout:Mtime.Span.t ->
   ?name:Name.t ->

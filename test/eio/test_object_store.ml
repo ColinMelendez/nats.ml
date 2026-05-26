@@ -442,6 +442,125 @@ let () =
               | _ -> fail "object-store status lost metadata");
               Eio.Promise.resolve hold_u (Ok "done")))
       ;
+      test "bucket config update preserves stream fields and object messages"
+        (fun () ->
+          let first_info, first_info_u = Eio.Promise.create () in
+          let second_info, second_info_u = Eio.Promise.create () in
+          let update_response, update_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await first_info;
+                `Await second_info;
+                `Await update_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_object_ok
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"assets")
+              in
+              let placement =
+                match
+                  Nats_eio.Object_store.Config.Placement.v ~cluster:"east"
+                    ~tags:[ "ssd" ] ()
+                with
+                | Ok value -> value
+                | Error error ->
+                    fail
+                      (Format.asprintf "%a"
+                         Nats_eio.Jetstream.Error.pp_config error)
+              in
+              let config =
+                match
+                  Nats_eio.Object_store.Config.v ~bucket:"assets"
+                    ~description:"updated media" ~ttl:Mtime.Span.(2 * s)
+                    ~max_bytes:8192L
+                    ~storage:Nats_eio.Object_store.Config.File ~replicas:2
+                    ~placement
+                    ~compression:Nats_eio.Object_store.Config.S2
+                    ~metadata:[ ("owner", "client") ] ()
+                with
+                | Ok value -> value
+                | Error error ->
+                    fail
+                      (Format.asprintf "%a"
+                         Nats_eio.Object_store.Error.pp_config error)
+              in
+              let wrong_config =
+                match
+                  Nats_eio.Object_store.Config.v ~bucket:"other"
+                    ~description:"must not be sent" ()
+                with
+                | Ok value -> value
+                | Error error ->
+                    fail
+                      (Format.asprintf "%a"
+                         Nats_eio.Object_store.Error.pp_config error)
+              in
+              (match
+                 Nats_eio.Object_store.update_config bucket wrong_config
+               with
+              | Error
+                  (Nats_eio.Object_store.Error.Unexpected_bucket
+                    { expected = "assets"; actual = "other" }) -> ()
+              | Ok _ -> fail "bucket update accepted a mismatched bucket"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected bucket mismatch: %a"
+                       Nats_eio.Object_store.Error.pp error));
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.update_config bucket config));
+              yield_n 5;
+              let current_wire =
+                {|{"config":{"name":"OBJ_assets","subjects":["$O.assets.C.>","$O.assets.M.>"],"description":"before","storage":"memory","retention":"limits","discard":"new","max_msgs":7,"max_msgs_per_subject":11,"max_bytes":4096,"max_age":1000000000,"max_msg_size":99,"allow_rollup_hdrs":false,"allow_direct":false,"deny_delete":true,"num_replicas":1,"sealed":true,"placement":{"cluster":"west","tags":["hdd"]},"metadata":{"owner":"server"},"republish":{"src":"orders.in","dest":"orders.out"}},"state":{"messages":4,"bytes":321,"first_seq":3,"last_seq":9,"consumer_count":0}}|}
+              in
+              Eio.Promise.resolve first_info_u
+                (Ok (response_wire_with_sid ~sid:1 current_wire));
+              yield_n 5;
+              Eio.Promise.resolve second_info_u
+                (Ok (response_wire_with_sid ~sid:2 current_wire));
+              yield_n 5;
+              require_trace ~trace ~needle:"STREAM.UPDATE.OBJ_assets";
+              require_trace ~trace ~needle:"description\\\":\\\"updated media";
+              require_trace ~trace ~needle:"storage\\\":\\\"file";
+              require_trace ~trace ~needle:"num_replicas\\\":2";
+              require_trace ~trace ~needle:"placement\\\":{\\\"cluster\\\":\\\"east\\\"";
+              require_trace ~trace ~needle:"compression\\\":\\\"s2";
+              require_trace ~trace ~needle:"metadata\\\":{\\\"owner\\\":\\\"client\\\"}";
+              require_trace ~trace ~needle:"max_msgs\\\":7";
+              require_trace ~trace ~needle:"max_msgs_per_subject\\\":11";
+              require_trace ~trace ~needle:"max_msg_size\\\":99";
+              require_trace ~trace ~needle:"allow_rollup_hdrs\\\":true";
+              require_trace ~trace ~needle:"allow_direct\\\":true";
+              require_trace ~trace ~needle:"sealed\\\":true";
+              require_trace ~trace ~needle:"republish\\\":{\\\"src\\\":\\\"orders.in\\\",\\\"dest\\\":\\\"orders.out\\\"}";
+              if contains_substring ~needle:"PUB $O.assets.M." (Buffer.contents trace)
+              then fail "bucket config update published object metadata";
+              let updated_wire =
+                {|{"config":{"name":"OBJ_assets","subjects":["$O.assets.C.>","$O.assets.M.>"],"description":"updated media","storage":"file","retention":"limits","discard":"new","max_msgs":7,"max_msgs_per_subject":11,"max_bytes":8192,"max_age":2000000000,"max_msg_size":99,"allow_rollup_hdrs":true,"allow_direct":true,"deny_delete":true,"num_replicas":2,"sealed":true,"placement":{"cluster":"east","tags":["ssd"]},"compression":"s2","metadata":{"owner":"client"},"republish":{"src":"orders.in","dest":"orders.out"}},"state":{"messages":4,"bytes":321,"first_seq":3,"last_seq":9,"consumer_count":0}}|}
+              in
+              Eio.Promise.resolve update_response_u
+                (Ok (response_wire_with_sid ~sid:3 updated_wire));
+              let status = expect_object_ok (Eio.Promise.await result) in
+              equal (option string) (Some "updated media")
+                (Nats_eio.Object_store.Status.description status);
+              equal int64 8192L
+                (Option.get
+                   (Nats_eio.Object_store.Status.max_bytes status));
+              equal int 2 (Nats_eio.Object_store.Status.replicas status);
+              equal int64 2_000_000_000L
+                (Mtime.Span.to_uint64_ns
+                   (Option.get (Nats_eio.Object_store.Status.ttl status)));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "metadata update preserves content identity without uploading chunks" (fun () ->
           let initial_info, initial_info_u = Eio.Promise.create () in
           let metadata, metadata_u = Eio.Promise.create () in
