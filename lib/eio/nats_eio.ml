@@ -6,3 +6,4 @@ module Event_stream = Connection.Event_stream
 module Jetstream = Jetstream
 module Key_value = Key_value
 module Object_store = Object_store
+module Service = Service
