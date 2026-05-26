@@ -90,6 +90,7 @@ module Stream : sig
       ?allow_rollup:bool ->
       ?allow_direct:bool ->
       ?deny_delete:bool ->
+      ?sealed:bool ->
       unit ->
       (t, error) result
     (** [v] validates a stream name, capture filters, and limits. Limits use
@@ -113,7 +114,9 @@ module Stream : sig
     *)
     val deny_delete : t -> bool
     (** [deny_delete config] is [true] when stream-level message deletion is
-        rejected. *)
+    rejected. *)
+    val sealed : t -> bool
+    (** [sealed config] is [true] when the stream rejects further writes. *)
 
     val with_name : t -> string -> (t, error) result
     (** [with_name config name] validates [name] while preserving the other
@@ -168,6 +171,9 @@ module Stream : sig
     val with_deny_delete : t -> bool -> (t, error) result
     (** [with_deny_delete config value] replaces whether deleting the stream's
         messages through the stream API is rejected. *)
+
+    val with_sealed : t -> bool -> (t, error) result
+    (** [with_sealed config value] replaces the stream sealed flag. *)
   end
 
   module Info : sig

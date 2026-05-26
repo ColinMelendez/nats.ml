@@ -431,7 +431,12 @@ let () =
               (Nats_eio.Jetstream.Stream.Config.with_deny_delete updated false)
           in
           equal bool false
-            (Nats_eio.Jetstream.Stream.Config.deny_delete updated));
+            (Nats_eio.Jetstream.Stream.Config.deny_delete updated);
+          let sealed =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_sealed config true)
+          in
+          equal bool true (Nats_eio.Jetstream.Stream.Config.sealed sealed));
       test "stream create emits retained config fields" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
