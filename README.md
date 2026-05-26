@@ -53,7 +53,8 @@ validate consecutive consumer sequences, and resume from the next stream
 sequence after recovery. `Nats_eio.Object_store` now provides validated
 buckets, direct metadata, incremental Bytesrw put/get, digest verification,
 metadata updates and links, snapshot/live watches, listing, deletion,
-replacement cleanup, and sealing. KV, Services, and real cluster/interop
+replacement cleanup, sealing, and bucket policy updates for replicas, placement,
+compression, and stream metadata. KV, Services, and real cluster/interop
 coverage remain later implementation phases.
 
 The project uses Dune package management. No compatibility layer for NATS

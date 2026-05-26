@@ -90,8 +90,9 @@ after gaps, liveness loss, deletion, or non-replayed disconnects while resuming
 from the next stream sequence. KV and Services remain later work. Object Store
 now has a first Eio slice with validated bucket management, direct metadata
 reads, incremental Bytesrw transfers, digest/size/chunk verification,
-deletion, replacement cleanup, and structured timeout and cleanup errors. Push
-reconnect restoration is implemented through replayable subscription
+deletion, replacement cleanup, bucket policy projection and updates, and
+structured timeout and cleanup errors. Push reconnect restoration is
+implemented through replayable subscription
 recovery, including durable confirmation and ephemeral recreation. Real cluster
 and cross-SDK interop coverage is deliberately deferred to the final acceptance
 phase; current consumer confidence comes from local mock transport and
@@ -531,8 +532,9 @@ semantics before calling the feature complete.
   incremental `Bytesrw.Bytes.Reader`/`Writer` transfers, SHA-256 and size/chunk
   verification, metadata updates and rename, object and bucket links,
   recursive link reads, deletion, replacement cleanup, snapshot/live watches,
-  listing, sealing, and structured operation deadlines.
-- Remaining: richer bucket configuration and real-server/cross-SDK acceptance.
+  listing, sealing, typed bucket policy configuration and read-modify-write
+  updates, and structured operation deadlines.
+- Remaining: real-server/cross-SDK acceptance.
 - Keep transfer chunks incremental; never require a whole object as one
   `string`.
 - Preserve the metadata rollup as the commit point and define cancellation,
@@ -544,8 +546,9 @@ semantics before calling the feature complete.
 - KV CAS success/failure, revisions, history, TTL, deletes/purges, and watches.
 - Watch cancellation and ordering under reconnect.
 - Large Object Store transfer, metadata, replacement/deletion ordering,
-  interrupted-transfer cleanup, listing/watch boundaries, links, rename, and
-  sealing are covered locally; server interoperability remains acceptance work.
+  interrupted-transfer cleanup, listing/watch boundaries, links, rename,
+  sealing, and bucket configuration updates are covered locally; server
+  interoperability remains acceptance work.
 - No direct dependence by these modules on a private socket or private
   connection lifecycle.
 

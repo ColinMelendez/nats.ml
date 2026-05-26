@@ -725,8 +725,8 @@ through individual helper functions:
   duplicate message ids, one-shot and persistent pull delivery,
   idle-heartbeat behavior, timeout/expiry behavior, max-bytes errors, and
   cleanup. Object Store's local transfer, metadata lifecycle, watch/list, link,
-  and seal behavior is implemented; real-server/cross-SDK acceptance, KV, and
-  Services remain later work.
+  seal, and bucket configuration-update behavior is implemented;
+  real-server/cross-SDK acceptance, KV, and Services remain later work.
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 
