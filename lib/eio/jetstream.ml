@@ -1661,6 +1661,275 @@ module Consumer = struct
     let headers_only value = value.headers_only
     let inactive_threshold value = value.inactive_threshold
     let mem_storage value = value.mem_storage
+
+    let rebuild ~durable_name ~description ~deliver_subject ~deliver_group
+        ~idle_heartbeat ~flow_control ~deliver_policy ~ack_policy ~ack_wait
+        ~max_deliver ~filter_subject ~replay_policy ~max_ack_pending ~max_waiting
+        ~max_batch ~max_expires ~max_bytes ~headers_only ~inactive_threshold
+        ~mem_storage =
+      v ?durable_name ?description ?deliver_subject ?deliver_group
+        ?idle_heartbeat ?flow_control ~deliver_policy ~ack_policy ?ack_wait
+        ?max_deliver ?filter_subject ~replay_policy ?max_ack_pending ?max_waiting
+        ?max_batch ?max_expires ?max_bytes ?headers_only ?inactive_threshold
+        ?mem_storage ()
+
+    let with_durable_name value durable_name =
+      rebuild ~durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_description value description =
+      rebuild ~durable_name:value.durable_name ~description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_deliver_subject value deliver_subject =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_deliver_group value deliver_group =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_idle_heartbeat value idle_heartbeat =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_flow_control value flow_control =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_deliver_policy value deliver_policy =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy ~ack_policy:value.ack_policy ~ack_wait:value.ack_wait
+        ~max_deliver:value.max_deliver ~filter_subject:value.filter_subject
+        ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_ack_policy value ack_policy =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy ~ack_wait:value.ack_wait
+        ~max_deliver:value.max_deliver ~filter_subject:value.filter_subject
+        ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_ack_wait value ack_wait =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_max_deliver value max_deliver =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_filter_subject value filter_subject =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_replay_policy value replay_policy =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_max_ack_pending value max_ack_pending =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_max_waiting value max_waiting =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_max_batch value max_batch =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_max_expires value max_expires =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires ~max_bytes:value.max_bytes
+        ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_max_bytes value max_bytes =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires ~max_bytes
+        ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_headers_only value headers_only =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let with_inactive_threshold value inactive_threshold =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold ~mem_storage:value.mem_storage
+
+    let with_mem_storage value mem_storage =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold ~mem_storage
   end
 
   type wire_config = {
@@ -1801,15 +2070,21 @@ module Consumer = struct
          Jsont.json_mems
     |> Jsont.Object.finish
 
-  type create_request = { stream_name : string; config : wire_config }
+  type create_request = {
+    stream_name : string;
+    config : wire_config;
+    action : string option;
+  }
 
   let create_request_codec =
     Jsont.Object.map ~kind:"JetStream consumer create request"
-      (fun stream_name config -> { stream_name; config })
+      (fun stream_name config action -> { stream_name; config; action })
     |> Jsont.Object.mem "stream_name" Jsont.string ~enc:(fun value ->
         value.stream_name)
     |> Jsont.Object.mem "config" wire_config_codec ~enc:(fun value ->
         value.config)
+    |> Jsont.Object.opt_mem "action" Jsont.string ~enc:(fun value ->
+        value.action)
     |> Jsont.Object.finish
 
   let wire_config value =
@@ -1856,7 +2131,7 @@ module Consumer = struct
     }
 
   let config_of_wire value =
-    let normalize_limit = function Some -1 -> None | value -> value in
+    let normalize_max_deliver = function Some -1 -> None | value -> value in
     let deliver_policy =
       match value.deliver_policy with
       | "all" -> Ok Config.All
@@ -1927,13 +2202,11 @@ module Consumer = struct
                       Option.map Mtime.Span.of_uint64_ns
                         value.inactive_threshold
                     in
-                    let max_deliver = normalize_limit value.max_deliver in
-                    let max_ack_pending =
-                      normalize_limit value.max_ack_pending
-                    in
-                    let max_waiting = normalize_limit value.max_waiting in
-                    let max_batch = normalize_limit value.max_batch in
-                    let max_bytes = normalize_limit value.max_bytes in
+                    let max_deliver = normalize_max_deliver value.max_deliver in
+                    let max_ack_pending = value.max_ack_pending in
+                    let max_waiting = value.max_waiting in
+                    let max_batch = value.max_batch in
+                    let max_bytes = value.max_bytes in
                     match
                       Config.v ?durable_name:value.durable_name
                         ?description:value.description ?deliver_subject
@@ -2172,6 +2445,27 @@ module Consumer = struct
                           num_pending =
                             Option.value ~default:0L response.num_pending;
                         })))
+
+  let wire_config_for_update ~current value =
+    let value = wire_config value in
+    {
+      value with
+      durable_name =
+        (match (current.durable_name, value.durable_name) with
+        | Some durable_name, None -> Some durable_name
+        | _ -> value.durable_name);
+      idle_heartbeat = Some (Option.value ~default:0L value.idle_heartbeat);
+      ack_wait = Some (Option.value ~default:0L value.ack_wait);
+      max_deliver = Some (Option.value ~default:(-1) value.max_deliver);
+      max_ack_pending = Some (Option.value ~default:0 value.max_ack_pending);
+      max_waiting = Some (Option.value ~default:0 value.max_waiting);
+      max_batch = Some (Option.value ~default:0 value.max_batch);
+      max_expires = Some (Option.value ~default:0L value.max_expires);
+      max_bytes = Some (Option.value ~default:0 value.max_bytes);
+      inactive_threshold =
+        Some (Option.value ~default:0L value.inactive_threshold);
+      unknown = current.unknown;
+    }
 
   type jetstream = t
   type stream = Stream.t
@@ -2767,7 +3061,7 @@ module Consumer = struct
       | Some name ->
           api_subject jetstream [ "CONSUMER"; "CREATE"; stream_name; name ]
     in
-    let request = { stream_name; config = wire_config config } in
+    let request = { stream_name; config = wire_config config; action = None } in
     match encode create_request_codec request with
     | Error error -> Error error
     | Ok payload -> (
@@ -2792,7 +3086,7 @@ module Consumer = struct
                     | Ok _ -> Ok { jetstream; stream; name }
                     | Error error -> Error error))))
 
-  let info ?timeout consumer =
+  let info_response ?timeout consumer =
     let subject =
       api_subject consumer.jetstream
         [ "CONSUMER"; "INFO"; Stream.name consumer.stream; consumer.name ]
@@ -2804,9 +3098,63 @@ module Consumer = struct
     | Ok message -> (
         match decode_response message with
         | Error error -> Error error
-        | Ok response ->
-            info_of_response ~stream:consumer.stream
-              ~expected_name:consumer.name response)
+        | Ok response -> Ok response)
+
+  let info ?timeout consumer =
+    match info_response ?timeout consumer with
+    | Error error -> Error error
+    | Ok response ->
+        info_of_response ~stream:consumer.stream ~expected_name:consumer.name
+          response
+
+  let update ?timeout consumer config =
+    match Config.durable_name config with
+    | Some actual when not (String.equal actual consumer.name) ->
+        Error
+          (Error.Unexpected_consumer_name { expected = consumer.name; actual })
+    | _ -> (
+        match info_response ?timeout consumer with
+        | Error error -> Error error
+        | Ok response -> (
+            match
+              info_of_response ~stream:consumer.stream
+                ~expected_name:consumer.name response
+            with
+            | Error error -> Error error
+            | Ok _ -> (
+                match response.config with
+                | None -> Error (Error.Missing_field "config")
+                | Some current -> (
+                    let subject =
+                      api_subject consumer.jetstream
+                        [
+                          "CONSUMER";
+                          "CREATE";
+                          Stream.name consumer.stream;
+                          consumer.name;
+                        ]
+                    in
+                    let request =
+                      {
+                        stream_name = Stream.name consumer.stream;
+                        config = wire_config_for_update ~current config;
+                        action = Some "update";
+                      }
+                    in
+                    match encode create_request_codec request with
+                    | Error error -> Error error
+                    | Ok payload -> (
+                        match
+                          request_msg ?timeout consumer.jetstream
+                            (Nats.Message.v ~subject payload)
+                        with
+                        | Error error -> Error error
+                        | Ok message -> (
+                            match decode_response message with
+                            | Error error -> Error error
+                            | Ok response ->
+                                info_of_response ~stream:consumer.stream
+                                  ~expected_name:consumer.name response))))))
 
   let delete ?timeout consumer =
     let subject =

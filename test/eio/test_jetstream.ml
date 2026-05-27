@@ -505,6 +505,61 @@ let () =
               fail
                 (Format.asprintf "unexpected replica error: %a"
                    Nats_eio.Jetstream.Error.pp_config error)));
+      test "consumer config updaters preserve modeled fields" (fun () ->
+          let span = Mtime.Span.of_uint64_ns 1_000_000L in
+          let subject = Nats.Subject.literal "orders.push" in
+          let group = Nats.Queue_group.literal "workers" in
+          let filter = Nats.Subject.Filter.literal "orders.*" in
+          let config =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"worker"
+                 ~description:"before" ~deliver_subject:subject
+                 ~deliver_group:group ~idle_heartbeat:span ~flow_control:true
+                 ~deliver_policy:
+                   (Nats_eio.Jetstream.Consumer.Config.By_start_sequence 1L)
+                 ~ack_policy:Nats_eio.Jetstream.Consumer.Config.All
+                 ~ack_wait:span ~max_deliver:5 ~filter_subject:filter
+                 ~replay_policy:Nats_eio.Jetstream.Consumer.Config.Original
+                 ~max_ack_pending:(-1) ~max_waiting:10 ~max_batch:5
+                 ~max_expires:span ~max_bytes:1024 ~headers_only:true
+                 ~inactive_threshold:span ~mem_storage:true ())
+          in
+          let described =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Consumer.Config.with_description config
+                 (Some "after"))
+          in
+          equal (option string) (Some "after")
+            (Nats_eio.Jetstream.Consumer.Config.description described);
+          equal (option int) (Some (-1))
+            (Nats_eio.Jetstream.Consumer.Config.max_ack_pending described);
+          let cleared_group =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Consumer.Config.with_deliver_group described
+                 None)
+          in
+          let cleared_subject =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Consumer.Config.with_deliver_subject
+                 cleared_group None)
+          in
+          (match
+             Nats_eio.Jetstream.Consumer.Config.deliver_subject cleared_subject
+           with
+          | None -> ()
+          | Some _ -> fail "consumer config updater retained delivery subject");
+          (match
+             Nats_eio.Jetstream.Consumer.Config.deliver_group cleared_subject
+           with
+          | None -> ()
+          | Some _ -> fail "consumer config updater retained delivery group");
+          let defaulted =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Consumer.Config.with_max_ack_pending
+                 cleared_subject None)
+          in
+          equal (option int) None
+            (Nats_eio.Jetstream.Consumer.Config.max_ack_pending defaulted));
       test "stream create emits retained config fields" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
@@ -723,6 +778,140 @@ let () =
                     { name = "JSSequence"; value = "not-a-number" } ->
                     true
                 | _ -> false);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test
+        "consumer update uses the action envelope and preserves unknown \
+         configuration" (fun () ->
+          let info_response, info_response_u = Eio.Promise.create () in
+          let update_info_response, update_info_response_u =
+            Eio.Promise.create ()
+          in
+          let update_response, update_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await info_response;
+                `Await update_info_response;
+                `Await update_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
+              in
+              let consumer =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Consumer.bind stream ~name:"worker")
+              in
+              let mismatched =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"other" ())
+              in
+              expect_jetstream_error
+                (Nats_eio.Jetstream.Consumer.update consumer mismatched)
+                (function
+                | Nats_eio.Jetstream.Error.Unexpected_consumer_name
+                    { expected = "worker"; actual = "other" } ->
+                    true
+                | _ -> false);
+              let info_result, info_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve info_result_u
+                    (Nats_eio.Jetstream.Consumer.info consumer));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"sample_freq":"10%","metadata":{"owner":"server"}}}|}));
+              let current_info = expect_jetstream_ok (Eio.Promise.await info_result) in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.with_description
+                     (Nats_eio.Jetstream.Consumer.Info.config current_info)
+                     (Some "updated"))
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.with_durable_name config
+                     None)
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.with_max_deliver config
+                     (Some 7))
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.update consumer config));
+              yield_n 5;
+              Eio.Promise.resolve update_info_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:2
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"sample_freq":"10%","metadata":{"owner":"server"}}}|}));
+              yield_n 5;
+              let trace = Buffer.contents trace in
+              if
+                not
+                  (contains_substring
+                     ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS.worker"
+                     trace)
+              then fail "consumer update was not sent to the named CREATE API";
+              if contains_substring ~needle:"CONSUMER.UPDATE" trace then
+                fail "consumer update used an unsupported UPDATE subject";
+              if
+                not
+                  (contains_substring ~needle:"\\\"action\\\":\\\"update" trace)
+              then fail "consumer update omitted its action";
+              if
+                not
+                  (contains_substring ~needle:"\\\"stream_name\\\":\\\"ORDERS"
+                     trace)
+              then fail "consumer update omitted the stream name";
+              if
+                not
+                  (contains_substring ~needle:"description\\\":\\\"updated"
+                     trace)
+              then fail "consumer update omitted the changed description";
+              if not (contains_substring ~needle:"max_deliver\\\":7" trace) then
+                fail "consumer update omitted the changed delivery limit";
+              if
+                not (contains_substring ~needle:"max_ack_pending\\\":-1" trace)
+              then fail "consumer update reset unlimited ack pending";
+              if
+                not
+                  (contains_substring
+                     ~needle:"durable_name\\\":\\\"worker\\\"" trace)
+              then fail "consumer update dropped the durable identity";
+              if
+                not
+                  (contains_substring
+                     ~needle:"metadata\\\":{\\\"owner\\\":\\\"server\\\"}" trace)
+              then fail "consumer update discarded unknown metadata";
+              if
+                not (contains_substring ~needle:"sample_freq\\\":\\\"10%" trace)
+              then fail "consumer update discarded an unknown scalar";
+              Eio.Promise.resolve update_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:3
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"updated","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":7,"max_ack_pending":-1,"sample_freq":"10%","metadata":{"owner":"server"}},"num_pending":3}|}));
+              let info = expect_jetstream_ok (Eio.Promise.await result) in
+              equal (option string) (Some "updated")
+                (Nats_eio.Jetstream.Consumer.Config.description
+                   (Nats_eio.Jetstream.Consumer.Info.config info));
+              equal (option int) (Some 7)
+                (Nats_eio.Jetstream.Consumer.Config.max_deliver
+                   (Nats_eio.Jetstream.Consumer.Info.config info));
+              equal (option int) (Some (-1))
+                (Nats_eio.Jetstream.Consumer.Config.max_ack_pending
+                   (Nats_eio.Jetstream.Consumer.Info.config info));
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream purge sends a filtered request and returns the count" (fun () ->

@@ -376,6 +376,8 @@ module Consumer : sig
     val filter_subject : t -> Nats.Subject.Filter.t option
     val replay_policy : t -> replay_policy
     val max_ack_pending : t -> int option
+    (** [Some (-1)] means unlimited; [None] leaves the server default when a
+        consumer is created. *)
     val max_waiting : t -> int option
     val max_batch : t -> int option
     val max_expires : t -> Mtime.Span.t option
@@ -383,6 +385,74 @@ module Consumer : sig
     val headers_only : t -> bool option
     val inactive_threshold : t -> Mtime.Span.t option
     val mem_storage : t -> bool option
+
+    val with_durable_name : t -> string option -> (t, error) result
+    (** [with_durable_name config value] replaces the durable identity. *)
+
+    val with_description : t -> string option -> (t, error) result
+    (** [with_description config value] replaces the consumer description. *)
+
+    val with_deliver_subject :
+      t -> Nats.Subject.t option -> (t, error) result
+    (** [with_deliver_subject config value] replaces the push delivery subject.
+    *)
+
+    val with_deliver_group :
+      t -> Nats.Queue_group.t option -> (t, error) result
+    (** [with_deliver_group config value] replaces the push queue group. *)
+
+    val with_idle_heartbeat :
+      t -> Mtime.Span.t option -> (t, error) result
+    (** [with_idle_heartbeat config value] replaces the idle heartbeat. *)
+
+    val with_flow_control : t -> bool option -> (t, error) result
+    (** [with_flow_control config value] replaces flow control. *)
+
+    val with_deliver_policy : t -> deliver_policy -> (t, error) result
+    (** [with_deliver_policy config value] replaces the delivery policy. *)
+
+    val with_ack_policy : t -> ack_policy -> (t, error) result
+    (** [with_ack_policy config value] replaces the acknowledgement policy. *)
+
+    val with_ack_wait : t -> Mtime.Span.t option -> (t, error) result
+    (** [with_ack_wait config value] replaces the acknowledgement timeout. *)
+
+    val with_max_deliver : t -> int option -> (t, error) result
+    (** [with_max_deliver config value] replaces the delivery-attempt limit. *)
+
+    val with_filter_subject :
+      t -> Nats.Subject.Filter.t option -> (t, error) result
+    (** [with_filter_subject config value] replaces the subject filter. *)
+
+    val with_replay_policy : t -> replay_policy -> (t, error) result
+    (** [with_replay_policy config value] replaces the replay policy. *)
+
+    val with_max_ack_pending : t -> int option -> (t, error) result
+    (** [with_max_ack_pending config value] replaces the outstanding-ack limit.
+        [Some (-1)] means unlimited and [None] leaves the server default when
+        creating a consumer. *)
+
+    val with_max_waiting : t -> int option -> (t, error) result
+    (** [with_max_waiting config value] replaces the waiting-pull limit. *)
+
+    val with_max_batch : t -> int option -> (t, error) result
+    (** [with_max_batch config value] replaces the pull batch limit. *)
+
+    val with_max_expires : t -> Mtime.Span.t option -> (t, error) result
+    (** [with_max_expires config value] replaces the pull expiry limit. *)
+
+    val with_max_bytes : t -> int option -> (t, error) result
+    (** [with_max_bytes config value] replaces the pull byte limit. *)
+
+    val with_headers_only : t -> bool option -> (t, error) result
+    (** [with_headers_only config value] replaces headers-only delivery. *)
+
+    val with_inactive_threshold :
+      t -> Mtime.Span.t option -> (t, error) result
+    (** [with_inactive_threshold config value] replaces inactivity cleanup. *)
+
+    val with_mem_storage : t -> bool option -> (t, error) result
+    (** [with_mem_storage config value] replaces consumer state storage. *)
   end
 
   module Info : sig
@@ -417,6 +487,18 @@ module Consumer : sig
     ?timeout:Mtime.Span.t -> stream -> Config.t -> (t, Error.t) result
   (** [create ?timeout stream config] creates a server-side consumer and
       returns its name. *)
+
+  val update :
+    ?timeout:Mtime.Span.t -> t -> Config.t -> (Info.t, Error.t) result
+  (** [update ?timeout consumer config] applies the modeled fields in [config]
+      to an existing consumer and returns its resulting information. The
+      configuration is a full replacement of the fields modeled by {!Config.t};
+      use the {!Config.with_description} family to derive a replacement from
+      {!Info.config}. The operation reads the current server configuration first
+      and preserves fields not modeled by {!Config.t}. The consumer identity
+      remains tied to [name consumer]; a supplied durable name must match it,
+      while an omitted durable name retains an existing durable identity.
+      Concurrent changes use last-writer-wins semantics. *)
 
   val list : stream -> (Info.t list, Error.t) result
   (** [list stream] returns detailed information for all consumers on [stream].
