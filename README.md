@@ -57,9 +57,9 @@ replacement cleanup, sealing, and bucket policy updates for replicas, placement,
 compression, and stream metadata. `Nats_eio.Key_value` provides revisioned
 values, compare-and-set mutations, finite scans, history, and cancellable
 watches. `Nats_eio.Service` provides typed endpoint workers, queue groups,
-`$SRV.*` monitoring, request/service-error replies, statistics, replayable
-subscriptions, and service-local draining. Real cluster and cross-SDK
-interoperability coverage remain in the final acceptance phase.
+`$SRV.*` monitoring and fan-out discovery, request/service-error replies,
+statistics, replayable subscriptions, and service-local draining. Real cluster
+and cross-SDK interoperability coverage remain in the final acceptance phase.
 
 The project uses Dune package management. No compatibility layer for NATS
 Streaming is planned.

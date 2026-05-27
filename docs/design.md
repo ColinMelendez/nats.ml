@@ -671,8 +671,9 @@ These modules should be layered over `Connection.request` and
 - `Nats_eio.Service` provides typed service identity, endpoint/group values,
   queue-backed workers, request and service-error replies, `$SRV.PING`,
   `$SRV.INFO`, and `$SRV.STATS` monitoring, replayable subscriptions, service
-  statistics, and service-local draining. Real-server and cross-SDK acceptance
-  remain stability work for these durable and service layers.
+  statistics, service-local draining, and resource-free fan-out discovery with
+  typed response decoding. Real-server and cross-SDK acceptance remain
+  stability work for these durable and service layers.
 
 JetStream consumers deserve particular care. Pull consumption is the default
 for new code because it makes demand and backpressure explicit; push consumers
@@ -702,7 +703,8 @@ updates preserve unknown server configuration through an INFO/read-modify-write
 cycle; list operations consume server pagination and fail explicitly on an
 incomplete page. The management prefix is configurable for JetStream domains,
 while application subjects remain ordinary Core NATS subjects. KV, Object
-Store, and Services now compose over the same connection; their real-server
+Store, and Services now compose over the same connection; their local
+discovery, lifecycle, and data-path behavior is implemented, while real-server
 and cross-SDK acceptance remains later stability work.
 
 ## 6. Testing and interoperability

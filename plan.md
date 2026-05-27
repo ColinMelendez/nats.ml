@@ -90,8 +90,8 @@ after gaps, liveness loss, deletion, or non-replayed disconnects while resuming
 from the next stream sequence. Key-Value now provides typed bucket management,
 compare-and-set mutations, finite scans, history, and cancellable watches.
 Services now provide typed endpoint/group values, queue-backed workers,
-request/service-error replies, `$SRV.*` monitoring, statistics, replayable
-subscriptions, and service-local draining. Object Store
+request/service-error replies, `$SRV.*` monitoring and fan-out discovery,
+statistics, replayable subscriptions, and service-local draining. Object Store
 now has a first Eio slice with validated bucket management, direct metadata
 reads, incremental Bytesrw transfers, digest/size/chunk verification,
 deletion, replacement cleanup, bucket policy projection and updates, and
@@ -583,16 +583,20 @@ subscriptions, queue groups, and request/reply.
 - Completed locally: preserve monitoring and endpoint subscriptions across
   reconnect, collect per-endpoint request/error/timing statistics, and keep
   individual handler or response failures from taking down the service.
-- Remaining: discovery, real-server queue balancing, and cross-SDK acceptance.
+- Completed locally: query `$SRV.PING`, `$SRV.INFO`, and `$SRV.STATS` for all
+  services, named services, or individual instances through bounded fan-out
+  collection windows with typed JSON response decoding.
+- Remaining: real-server queue balancing and cross-SDK acceptance.
 
 ### Acceptance tests and gate G6
 
 Local mock-transport tests cover configuration, monitoring wire payloads,
-queue policy, request/service-error replies, statistics, reconnect replay,
-service-local drain, and parent-connection isolation. Run discovery, request
-handling, monitoring, queue balancing, reconnect, and drain tests against a
-real server before G6. Services may start after G2 and do not block JetStream,
-KV, or Object Store. Stabilize only after confirming that all service behavior
+fan-out discovery, malformed response rejection, queue policy,
+request/service-error replies, statistics, reconnect replay, service-local
+drain, and parent-connection isolation. Run discovery, request handling,
+monitoring, queue balancing, reconnect, and drain tests against a real server
+before G6. Services may start after G2 and do not block JetStream, KV, or
+Object Store. Stabilize only after confirming that all service behavior
 composes with the Core connection ownership model.
 
 ## Phase 7 — Operational polish and optional integrations
