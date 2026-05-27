@@ -87,7 +87,11 @@ absolute caller timeouts across control traffic. Ordered sessions now use
 client-managed ephemeral pull consumers, force no-ack memory-backed
 configuration, validate consumer sequence continuity, and recreate consumers
 after gaps, liveness loss, deletion, or non-replayed disconnects while resuming
-from the next stream sequence. KV and Services remain later work. Object Store
+from the next stream sequence. Key-Value now provides typed bucket management,
+compare-and-set mutations, finite scans, history, and cancellable watches.
+Services now provide typed endpoint/group values, queue-backed workers,
+request/service-error replies, `$SRV.*` monitoring, statistics, replayable
+subscriptions, and service-local draining. Object Store
 now has a first Eio slice with validated bucket management, direct metadata
 reads, incremental Bytesrw transfers, digest/size/chunk verification,
 deletion, replacement cleanup, bucket policy projection and updates, and
@@ -520,11 +524,13 @@ semantics before calling the feature complete.
 
 ### Workstream 5A — Key-Value
 
-- Add bucket create/open/status and typed entry/operation/revision values.
-- Implement get, put, create/update compare-and-set, delete, purge, history,
-  keys, TTL, and cancellable watches.
+- Completed locally: add bucket create/open/status and typed
+  entry/operation/revision values; implement get, put, create/update
+  compare-and-set, delete, purge, history, finite scans, TTL, keys, and
+  cancellable watches.
 - Preserve watch ordering and expose bucket/key/value/revision/timestamp/
   operation without requiring callers to parse JetStream messages.
+- Remaining: real-server and cross-SDK acceptance.
 
 ### Workstream 5B — Object Store
 
@@ -543,8 +549,9 @@ semantics before calling the feature complete.
 
 ### Acceptance tests
 
-- KV CAS success/failure, revisions, history, TTL, deletes/purges, and watches.
-- Watch cancellation and ordering under reconnect.
+- KV CAS success/failure, revisions, history, TTL, deletes/purges, finite
+  scans, and watches are covered locally through the Eio mock transport.
+- Watch cancellation and ordering under reconnect are covered locally.
 - Large Object Store transfer, metadata, replacement/deletion ordering,
   interrupted-transfer cleanup, listing/watch boundaries, links, rename,
   sealing, and bucket configuration updates are covered locally; server
@@ -567,19 +574,26 @@ subscriptions, queue groups, and request/reply.
 
 ### Work
 
-- Define service, endpoint, and group values with consistent metadata.
-- Implement queue-backed endpoint workers and typed request handlers.
-- Implement `$SRV.PING`, `$SRV.INFO`, and `$SRV.STATS` discovery/monitoring
-  responses.
-- Make service shutdown use the same subscription and connection drain
-  semantics; do not introduce a second lifecycle manager.
+- Completed locally: define service, endpoint, and group values with
+  consistent metadata; implement queue-backed endpoint workers and typed
+  result-returning request handlers; implement `$SRV.PING`, `$SRV.INFO`, and
+  `$SRV.STATS` monitoring responses; and make service shutdown use the same
+  subscription and connection drain semantics without a second lifecycle
+  manager.
+- Completed locally: preserve monitoring and endpoint subscriptions across
+  reconnect, collect per-endpoint request/error/timing statistics, and keep
+  individual handler or response failures from taking down the service.
+- Remaining: discovery, real-server queue balancing, and cross-SDK acceptance.
 
 ### Acceptance tests and gate G6
 
-Run discovery, request handling, monitoring, queue balancing, reconnect, and
-drain tests against a real server. Services may start after G2 and do not block
-JetStream, KV, or Object Store. Stabilize only after confirming that all
-service behavior composes with the Core connection ownership model.
+Local mock-transport tests cover configuration, monitoring wire payloads,
+queue policy, request/service-error replies, statistics, reconnect replay,
+service-local drain, and parent-connection isolation. Run discovery, request
+handling, monitoring, queue balancing, reconnect, and drain tests against a
+real server before G6. Services may start after G2 and do not block JetStream,
+KV, or Object Store. Stabilize only after confirming that all service behavior
+composes with the Core connection ownership model.
 
 ## Phase 7 — Operational polish and optional integrations
 

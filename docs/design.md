@@ -664,11 +664,15 @@ These modules should be layered over `Connection.request` and
   connection: validated bucket capabilities, direct metadata reads,
   incremental Bytesrw transfers, digest/size/chunk verification, metadata
   updates and links, snapshot/live watches, listing, deletion, replacement
-  cleanup, sealing, and structured operation deadlines. Richer bucket
-  configuration and server interoperability remain later stability work.
-- `Nats_eio.Key_value` and `Nats_eio.Service` remain planned layers over the
-  same connection. Their eventual contracts are described by the
-  implementation plan and must not be treated as implemented by this design.
+  cleanup, sealing, typed bucket policy, read-modify-write updates, and
+  structured operation deadlines.
+- `Nats_eio.Key_value` provides revisioned values, compare-and-set mutations,
+  finite scans, history, and cancellable watches over the same connection.
+- `Nats_eio.Service` provides typed service identity, endpoint/group values,
+  queue-backed workers, request and service-error replies, `$SRV.PING`,
+  `$SRV.INFO`, and `$SRV.STATS` monitoring, replayable subscriptions, service
+  statistics, and service-local draining. Real-server and cross-SDK acceptance
+  remain stability work for these durable and service layers.
 
 JetStream consumers deserve particular care. Pull consumption is the default
 for new code because it makes demand and backpressure explicit; push consumers
@@ -698,8 +702,8 @@ updates preserve unknown server configuration through an INFO/read-modify-write
 cycle; list operations consume server pagination and fail explicitly on an
 incomplete page. The management prefix is configurable for JetStream domains,
 while application subjects remain ordinary Core NATS subjects. KV, Object
-Store, Services, and other advanced flow-control features remain later layers
-over the same connection.
+Store, and Services now compose over the same connection; their real-server
+and cross-SDK acceptance remains later stability work.
 
 ## 6. Testing and interoperability
 
@@ -726,7 +730,8 @@ through individual helper functions:
   idle-heartbeat behavior, timeout/expiry behavior, max-bytes errors, and
   cleanup. Object Store's local transfer, metadata lifecycle, watch/list, link,
   seal, and bucket configuration-update behavior is implemented;
-  real-server/cross-SDK acceptance, KV, and Services remain later work.
+  real-server/cross-SDK acceptance for KV, Object Store, and Services remains
+  later work.
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 
