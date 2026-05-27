@@ -15,6 +15,9 @@ module Error : sig
     | Invalid_consumer_name_character of { position : int; character : char }
     | Invalid_consumer_limit of { field : string; value : int64 }
     | Invalid_consumer_span of { field : string }
+    | Invalid_consumer_sample_frequency of string
+    | Invalid_consumer_rate_limit of int64
+    | Invalid_consumer_replicas of int
     | Invalid_consumer_policy of { field : string; value : string }
 
   type api = { code : int; err_code : int option; description : string }
@@ -351,6 +354,10 @@ module Consumer : sig
       ?ack_wait:Mtime.Span.t ->
       ?max_deliver:int ->
       ?filter_subject:Nats.Subject.Filter.t ->
+      ?sample_frequency:int ->
+      ?rate_limit:int64 ->
+      ?replicas:int ->
+      ?metadata:(string * string) list ->
       ?replay_policy:replay_policy ->
       ?max_ack_pending:int ->
       ?max_waiting:int ->
@@ -374,6 +381,15 @@ module Consumer : sig
     val ack_wait : t -> Mtime.Span.t option
     val max_deliver : t -> int option
     val filter_subject : t -> Nats.Subject.Filter.t option
+    val sample_frequency : t -> int option
+    (** [sample_frequency config] is the delivery sample percentage. *)
+    val rate_limit : t -> int64 option
+    (** [rate_limit config] is the push rate limit in bits per second. *)
+    val replicas : t -> int option
+    (** [replicas config] is the explicit replica count; [None] inherits the
+        stream's replica count. *)
+    val metadata : t -> (string * string) list
+    (** [metadata config] returns consumer metadata. *)
     val replay_policy : t -> replay_policy
     val max_ack_pending : t -> int option
     (** [Some (-1)] means unlimited; [None] leaves the server default when a
@@ -423,6 +439,21 @@ module Consumer : sig
     val with_filter_subject :
       t -> Nats.Subject.Filter.t option -> (t, error) result
     (** [with_filter_subject config value] replaces the subject filter. *)
+
+    val with_sample_frequency : t -> int option -> (t, error) result
+    (** [with_sample_frequency config value] replaces the delivery sample
+        percentage. Values must be non-negative. [None] clears sampling. *)
+
+    val with_rate_limit : t -> int64 option -> (t, error) result
+    (** [with_rate_limit config value] replaces the push rate limit in bits per
+        second. A positive value requires a push delivery subject. *)
+
+    val with_replicas : t -> int option -> (t, error) result
+    (** [with_replicas config value] replaces the explicit replica count. [None]
+        inherits the stream's replica count. *)
+
+    val with_metadata : t -> (string * string) list -> (t, error) result
+    (** [with_metadata config value] replaces consumer metadata. *)
 
     val with_replay_policy : t -> replay_policy -> (t, error) result
     (** [with_replay_policy config value] replaces the replay policy. *)

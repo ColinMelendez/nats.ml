@@ -16,6 +16,9 @@ module Error = struct
     | Invalid_consumer_name_character of { position : int; character : char }
     | Invalid_consumer_limit of { field : string; value : int64 }
     | Invalid_consumer_span of { field : string }
+    | Invalid_consumer_sample_frequency of string
+    | Invalid_consumer_rate_limit of int64
+    | Invalid_consumer_replicas of int
     | Invalid_consumer_policy of { field : string; value : string }
 
   type api = { code : int; err_code : int option; description : string }
@@ -83,6 +86,14 @@ module Error = struct
         Format.fprintf ppf "invalid consumer %s limit %Ld" field value
     | Invalid_consumer_span { field } ->
         Format.fprintf ppf "consumer %s must be positive" field
+    | Invalid_consumer_sample_frequency value ->
+        Format.fprintf ppf
+          "consumer sample frequency %S must be a non-negative integer" value
+    | Invalid_consumer_rate_limit value ->
+        Format.fprintf ppf "consumer rate limit must not be negative, got %Ld"
+          value
+    | Invalid_consumer_replicas value ->
+        Format.fprintf ppf "consumer replicas must not be negative, got %d" value
     | Invalid_consumer_policy { field; value } ->
         Format.fprintf ppf "invalid consumer %s policy %S" field value
 
@@ -1502,6 +1513,10 @@ module Consumer = struct
       ack_wait : Mtime.Span.t option;
       max_deliver : int option;
       filter_subject : Nats.Subject.Filter.t option;
+      sample_frequency : int option;
+      rate_limit : int64 option;
+      replicas : int option;
+      metadata : (string * string) list;
       replay_policy : replay_policy;
       max_ack_pending : int option;
       max_waiting : int option;
@@ -1570,12 +1585,28 @@ module Consumer = struct
             (Error.Invalid_consumer_policy { field = "opt_start_time"; value })
       | _ -> Ok ()
 
+    let validate_sample_frequency = function
+      | None -> Ok ()
+      | Some value when value >= 0 -> Ok ()
+      | Some value ->
+          Error (Error.Invalid_consumer_sample_frequency (Int.to_string value))
+
+    let validate_rate_limit = function
+      | None -> Ok ()
+      | Some value when Int64.compare value 0L >= 0 -> Ok ()
+      | Some value -> Error (Error.Invalid_consumer_rate_limit value)
+
+    let validate_replicas = function
+      | None -> Ok ()
+      | Some value when value >= 0 -> Ok ()
+      | Some value -> Error (Error.Invalid_consumer_replicas value)
+
     let v ?durable_name ?description ?deliver_subject ?deliver_group
         ?idle_heartbeat ?flow_control ?(deliver_policy = All)
         ?(ack_policy = Explicit) ?ack_wait ?max_deliver ?filter_subject
+        ?sample_frequency ?rate_limit ?replicas ?(metadata = [])
         ?(replay_policy = Instant) ?max_ack_pending ?max_waiting ?max_batch
-        ?max_expires ?max_bytes ?headers_only ?inactive_threshold ?mem_storage
-        () =
+        ?max_expires ?max_bytes ?headers_only ?inactive_threshold ?mem_storage () =
       let max_expires = normalize_span max_expires in
       let inactive_threshold = normalize_span inactive_threshold in
       let idle_heartbeat = normalize_span idle_heartbeat in
@@ -1592,6 +1623,17 @@ module Consumer = struct
         | _ -> Ok ()
       in
       let* () = validate_deliver_policy deliver_policy in
+      let* () = validate_sample_frequency sample_frequency in
+      let* () = validate_rate_limit rate_limit in
+      let* () = validate_replicas replicas in
+      let* () =
+        match (deliver_subject, rate_limit) with
+        | None, Some value when Int64.compare value 0L > 0 ->
+            Error
+              (Error.Invalid_consumer_policy
+                 { field = "rate_limit"; value = "requires deliver_subject" })
+        | _ -> Ok ()
+      in
       let* () =
         validate_span
           (Error.Invalid_consumer_span { field = "ack_wait" })
@@ -1630,6 +1672,10 @@ module Consumer = struct
           ack_wait;
           max_deliver;
           filter_subject;
+          sample_frequency;
+          rate_limit;
+          replicas;
+          metadata;
           replay_policy;
           max_ack_pending;
           max_waiting;
@@ -1652,6 +1698,10 @@ module Consumer = struct
     let ack_wait value = value.ack_wait
     let max_deliver value = value.max_deliver
     let filter_subject value = value.filter_subject
+    let sample_frequency value = value.sample_frequency
+    let rate_limit value = value.rate_limit
+    let replicas value = value.replicas
+    let metadata value = value.metadata
     let replay_policy value = value.replay_policy
     let max_ack_pending value = value.max_ack_pending
     let max_waiting value = value.max_waiting
@@ -1664,14 +1714,34 @@ module Consumer = struct
 
     let rebuild ~durable_name ~description ~deliver_subject ~deliver_group
         ~idle_heartbeat ~flow_control ~deliver_policy ~ack_policy ~ack_wait
-        ~max_deliver ~filter_subject ~replay_policy ~max_ack_pending ~max_waiting
-        ~max_batch ~max_expires ~max_bytes ~headers_only ~inactive_threshold
-        ~mem_storage =
+        ~max_deliver ~filter_subject ~sample_frequency ~rate_limit ~replicas
+        ~metadata ~replay_policy ~max_ack_pending ~max_waiting ~max_batch
+        ~max_expires ~max_bytes ~headers_only ~inactive_threshold ~mem_storage =
       v ?durable_name ?description ?deliver_subject ?deliver_group
         ?idle_heartbeat ?flow_control ~deliver_policy ~ack_policy ?ack_wait
-        ?max_deliver ?filter_subject ~replay_policy ?max_ack_pending ?max_waiting
-        ?max_batch ?max_expires ?max_bytes ?headers_only ?inactive_threshold
-        ?mem_storage ()
+        ?max_deliver ?filter_subject ?sample_frequency ?rate_limit ?replicas
+        ~metadata ~replay_policy ?max_ack_pending ?max_waiting ?max_batch
+        ?max_expires ?max_bytes ?headers_only ?inactive_threshold ?mem_storage ()
+
+    let rebuild_modern value ~sample_frequency ~rate_limit ~replicas ~metadata =
+      let sample_frequency =
+        Option.value ~default:value.sample_frequency sample_frequency
+      in
+      let rate_limit = Option.value ~default:value.rate_limit rate_limit in
+      let replicas = Option.value ~default:value.replicas replicas in
+      let metadata = Option.value ~default:value.metadata metadata in
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~sample_frequency ~rate_limit
+        ~replicas ~metadata ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
 
     let with_durable_name value durable_name =
       rebuild ~durable_name ~description:value.description
@@ -1680,6 +1750,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1693,6 +1765,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1706,6 +1780,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1719,6 +1795,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1732,6 +1810,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1745,6 +1825,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1758,6 +1840,8 @@ module Consumer = struct
         ~deliver_policy ~ack_policy:value.ack_policy ~ack_wait:value.ack_wait
         ~max_deliver:value.max_deliver ~filter_subject:value.filter_subject
         ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1771,6 +1855,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy ~ack_wait:value.ack_wait
         ~max_deliver:value.max_deliver ~filter_subject:value.filter_subject
         ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1784,6 +1870,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1797,6 +1885,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1810,11 +1900,33 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
         ~mem_storage:value.mem_storage
+
+    let with_sample_frequency value (sample_frequency : int option) =
+      rebuild_modern value ~sample_frequency:(Some sample_frequency)
+        ~rate_limit:(Some value.rate_limit) ~replicas:(Some value.replicas)
+        ~metadata:(Some value.metadata)
+
+    let with_rate_limit value (rate_limit : int64 option) =
+      rebuild_modern value ~sample_frequency:(Some value.sample_frequency)
+        ~rate_limit:(Some rate_limit) ~replicas:(Some value.replicas)
+        ~metadata:(Some value.metadata)
+
+    let with_replicas value (replicas : int option) =
+      rebuild_modern value ~sample_frequency:(Some value.sample_frequency)
+        ~rate_limit:(Some value.rate_limit) ~replicas:(Some replicas)
+        ~metadata:(Some value.metadata)
+
+    let with_metadata value metadata =
+      rebuild_modern value ~sample_frequency:(Some value.sample_frequency)
+        ~rate_limit:(Some value.rate_limit) ~replicas:(Some value.replicas)
+        ~metadata:(Some metadata)
 
     let with_replay_policy value replay_policy =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -1823,6 +1935,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1836,6 +1950,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1849,6 +1965,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1862,6 +1980,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1875,6 +1995,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires ~max_bytes:value.max_bytes
         ~headers_only:value.headers_only
@@ -1888,6 +2010,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires ~max_bytes
         ~headers_only:value.headers_only
@@ -1901,6 +2025,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only
@@ -1914,6 +2040,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1926,6 +2054,8 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1946,6 +2076,10 @@ module Consumer = struct
     ack_wait : int64 option;
     max_deliver : int option;
     filter_subject : string option;
+    sample_frequency : string option;
+    rate_limit : int64 option;
+    replicas : int option;
+    metadata : string String_map.t option;
     replay_policy : Config.replay_policy;
     max_ack_pending : int option;
     max_waiting : int option;
@@ -1969,6 +2103,49 @@ module Consumer = struct
   let replay_policy_codec =
     Jsont.enum [ ("instant", Config.Instant); ("original", Config.Original) ]
 
+  let metadata_codec = Jsont.Object.as_string_map Jsont.string
+
+  let metadata_to_wire metadata =
+    let values =
+      List.fold_left
+        (fun values (name, value) -> String_map.add name value values)
+        String_map.empty metadata
+    in
+    if String_map.is_empty values then None else Some values
+
+  let metadata_of_wire metadata =
+    match metadata with None -> [] | Some values -> String_map.bindings values
+
+  let sample_frequency_to_wire =
+    Option.map (fun value -> Int.to_string value ^ "%")
+
+  let sample_frequency_of_wire = function
+    | None | Some "" -> Ok None
+    | Some raw ->
+        let length = String.length raw in
+        let digits_length =
+          if length > 0 && Char.equal (String.get raw (length - 1)) '%' then
+            length - 1
+          else length
+        in
+        let invalid = ref (Int.equal digits_length 0) in
+        for position = 0 to digits_length - 1 do
+          let character = String.get raw position in
+          if character < '0' || character > '9' then invalid := true
+        done;
+        if !invalid then
+          Error
+            (Error.Invalid_config
+               (Error.Invalid_consumer_sample_frequency raw))
+        else
+          match int_of_string_opt (String.sub raw 0 digits_length) with
+          | None ->
+              Error
+                (Error.Invalid_config
+                   (Error.Invalid_consumer_sample_frequency raw))
+          | Some 0 -> Ok None
+          | Some value -> Ok (Some value)
+
   let wire_config_codec =
     Jsont.Object.map ~kind:"JetStream consumer config"
       (fun
@@ -1985,6 +2162,10 @@ module Consumer = struct
         ack_wait
         max_deliver
         filter_subject
+        sample_frequency
+        rate_limit
+        replicas
+        metadata
         replay_policy
         max_ack_pending
         max_waiting
@@ -2010,6 +2191,10 @@ module Consumer = struct
           ack_wait;
           max_deliver;
           filter_subject;
+          sample_frequency;
+          rate_limit;
+          replicas;
+          metadata;
           replay_policy;
           max_ack_pending;
           max_waiting;
@@ -2047,6 +2232,14 @@ module Consumer = struct
         value.max_deliver)
     |> Jsont.Object.opt_mem "filter_subject" Jsont.string ~enc:(fun value ->
         value.filter_subject)
+    |> Jsont.Object.opt_mem "sample_freq" Jsont.string ~enc:(fun value ->
+        value.sample_frequency)
+    |> Jsont.Object.opt_mem "rate_limit_bps" Jsont.int64 ~enc:(fun value ->
+        value.rate_limit)
+    |> Jsont.Object.opt_mem "num_replicas" Jsont.int ~enc:(fun value ->
+        value.replicas)
+    |> Jsont.Object.opt_mem "metadata" metadata_codec ~enc:(fun value ->
+        value.metadata)
     |> Jsont.Object.mem "replay_policy" replay_policy_codec ~enc:(fun value ->
         value.replay_policy)
     |> Jsont.Object.opt_mem "max_ack_pending" Jsont.int ~enc:(fun value ->
@@ -2116,6 +2309,11 @@ module Consumer = struct
       max_deliver = Config.max_deliver value;
       filter_subject =
         Option.map Nats.Subject.Filter.to_string (Config.filter_subject value);
+      sample_frequency =
+        sample_frequency_to_wire (Config.sample_frequency value);
+      rate_limit = Config.rate_limit value;
+      replicas = Config.replicas value;
+      metadata = metadata_to_wire (Config.metadata value);
       replay_policy = Config.replay_policy value;
       max_ack_pending = Config.max_ack_pending value;
       max_waiting = Config.max_waiting value;
@@ -2180,6 +2378,13 @@ module Consumer = struct
     let idle_heartbeat =
       Option.map Mtime.Span.of_uint64_ns value.idle_heartbeat
     in
+    let sample_frequency = sample_frequency_of_wire value.sample_frequency in
+    let replicas =
+      match value.replicas with Some 0 -> None | replicas -> replicas
+    in
+    let rate_limit =
+      match value.rate_limit with Some 0L -> None | rate_limit -> rate_limit
+    in
     match deliver_policy with
     | Error error -> Error error
     | Ok deliver_policy -> (
@@ -2192,34 +2397,42 @@ module Consumer = struct
                 match deliver_group with
                 | Error error -> Error error
                 | Ok deliver_group -> (
-                    let ack_wait =
-                      Option.map Mtime.Span.of_uint64_ns value.ack_wait
-                    in
-                    let max_expires =
-                      Option.map Mtime.Span.of_uint64_ns value.max_expires
-                    in
-                    let inactive_threshold =
-                      Option.map Mtime.Span.of_uint64_ns
-                        value.inactive_threshold
-                    in
-                    let max_deliver = normalize_max_deliver value.max_deliver in
-                    let max_ack_pending = value.max_ack_pending in
-                    let max_waiting = value.max_waiting in
-                    let max_batch = value.max_batch in
-                    let max_bytes = value.max_bytes in
-                    match
-                      Config.v ?durable_name:value.durable_name
-                        ?description:value.description ?deliver_subject
-                        ?deliver_group ?idle_heartbeat
-                        ?flow_control:value.flow_control ~deliver_policy
-                        ~ack_policy:value.ack_policy ?ack_wait ?max_deliver
-                        ?filter_subject ~replay_policy:value.replay_policy
-                        ?max_ack_pending ?max_waiting ?max_batch ?max_expires
-                        ?max_bytes ?headers_only:value.headers_only
-                        ?inactive_threshold ?mem_storage:value.mem_storage ()
-                    with
-                    | Ok config -> Ok (config, value.unknown)
-                    | Error error -> Error (Error.Invalid_config error)))))
+                    match sample_frequency with
+                    | Error error -> Error error
+                    | Ok sample_frequency -> (
+                        let ack_wait =
+                          Option.map Mtime.Span.of_uint64_ns value.ack_wait
+                        in
+                        let max_expires =
+                          Option.map Mtime.Span.of_uint64_ns value.max_expires
+                        in
+                        let inactive_threshold =
+                          Option.map Mtime.Span.of_uint64_ns
+                            value.inactive_threshold
+                        in
+                        let max_deliver =
+                          normalize_max_deliver value.max_deliver
+                        in
+                        let max_ack_pending = value.max_ack_pending in
+                        let max_waiting = value.max_waiting in
+                        let max_batch = value.max_batch in
+                        let max_bytes = value.max_bytes in
+                        match
+                          Config.v ?durable_name:value.durable_name
+                            ?description:value.description ?deliver_subject
+                            ?deliver_group ?idle_heartbeat
+                            ?flow_control:value.flow_control ~deliver_policy
+                            ~ack_policy:value.ack_policy ?ack_wait ?max_deliver
+                            ?filter_subject ?sample_frequency
+                            ?rate_limit ?replicas
+                            ~metadata:(metadata_of_wire value.metadata)
+                            ~replay_policy:value.replay_policy ?max_ack_pending
+                            ?max_waiting ?max_batch ?max_expires ?max_bytes
+                            ?headers_only:value.headers_only ?inactive_threshold
+                            ?mem_storage:value.mem_storage ()
+                        with
+                        | Ok config -> Ok (config, value.unknown)
+                        | Error error -> Error (Error.Invalid_config error))))))
 
   type wire_sequence = {
     consumer_sequence : int64 option;
@@ -2447,6 +2660,7 @@ module Consumer = struct
                         })))
 
   let wire_config_for_update ~current value =
+    let metadata = Config.metadata value in
     let value = wire_config value in
     {
       value with
@@ -2457,6 +2671,14 @@ module Consumer = struct
       idle_heartbeat = Some (Option.value ~default:0L value.idle_heartbeat);
       ack_wait = Some (Option.value ~default:0L value.ack_wait);
       max_deliver = Some (Option.value ~default:(-1) value.max_deliver);
+      sample_frequency =
+        Some (Option.value ~default:"0%" value.sample_frequency);
+      rate_limit = Some (Option.value ~default:0L value.rate_limit);
+      replicas = Some (Option.value ~default:0 value.replicas);
+      metadata =
+        Some
+          (Option.value ~default:String_map.empty
+             (metadata_to_wire metadata));
       max_ack_pending = Some (Option.value ~default:0 value.max_ack_pending);
       max_waiting = Some (Option.value ~default:0 value.max_waiting);
       max_batch = Some (Option.value ~default:0 value.max_batch);

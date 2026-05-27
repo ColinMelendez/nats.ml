@@ -338,6 +338,24 @@ let substring_position ~needle value =
   done;
   !result
 
+let nth_substring_position ~needle ~occurrence value =
+  let needle_length = String.length needle in
+  let limit = String.length value - needle_length in
+  let index = ref 0 in
+  let seen = ref 0 in
+  let result = ref None in
+  while
+    needle_length > 0 && occurrence > 0 && Option.is_none !result
+    && !index <= limit
+  do
+    if String.equal (String.sub value !index needle_length) needle then (
+      incr seen;
+      if Int.equal !seen occurrence then result := Some !index
+      else index := !index + needle_length)
+    else incr index
+  done;
+  !result
+
 let count_substring ~needle value =
   let needle_length = String.length needle in
   let limit = String.length value - needle_length in
@@ -519,6 +537,8 @@ let () =
                    (Nats_eio.Jetstream.Consumer.Config.By_start_sequence 1L)
                  ~ack_policy:Nats_eio.Jetstream.Consumer.Config.All
                  ~ack_wait:span ~max_deliver:5 ~filter_subject:filter
+                 ~sample_frequency:10 ~rate_limit:64000L ~replicas:3
+                 ~metadata:[ ("owner", "server") ]
                  ~replay_policy:Nats_eio.Jetstream.Consumer.Config.Original
                  ~max_ack_pending:(-1) ~max_waiting:10 ~max_batch:5
                  ~max_expires:span ~max_bytes:1024 ~headers_only:true
@@ -533,10 +553,49 @@ let () =
             (Nats_eio.Jetstream.Consumer.Config.description described);
           equal (option int) (Some (-1))
             (Nats_eio.Jetstream.Consumer.Config.max_ack_pending described);
+          equal (option int) (Some 10)
+            (Nats_eio.Jetstream.Consumer.Config.sample_frequency described);
+          equal (option int64) (Some 64000L)
+            (Nats_eio.Jetstream.Consumer.Config.rate_limit described);
+          equal (option int) (Some 3)
+            (Nats_eio.Jetstream.Consumer.Config.replicas described);
+          (match Nats_eio.Jetstream.Consumer.Config.metadata described with
+          | [ ("owner", "server") ] -> ()
+          | _ -> fail "consumer config updater lost metadata");
+          let cleared_sample_frequency =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Consumer.Config.with_sample_frequency
+                 described None)
+          in
+          let cleared_rate_limit =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Consumer.Config.with_rate_limit
+                 cleared_sample_frequency None)
+          in
+          let cleared_replicas =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Consumer.Config.with_replicas
+                 cleared_rate_limit None)
+          in
+          let cleared_metadata =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Consumer.Config.with_metadata cleared_replicas
+                 [])
+          in
+          equal (option int) None
+            (Nats_eio.Jetstream.Consumer.Config.sample_frequency
+               cleared_metadata);
+          equal (option int64) None
+            (Nats_eio.Jetstream.Consumer.Config.rate_limit cleared_metadata);
+          equal (option int) None
+            (Nats_eio.Jetstream.Consumer.Config.replicas cleared_metadata);
+          (match Nats_eio.Jetstream.Consumer.Config.metadata cleared_metadata with
+          | [] -> ()
+          | _ -> fail "consumer config updater retained metadata");
           let cleared_group =
             expect_jetstream_config_ok
-              (Nats_eio.Jetstream.Consumer.Config.with_deliver_group described
-                 None)
+              (Nats_eio.Jetstream.Consumer.Config.with_deliver_group
+                 cleared_metadata None)
           in
           let cleared_subject =
             expect_jetstream_config_ok
@@ -560,6 +619,81 @@ let () =
           in
           equal (option int) None
             (Nats_eio.Jetstream.Consumer.Config.max_ack_pending defaulted));
+      test "consumer scalar configuration validates server limits" (fun () ->
+          (match
+             Nats_eio.Jetstream.Consumer.Config.v ~sample_frequency:(-1) ()
+           with
+          | Error
+              (Nats_eio.Jetstream.Error.Invalid_consumer_sample_frequency
+                "-1") ->
+              ()
+          | _ -> fail "consumer config accepted an invalid sample frequency");
+          (match Nats_eio.Jetstream.Consumer.Config.v ~rate_limit:(-1L) () with
+          | Error (Nats_eio.Jetstream.Error.Invalid_consumer_rate_limit (-1L)) ->
+              ()
+          | _ -> fail "consumer config accepted a negative rate limit");
+          (match Nats_eio.Jetstream.Consumer.Config.v ~replicas:(-1) () with
+          | Error (Nats_eio.Jetstream.Error.Invalid_consumer_replicas (-1)) ->
+              ()
+          | _ -> fail "consumer config accepted negative replicas");
+          match Nats_eio.Jetstream.Consumer.Config.v ~rate_limit:1L () with
+          | Error
+              (Nats_eio.Jetstream.Error.Invalid_consumer_policy
+                { field = "rate_limit"; value = "requires deliver_subject" }) ->
+              ()
+          | _ -> fail "consumer config accepted pull rate limiting");
+      test "consumer create emits modern config fields" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.v
+                     ~durable_name:"worker"
+                     ~deliver_subject:(Nats.Subject.literal "orders.push")
+                     ~sample_frequency:25 ~rate_limit:65536L ~replicas:3
+                     ~metadata:[ ("owner", "client") ] ())
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.create stream config));
+              yield_n 5;
+              let trace = Buffer.contents trace in
+              if
+                not
+                  (contains_substring
+                     ~needle:"CONSUMER.CREATE.ORDERS.worker" trace)
+              then fail "consumer create was not sent";
+              if not (contains_substring ~needle:"sample_freq\\\":\\\"25%" trace)
+              then fail "consumer create omitted sample frequency";
+              if not (contains_substring ~needle:"rate_limit_bps\\\":65536" trace)
+              then fail "consumer create omitted rate limit";
+              if not (contains_substring ~needle:"num_replicas\\\":3" trace)
+              then fail "consumer create omitted replica count";
+              if
+                not
+                  (contains_substring
+                     ~needle:"metadata\\\":{\\\"owner\\\":\\\"client\\\"}"
+                     trace)
+              then fail "consumer create omitted metadata";
+              Eio.Promise.resolve response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","sample_freq":"25%","rate_limit_bps":65536,"num_replicas":3,"metadata":{"owner":"client"},"replay_policy":"instant"}}|}));
+              let consumer = expect_jetstream_ok (Eio.Promise.await result) in
+              equal string "worker" (Nats_eio.Jetstream.Consumer.name consumer);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream create emits retained config fields" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
@@ -788,6 +922,10 @@ let () =
             Eio.Promise.create ()
           in
           let update_response, update_response_u = Eio.Promise.create () in
+          let preserve_info_response, preserve_info_response_u =
+            Eio.Promise.create ()
+          in
+          let preserve_response, preserve_response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
           with_connection_traced
             ~reads:
@@ -796,6 +934,8 @@ let () =
                 `Await info_response;
                 `Await update_info_response;
                 `Await update_response;
+                `Await preserve_info_response;
+                `Await preserve_response;
                 `Await hold;
               ]
             (fun ~sw ~trace connection ->
@@ -829,8 +969,14 @@ let () =
               Eio.Promise.resolve info_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:1
-                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"sample_freq":"10%","metadata":{"owner":"server"}}}|}));
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true}}|}));
               let current_info = expect_jetstream_ok (Eio.Promise.await info_result) in
+              let preserved_config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.with_description
+                     (Nats_eio.Jetstream.Consumer.Info.config current_info)
+                     (Some "preserved"))
+              in
               let config =
                 expect_jetstream_config_ok
                   (Nats_eio.Jetstream.Consumer.Config.with_description
@@ -847,6 +993,24 @@ let () =
                   (Nats_eio.Jetstream.Consumer.Config.with_max_deliver config
                      (Some 7))
               in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.with_sample_frequency
+                     config None)
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.with_rate_limit config
+                     None)
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.with_replicas config None)
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.with_metadata config [])
+              in
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve result_u
@@ -855,53 +1019,84 @@ let () =
               Eio.Promise.resolve update_info_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:2
-                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"sample_freq":"10%","metadata":{"owner":"server"}}}|}));
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true}}|}));
               yield_n 5;
+              let trace_buffer = trace in
               let trace = Buffer.contents trace in
+              let clear_trace =
+                match
+                  nth_substring_position
+                    ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS.worker"
+                    ~occurrence:1 trace
+                with
+                | Some position ->
+                    String.sub trace position (String.length trace - position)
+                | None -> fail "consumer update write was not traced"
+              in
               if
                 not
                   (contains_substring
                      ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS.worker"
-                     trace)
+                     clear_trace)
               then fail "consumer update was not sent to the named CREATE API";
-              if contains_substring ~needle:"CONSUMER.UPDATE" trace then
+              if contains_substring ~needle:"CONSUMER.UPDATE" clear_trace then
                 fail "consumer update used an unsupported UPDATE subject";
               if
                 not
-                  (contains_substring ~needle:"\\\"action\\\":\\\"update" trace)
+                  (contains_substring ~needle:"\\\"action\\\":\\\"update"
+                     clear_trace)
               then fail "consumer update omitted its action";
               if
                 not
                   (contains_substring ~needle:"\\\"stream_name\\\":\\\"ORDERS"
-                     trace)
+                     clear_trace)
               then fail "consumer update omitted the stream name";
               if
                 not
                   (contains_substring ~needle:"description\\\":\\\"updated"
-                     trace)
+                     clear_trace)
               then fail "consumer update omitted the changed description";
-              if not (contains_substring ~needle:"max_deliver\\\":7" trace) then
+              if
+                not (contains_substring ~needle:"max_deliver\\\":7" clear_trace)
+              then
                 fail "consumer update omitted the changed delivery limit";
               if
-                not (contains_substring ~needle:"max_ack_pending\\\":-1" trace)
+                not
+                  (contains_substring ~needle:"max_ack_pending\\\":-1"
+                     clear_trace)
               then fail "consumer update reset unlimited ack pending";
               if
                 not
                   (contains_substring
-                     ~needle:"durable_name\\\":\\\"worker\\\"" trace)
+                     ~needle:"durable_name\\\":\\\"worker\\\"" clear_trace)
               then fail "consumer update dropped the durable identity";
               if
                 not
-                  (contains_substring
-                     ~needle:"metadata\\\":{\\\"owner\\\":\\\"server\\\"}" trace)
-              then fail "consumer update discarded unknown metadata";
+                  (contains_substring ~needle:"sample_freq\\\":\\\"0%"
+                     clear_trace)
+              then fail "consumer update did not clear sample frequency";
               if
-                not (contains_substring ~needle:"sample_freq\\\":\\\"10%" trace)
-              then fail "consumer update discarded an unknown scalar";
+                not
+                  (contains_substring ~needle:"rate_limit_bps\\\":0"
+                     clear_trace)
+              then fail "consumer update did not clear rate limiting";
+              if
+                not
+                  (contains_substring ~needle:"num_replicas\\\":0" clear_trace)
+              then fail "consumer update did not restore replica inheritance";
+              if
+                not (contains_substring ~needle:"metadata\\\":{}" clear_trace)
+              then
+                fail "consumer update did not clear metadata";
+              if
+                not
+                  (contains_substring ~needle:"future_field\\\":true"
+                     clear_trace)
+              then fail "consumer update discarded an unknown configuration field";
               Eio.Promise.resolve update_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:3
-                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"updated","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":7,"max_ack_pending":-1,"sample_freq":"10%","metadata":{"owner":"server"}},"num_pending":3}|}));
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"updated","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":7,"max_ack_pending":-1,"sample_freq":"0%","rate_limit_bps":0,"num_replicas":0,"metadata":{},"future_field":true},"num_pending":3}|}));
               let info = expect_jetstream_ok (Eio.Promise.await result) in
               equal (option string) (Some "updated")
                 (Nats_eio.Jetstream.Consumer.Config.description
@@ -912,6 +1107,92 @@ let () =
               equal (option int) (Some (-1))
                 (Nats_eio.Jetstream.Consumer.Config.max_ack_pending
                    (Nats_eio.Jetstream.Consumer.Info.config info));
+              equal (option int) None
+                (Nats_eio.Jetstream.Consumer.Config.sample_frequency
+                   (Nats_eio.Jetstream.Consumer.Info.config info));
+              equal (option int64) None
+                (Nats_eio.Jetstream.Consumer.Config.rate_limit
+                   (Nats_eio.Jetstream.Consumer.Info.config info));
+              equal (option int) None
+                (Nats_eio.Jetstream.Consumer.Config.replicas
+                   (Nats_eio.Jetstream.Consumer.Info.config info));
+              (match
+                 Nats_eio.Jetstream.Consumer.Config.metadata
+                   (Nats_eio.Jetstream.Consumer.Info.config info)
+               with
+              | [] -> ()
+              | _ -> fail "consumer update response retained cleared metadata");
+              let preserve_result, preserve_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve preserve_result_u
+                    (Nats_eio.Jetstream.Consumer.update consumer
+                       preserved_config));
+              yield_n 5;
+              Eio.Promise.resolve preserve_info_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:4
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"updated","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":7,"max_ack_pending":-1,"sample_freq":"0%","rate_limit_bps":0,"num_replicas":0,"metadata":{},"future_field":true}}|}));
+              yield_n 5;
+              let final_trace = Buffer.contents trace_buffer in
+              let preserve_trace =
+                match
+                  nth_substring_position
+                    ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS.worker"
+                    ~occurrence:2 final_trace
+                with
+                | Some position ->
+                    String.sub final_trace position
+                      (String.length final_trace - position)
+                | None -> fail "second consumer update write was not traced"
+              in
+              if
+                not
+                  (contains_substring
+                     ~needle:"description\\\":\\\"preserved" preserve_trace)
+              then fail "consumer update did not preserve description replacement";
+              if
+                not
+                  (contains_substring ~needle:"sample_freq\\\":\\\"10%"
+                     preserve_trace)
+              then fail "consumer update did not preserve sample frequency";
+              if
+                not
+                  (contains_substring ~needle:"rate_limit_bps\\\":64000"
+                     preserve_trace)
+              then fail "consumer update did not preserve rate limiting";
+              if
+                not
+                  (contains_substring ~needle:"num_replicas\\\":2"
+                     preserve_trace)
+              then fail "consumer update did not preserve replica count";
+              if
+                not
+                  (contains_substring
+                     ~needle:"metadata\\\":{\\\"owner\\\":\\\"server\\\"}"
+                     preserve_trace)
+              then fail "consumer update did not preserve metadata";
+              Eio.Promise.resolve preserve_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:5
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"preserved","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true}}|}));
+              let preserved_info =
+                expect_jetstream_ok (Eio.Promise.await preserve_result)
+              in
+              equal (option int) (Some 10)
+                (Nats_eio.Jetstream.Consumer.Config.sample_frequency
+                   (Nats_eio.Jetstream.Consumer.Info.config preserved_info));
+              equal (option int64) (Some 64000L)
+                (Nats_eio.Jetstream.Consumer.Config.rate_limit
+                   (Nats_eio.Jetstream.Consumer.Info.config preserved_info));
+              equal (option int) (Some 2)
+                (Nats_eio.Jetstream.Consumer.Config.replicas
+                   (Nats_eio.Jetstream.Consumer.Info.config preserved_info));
+              (match
+                 Nats_eio.Jetstream.Consumer.Config.metadata
+                   (Nats_eio.Jetstream.Consumer.Info.config preserved_info)
+               with
+              | [ ("owner", "server") ] -> ()
+              | _ -> fail "consumer update response lost preserved metadata");
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream purge sends a filtered request and returns the count" (fun () ->
