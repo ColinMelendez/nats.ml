@@ -73,7 +73,8 @@ direct/rollup flags, stream create/bind/update/list/info/delete and direct
 stored-message reads, publish acknowledgements with message ids, API error
 envelopes, and an opt-in real-server acceptance path for management,
 deduplication, and cleanup. The consumer slice now includes
-consumer management and inventory, one-shot fetch, typed message
+consumer management and inventory, typed consumer updates, one-shot fetch,
+typed message
 acknowledgements, and a persistent single-owner
 `Consumer.Pull` session with batch accounting, local timeout/resumption,
 server-expiry retries, structured terminal statuses, and switch-owned cleanup.
@@ -444,12 +445,15 @@ request/reply and subscription primitives.
 - Completed: model stream configuration/info, API responses, and structured
   JetStream errors separately from `Nats.Error`; implement stream
   create/bind/update/list/delete/info and direct stored-message reads, consumer
-  create/bind/info/list/delete, and durable publish acknowledgements with
-  message-id options over application subjects. Stream configuration retains
-  per-subject limits and direct/rollup flags. Stream updates preserve unknown
-  server configuration through an INFO/read-modify-write cycle, and list
-  operations fail with a structured error rather than silently returning an
-  incomplete page.
+  create/bind/info/list/delete/update with typed configuration combinators, and
+  durable publish acknowledgements with message-id options over application
+  subjects. Stream configuration retains per-subject limits and direct/rollup
+  flags. Stream and consumer updates preserve unknown server configuration
+  through an INFO/read-modify-
+  write cycle, and list operations fail with a structured error rather than
+  silently returning an incomplete page. Consumer updates use the named
+  `CONSUMER.CREATE` endpoint with an explicit update action and retain durable
+  identity when the new configuration omits it.
 - Extend publish acknowledgements with all server status fields and feature
   gates where supported.
 - Gate features by server version and return structured unsupported-feature
@@ -500,7 +504,8 @@ request/reply and subscription primitives.
   message counts, unknown-config preservation, and cleanup; it runs in
   anonymous and username/password modes.
 - Completed locally: add typed server-error assertions, consumer management,
-  pull backpressure, server-expiry behavior, cancellation/cleanup,
+  consumer update action envelopes and unknown-field preservation, pull
+  backpressure, server-expiry behavior, cancellation/cleanup,
   acknowledgement metadata, consumer-failure detection, and push lifecycle
   contracts through the Eio mock transport.
 - Completed: heartbeat liveness and local/server timeout interaction.

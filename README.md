@@ -43,10 +43,12 @@ and cleanup. The JetStream test uses a per-run stream name; set
 debugging.
 
 The first JetStream layer is available through `Nats_eio.Jetstream`: typed
-stream configuration and management, direct stored-message reads, one-shot
-fetch, durable publish and message acknowledgements, and switch-owned Eio
-pull/push sessions over ordinary Core NATS request/reply. Push sessions
-consume idle heartbeats, answer flow-control requests including stalled-
+stream and consumer configuration and management, including read-modify-write
+consumer updates that preserve unknown server fields, direct stored-message
+reads, one-shot fetch, durable publish and message acknowledgements, and
+switch-owned Eio pull/push sessions over ordinary Core NATS request/reply. Push
+sessions consume idle heartbeats, answer flow-control requests including
+stalled-
 heartbeat replies, and restore replayable delivery subscriptions across
 reconnects. Ordered sessions use client-managed ephemeral pull consumers,
 validate consecutive consumer sequences, and resume from the next stream

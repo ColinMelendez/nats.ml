@@ -205,6 +205,17 @@ returns a structured error and requires the caller to create a new session.
 The session is single-owner and closes its subscription with its switch or
 through `close`.
 
+Consumer management also exposes a typed `Consumer.update`. It performs an
+INFO/read-modify-write cycle and sends the update action through the named
+`CONSUMER.CREATE` endpoint, matching the server's action-bearing management
+request. The configuration is a full replacement of modeled fields; the
+`Consumer.Config.with_*` combinators make it possible to derive a replacement
+from `Info.config` without rebuilding every field. The handle name remains the
+consumer identity: an omitted durable name retains an existing durable
+identity, an explicit name must match, and configuration members not modeled by
+the public `Config.t` are preserved from the preceding INFO response.
+Concurrent updates intentionally use last-writer-wins semantics.
+
 The high-level API still exposes raw request/reply and raw NATS messages for
 advanced JetStream features that arrive before a convenience wrapper.
 
@@ -697,11 +708,12 @@ decodes management success/error envelopes, and exposes typed stream
 configuration (including per-subject limits and direct/rollup flags), stream
 create/bind/update/list/info/delete and direct message reads through
 `Stream.Message`, `get`, and `get_last`, consumer
-create/bind/info/list/delete, durable publish acknowledgements, message
-acknowledgement verbs, one-shot fetch, and persistent pull sessions. Stream
-updates preserve unknown server configuration through an INFO/read-modify-write
-cycle; list operations consume server pagination and fail explicitly on an
-incomplete page. The management prefix is configurable for JetStream domains,
+create/bind/info/list/delete/update with typed configuration combinators,
+durable publish acknowledgements, message acknowledgement verbs, one-shot
+fetch, and persistent pull sessions. Stream and consumer updates preserve
+unknown server configuration through an INFO/read-modify-write cycle; list
+operations consume server pagination and fail explicitly on an incomplete
+page. The management prefix is configurable for JetStream domains,
 while application subjects remain ordinary Core NATS subjects. KV, Object
 Store, and Services now compose over the same connection; their local
 discovery, lifecycle, and data-path behavior is implemented, while real-server
