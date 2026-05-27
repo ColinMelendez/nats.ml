@@ -12,6 +12,10 @@ module Error = struct
     | Invalid_name_character of { position : int; character : char }
     | Duplicate_metadata of string
 
+  type selector =
+    | Empty_name
+    | Invalid_name_character of { position : int; character : char }
+
   type t =
     | Connection of Connection.error
     | Invalid_config of config
@@ -20,15 +24,22 @@ module Error = struct
     | Duplicate_endpoint of string
     | Invalid_headers of Nats.Header.error
     | Invalid_service_error of { code : string; description : string }
+    | Invalid_selector of selector
+    | Invalid_discovery_subject of Nats.Subject.error
+    | Invalid_metadata of string
     | No_reply_subject
     | Already_responded
     | No_response
     | Service_error of { code : string; description : string }
     | Handler_raised
     | Encode of Jsont.Error.t
+    | Decode of Jsont.Error.t
+    | Unexpected_response_type of { expected : string; actual : string }
+    | Unexpected_status of { code : int; description : string }
     | Stopped
 
-  let pp_config ppf = function
+  let pp_config ppf (error : config) =
+    match error with
     | Invalid_version value ->
         Format.fprintf ppf "invalid service version %S" value
     | Empty_name -> Format.pp_print_string ppf "name is empty"
@@ -38,13 +49,21 @@ module Error = struct
     | Duplicate_metadata name ->
         Format.fprintf ppf "metadata repeats key %S" name
 
-  let pp_endpoint ppf = function
+  let pp_endpoint ppf (error : endpoint) =
+    match error with
     | Empty_name -> Format.pp_print_string ppf "name is empty"
     | Invalid_name_character { position; character } ->
         Format.fprintf ppf "invalid name character %C at position %d" character
           position
     | Duplicate_metadata name ->
         Format.fprintf ppf "metadata repeats key %S" name
+
+  let pp_selector ppf (error : selector) =
+    match error with
+    | Empty_name -> Format.pp_print_string ppf "name is empty"
+    | Invalid_name_character { position; character } ->
+        Format.fprintf ppf "invalid name character %C at position %d" character
+          position
 
   let pp ppf = function
     | Connection error ->
@@ -63,6 +82,13 @@ module Error = struct
           Nats.Header.pp_error error
     | Invalid_service_error { code; description } ->
         Format.fprintf ppf "invalid service error %S: %S" code description
+    | Invalid_selector error ->
+        Format.fprintf ppf "invalid discovery selector: %a" pp_selector error
+    | Invalid_discovery_subject error ->
+        Format.fprintf ppf "invalid discovery response subject: %a"
+          Nats.Subject.pp_error error
+    | Invalid_metadata name ->
+        Format.fprintf ppf "invalid service metadata at %S" name
     | No_reply_subject ->
         Format.pp_print_string ppf "request has no reply subject"
     | Already_responded ->
@@ -73,6 +99,14 @@ module Error = struct
     | Handler_raised -> Format.pp_print_string ppf "service handler raised"
     | Encode error ->
         Format.fprintf ppf "service JSON encode: %a" Jsont.Error.pp error
+    | Decode error ->
+        Format.fprintf ppf "service JSON decode: %a" Jsont.Error.pp error
+    | Unexpected_response_type { expected; actual } ->
+        Format.fprintf ppf "expected service response type %S, got %S" expected
+          actual
+    | Unexpected_status { code; description } ->
+        Format.fprintf ppf "unexpected service response status %d %s" code
+          description
     | Stopped -> Format.pp_print_string ppf "service is stopped"
 end
 
@@ -200,6 +234,11 @@ let endpoint_name_error : identifier_error -> Error.endpoint = function
   | Identifier_invalid { position; character } ->
       Error.Invalid_name_character { position; character }
 
+let selector_name_error : identifier_error -> Error.selector = function
+  | Identifier_empty -> Error.Empty_name
+  | Identifier_invalid { position; character } ->
+      Error.Invalid_name_character { position; character }
+
 let duplicate_metadata metadata =
   let seen = ref [] in
   let duplicate = ref None in
@@ -318,11 +357,10 @@ module Request = struct
                 | Error error -> Error (Error.Connection error))
           in
           finish_response value result
-        with
-        | Eio.Cancel.Cancelled _ as cancellation ->
-            Eio.Cancel.protect (fun () ->
-                abort_response value (Error.Connection Core_error.Closed));
-            raise cancellation)
+        with Eio.Cancel.Cancelled _ as cancellation ->
+          Eio.Cancel.protect (fun () ->
+              abort_response value (Error.Connection Core_error.Closed));
+          raise cancellation)
 
   let respond_error ~code ~description ?(headers = Nats.Header.empty)
       ?(payload = "") value =
@@ -768,6 +806,312 @@ let wire_stats_codec =
        ~enc:(fun value -> value.endpoints)
   |> Jsont.Object.finish
 
+let decode codec payload =
+  match Jsont_bytesrw.decode_string' codec payload with
+  | Ok value -> Ok value
+  | Error error -> Error (Error.Decode error)
+
+let expect_response_type ~expected actual =
+  if String.equal expected actual then Ok ()
+  else Error (Error.Unexpected_response_type { expected; actual })
+
+let metadata_values ~allow_null value =
+  match value with
+  | Jsont.Null _ when allow_null -> Ok None
+  | Jsont.Object (members, _) -> (
+      let values = ref [] in
+      let invalid = ref None in
+      List.iter
+        (fun ((name, _), member) ->
+          match !invalid with
+          | Some _ -> ()
+          | None -> (
+              match member with
+              | Jsont.String (value, _) ->
+                  if
+                    List.exists
+                      (fun (existing, _) -> String.equal existing name)
+                      !values
+                  then invalid := Some (Error.Invalid_metadata name)
+                  else values := (name, value) :: !values
+              | _ -> invalid := Some (Error.Invalid_metadata name)))
+        members;
+      match !invalid with
+      | Some error -> Error error
+      | None -> Ok (Some (List.rev !values)))
+  | Jsont.Null _ -> Error (Error.Invalid_metadata "metadata")
+  | _ -> Error (Error.Invalid_metadata "metadata")
+
+let required_metadata value =
+  match metadata_values ~allow_null:false value with
+  | Error error -> Error error
+  | Ok (Some metadata) -> Ok metadata
+  | Ok None -> Error (Error.Invalid_metadata "metadata")
+
+let discovery_filter value =
+  match Nats.Subject.Filter.of_string value with
+  | Ok subject -> Ok subject
+  | Error error -> Error (Error.Invalid_discovery_subject error)
+
+let discovery_queue_group value =
+  if Int.equal (String.length value) 0 then Ok None
+  else
+    match Nats.Queue_group.of_string value with
+    | Ok queue -> Ok (Some queue)
+    | Error error -> Error (Error.Invalid_discovery_subject error)
+
+let discovery_info_endpoint (wire : wire_endpoint_info) =
+  match discovery_filter wire.subject with
+  | Error error -> Error error
+  | Ok subject -> (
+      match discovery_queue_group wire.queue_group with
+      | Error error -> Error error
+      | Ok queue -> (
+          match metadata_values ~allow_null:true wire.metadata with
+          | Error error -> Error error
+          | Ok metadata ->
+              Ok { Info.name = wire.name; subject; queue; metadata }))
+
+let discovery_stats_endpoint (wire : wire_endpoint_stats) =
+  match discovery_filter wire.subject with
+  | Error error -> Error error
+  | Ok subject -> (
+      match discovery_queue_group wire.queue_group with
+      | Error error -> Error error
+      | Ok queue -> (
+          match metadata_values ~allow_null:true wire.metadata with
+          | Error error -> Error error
+          | Ok metadata ->
+              Ok
+                {
+                  Stats.name = wire.name;
+                  subject;
+                  queue;
+                  metadata;
+                  num_requests = wire.num_requests;
+                  num_errors = wire.num_errors;
+                  last_error = wire.last_error;
+                  processing_time = wire.processing_time;
+                  average_processing_time = wire.average_processing_time;
+                }))
+
+let discovery_info_of_wire (wire : wire_info) =
+  match
+    expect_response_type ~expected:"io.nats.micro.v1.info_response" wire.type_
+  with
+  | Error error -> Error error
+  | Ok () -> (
+      match required_metadata wire.metadata with
+      | Error error -> Error error
+      | Ok metadata -> (
+          let endpoints = ref [] in
+          let error = ref None in
+          List.iter
+            (fun endpoint ->
+              match !error with
+              | Some _ -> ()
+              | None -> (
+                  match discovery_info_endpoint endpoint with
+                  | Ok endpoint -> endpoints := endpoint :: !endpoints
+                  | Error endpoint_error -> error := Some endpoint_error))
+            wire.endpoints;
+          match !error with
+          | Some error -> Error error
+          | None ->
+              Ok
+                {
+                  Info.name = wire.name;
+                  id = wire.id;
+                  version = wire.version;
+                  description =
+                    (if Int.equal (String.length wire.description) 0 then None
+                     else Some wire.description);
+                  metadata;
+                  endpoints = List.rev !endpoints;
+                }))
+
+let discovery_stats_of_wire (wire : wire_stats) =
+  match
+    expect_response_type ~expected:"io.nats.micro.v1.stats_response" wire.type_
+  with
+  | Error error -> Error error
+  | Ok () -> (
+      match required_metadata wire.metadata with
+      | Error error -> Error error
+      | Ok metadata -> (
+          let endpoints = ref [] in
+          let error = ref None in
+          List.iter
+            (fun endpoint ->
+              match !error with
+              | Some _ -> ()
+              | None -> (
+                  match discovery_stats_endpoint endpoint with
+                  | Ok endpoint -> endpoints := endpoint :: !endpoints
+                  | Error endpoint_error -> error := Some endpoint_error))
+            wire.endpoints;
+          match !error with
+          | Some error -> Error error
+          | None ->
+              Ok
+                {
+                  Stats.name = wire.name;
+                  id = wire.id;
+                  version = wire.version;
+                  metadata;
+                  started = wire.started;
+                  endpoints = List.rev !endpoints;
+                }))
+
+module Discovery = struct
+  type target =
+    | All
+    | Named of string
+    | Instance of { service : string; id : string }
+
+  module Ping = struct
+    type t = {
+      name : string;
+      id : string;
+      version : string;
+      metadata : (string * string) list;
+    }
+
+    let name value = value.name
+    let id value = value.id
+    let version value = value.version
+    let metadata value = value.metadata
+  end
+
+  let default_timeout = Mtime.Span.(1 * s)
+
+  let validate_target = function
+    | All -> Ok ()
+    | Named name -> (
+        match validate_identifier name with
+        | Ok () -> Ok ()
+        | Error error ->
+            Error (Error.Invalid_selector (selector_name_error error)))
+    | Instance { service; id } -> (
+        match validate_identifier service with
+        | Error error ->
+            Error (Error.Invalid_selector (selector_name_error error))
+        | Ok () -> (
+            match validate_identifier id with
+            | Ok () -> Ok ()
+            | Error error ->
+                Error (Error.Invalid_selector (selector_name_error error))))
+
+  let subject ~verb = function
+    | All -> Nats.Subject.literal ("$SRV." ^ verb)
+    | Named name -> Nats.Subject.literal ("$SRV." ^ verb ^ "." ^ name)
+    | Instance { service; id } ->
+        Nats.Subject.literal ("$SRV." ^ verb ^ "." ^ service ^ "." ^ id)
+
+  let collect ~timeout ~target connection ~verb decode_response =
+    match validate_target target with
+    | Error error -> Error error
+    | Ok () -> (
+        if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then
+          Error (Error.Connection (Core_error.Invalid_timeout "discovery"))
+        else
+          let inbox = Connection.fresh_inbox connection in
+          let filter =
+            Nats.Subject.Filter.literal (Nats.Subject.to_string inbox)
+          in
+          match
+            Connection.subscribe connection ~replay_on_reconnect:false filter
+          with
+          | Error error -> Error (Error.Connection error)
+          | Ok subscription -> (
+              let finish result =
+                Eio.Cancel.protect (fun () ->
+                    match Connection.Subscription.unsubscribe subscription with
+                    | Ok () -> result
+                    | Error error -> (
+                        match result with
+                        | Ok _ -> Error (Error.Connection error)
+                        | Error _ -> result))
+              in
+              let collect_responses () =
+                let subject = subject ~verb target in
+                let request = Nats.Message.v ~subject ~reply_to:inbox "" in
+                match Connection.publish_msg connection request with
+                | Error error -> Error (Error.Connection error)
+                | Ok () ->
+                    let deadline =
+                      match
+                        Mtime.add_span (Connection.now connection) timeout
+                      with
+                      | Some deadline -> deadline
+                      | None -> Mtime.max_stamp
+                    in
+                    let rec loop responses =
+                      let current = Connection.now connection in
+                      if Mtime.compare current deadline >= 0 then
+                        Ok (List.rev responses)
+                      else
+                        let remaining = Mtime.span current deadline in
+                        match
+                          Connection.Subscription.next_with_timeout
+                            ~timeout:remaining subscription
+                        with
+                        | Error Core_error.Timeout -> Ok (List.rev responses)
+                        | Error error -> Error (Error.Connection error)
+                        | Ok delivery -> (
+                            match delivery.status with
+                            | Some { code = 503; _ } -> loop responses
+                            | Some { code; description } ->
+                                Error
+                                  (Error.Unexpected_status { code; description })
+                            | None -> (
+                                match decode_response delivery.message with
+                                | Error error -> Error error
+                                | Ok response -> loop (response :: responses)))
+                    in
+                    loop []
+              in
+              try finish (collect_responses ())
+              with Eio.Cancel.Cancelled _ as cancellation ->
+                Eio.Cancel.protect (fun () ->
+                    ignore (Connection.Subscription.unsubscribe subscription));
+                raise cancellation))
+
+  let ping ?(timeout = default_timeout) ?(target = All) connection =
+    collect ~timeout ~target connection ~verb:"PING" (fun message ->
+        match decode wire_identity_codec (Nats.Message.payload message) with
+        | Error error -> Error error
+        | Ok wire -> (
+            match
+              expect_response_type ~expected:"io.nats.micro.v1.ping_response"
+                wire.type_
+            with
+            | Error error -> Error error
+            | Ok () -> (
+                match required_metadata wire.metadata with
+                | Error error -> Error error
+                | Ok metadata ->
+                    Ok
+                      {
+                        Ping.name = wire.name;
+                        id = wire.id;
+                        version = wire.version;
+                        metadata;
+                      })))
+
+  let info ?(timeout = default_timeout) ?(target = All) connection =
+    collect ~timeout ~target connection ~verb:"INFO" (fun message ->
+        match decode wire_info_codec (Nats.Message.payload message) with
+        | Error error -> Error error
+        | Ok wire -> discovery_info_of_wire wire)
+
+  let stats ?(timeout = default_timeout) ?(target = All) connection =
+    collect ~timeout ~target connection ~verb:"STATS" (fun message ->
+        match decode wire_stats_codec (Nats.Message.payload message) with
+        | Error error -> Error error
+        | Ok wire -> discovery_stats_of_wire wire)
+end
+
 let encode codec value =
   match Jsont_bytesrw.encode_string' codec value with
   | Ok payload -> Ok payload
@@ -1000,10 +1344,10 @@ let add_endpoint_to service ~prefix ~parent_queue (endpoint : Endpoint.t) =
           with
           | Error error ->
               Eio.Mutex.use_rw ~protect:true service.mutex (fun () ->
-                    service.pending_endpoint_names <-
-                      List.filter
-                        (fun value -> not (String.equal value key))
-                        service.pending_endpoint_names);
+                  service.pending_endpoint_names <-
+                    List.filter
+                      (fun value -> not (String.equal value key))
+                      service.pending_endpoint_names);
               Error (Error.Connection error)
           | Ok subscription -> (
               let worker = make_owned_subscription subscription in

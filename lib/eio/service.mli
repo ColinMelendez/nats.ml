@@ -15,6 +15,10 @@ module Error : sig
     | Invalid_name_character of { position : int; character : char }
     | Duplicate_metadata of string
 
+  type selector =
+    | Empty_name
+    | Invalid_name_character of { position : int; character : char }
+
   type t =
     | Connection of Connection.error
     | Invalid_config of config
@@ -23,12 +27,18 @@ module Error : sig
     | Duplicate_endpoint of string
     | Invalid_headers of Nats.Header.error
     | Invalid_service_error of { code : string; description : string }
+    | Invalid_selector of selector
+    | Invalid_discovery_subject of Nats.Subject.error
+    | Invalid_metadata of string
     | No_reply_subject
     | Already_responded
     | No_response
     | Service_error of { code : string; description : string }
     | Handler_raised
     | Encode of Jsont.Error.t
+    | Decode of Jsont.Error.t
+    | Unexpected_response_type of { expected : string; actual : string }
+    | Unexpected_status of { code : int; description : string }
     | Stopped
 
   val pp_config : Format.formatter -> config -> unit
@@ -36,6 +46,9 @@ module Error : sig
 
   val pp_endpoint : Format.formatter -> endpoint -> unit
   (** [pp_endpoint ppf error] formats an endpoint validation error. *)
+
+  val pp_selector : Format.formatter -> selector -> unit
+  (** [pp_selector ppf error] formats a discovery selector error. *)
 
   val pp : Format.formatter -> t -> unit
   (** [pp ppf error] formats a service error for diagnostics. *)
@@ -251,6 +264,61 @@ module Stats : sig
   val average_processing_time : endpoint -> int64
   (** [average_processing_time endpoint] is the average processing time in
       nanoseconds, or [0]. *)
+end
+
+module Discovery : sig
+  (** Resource-free fan-out queries over the NATS Services monitoring subjects.
+      A query collects replies until its timeout; timeout is normal completion
+      and returns the replies received so far. *)
+
+  type target =
+    | All
+    | Named of string
+    | Instance of { service : string; id : string }
+        (** A monitoring target. [All] addresses every service, [Named]
+            addresses every instance with one service name, and [Instance]
+            addresses one service instance. Names and ids are validated service
+            subject tokens. *)
+
+  module Ping : sig
+    type t
+
+    val name : t -> string
+    (** [name ping] is the discovered service name. *)
+
+    val id : t -> string
+    (** [id ping] is the discovered service instance id. *)
+
+    val version : t -> string
+    (** [version ping] is the discovered service version. *)
+
+    val metadata : t -> (string * string) list
+    (** [metadata ping] is the discovered service metadata. *)
+  end
+
+  val ping :
+    ?timeout:Mtime.Span.t ->
+    ?target:target ->
+    Connection.t ->
+    (Ping.t list, Error.t) result
+  (** [ping ?timeout ?target connection] discovers matching service instances
+      through [$SRV.PING]. *)
+
+  val info :
+    ?timeout:Mtime.Span.t ->
+    ?target:target ->
+    Connection.t ->
+    (Info.t list, Error.t) result
+  (** [info ?timeout ?target connection] discovers matching service definitions
+      through [$SRV.INFO]. *)
+
+  val stats :
+    ?timeout:Mtime.Span.t ->
+    ?target:target ->
+    Connection.t ->
+    (Stats.t list, Error.t) result
+  (** [stats ?timeout ?target connection] discovers matching service statistics
+      through [$SRV.STATS]. *)
 end
 
 type t
