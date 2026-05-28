@@ -449,8 +449,10 @@ request/reply and subscription primitives.
   durable publish acknowledgements with message-id options over application
   subjects. Stream configuration retains per-subject limits and direct/rollup
   flags. Consumer configuration models metadata, sample frequency, push rate
-  limit, and replica inheritance. Stream and consumer updates preserve unknown
-  server configuration through an INFO/read-modify-write cycle, and list
+  limit, replica inheritance, mutually exclusive singular/multi-subject
+  filters, and nanosecond redelivery backoff schedules. Stream and consumer
+  updates preserve unknown server configuration through an
+  INFO/read-modify-write cycle, and list
   operations fail with a structured error rather than silently returning an
   incomplete page. Consumer updates use the named
   `CONSUMER.CREATE` endpoint with an explicit update action and retain durable

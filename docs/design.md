@@ -215,8 +215,14 @@ consumer identity: an omitted durable name retains an existing durable
 identity, an explicit name must match, and configuration members not modeled by
 the public `Config.t` are preserved from the preceding INFO response. The
 modeled configuration includes consumer metadata, sample frequency, push rate
-limit, and replica inheritance; create omits unset optional values while update
-uses explicit server clear sentinels for those fields.
+limit, replica inheritance, mutually exclusive singular/multi-subject filters,
+and nanosecond redelivery backoff schedules. Create omits unset optional values
+while update uses explicit server clear sentinels for those fields: an empty
+singular filter, empty multi-subject list, or empty backoff list. The server
+uses the first backoff delay as the effective acknowledgement/redelivery wait;
+callers should keep it consistent with `ack_wait` when both are set. Push
+recovery carries these modeled delivery fields into ephemeral consumer
+recreation.
 Concurrent updates intentionally use last-writer-wins semantics.
 
 The high-level API still exposes raw request/reply and raw NATS messages for
