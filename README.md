@@ -45,8 +45,9 @@ debugging.
 The first JetStream layer is available through `Nats_eio.Jetstream`: typed
 stream and consumer configuration and management, including consumer metadata,
 sampling, push rate limits, replica inheritance, singular and multi-subject
-filters, redelivery backoff schedules, and read-modify-write updates that
-preserve unknown server fields, direct stored-message
+filters, redelivery backoff schedules, typed pause/resume control, and
+read-modify-write updates that preserve unknown server fields, direct
+stored-message
 reads, one-shot fetch, durable publish and message acknowledgements, and
 switch-owned Eio pull/push sessions over ordinary Core NATS request/reply. Push
 sessions consume idle heartbeats, answer flow-control requests including

@@ -450,13 +450,19 @@ request/reply and subscription primitives.
   subjects. Stream configuration retains per-subject limits and direct/rollup
   flags. Consumer configuration models metadata, sample frequency, push rate
   limit, replica inheritance, mutually exclusive singular/multi-subject
-  filters, and nanosecond redelivery backoff schedules. Stream and consumer
-  updates preserve unknown server configuration through an
+  filters, nanosecond redelivery backoff schedules, and typed UTC pause
+  deadlines. Stream and consumer updates preserve unknown server
+  configuration through an
   INFO/read-modify-write cycle, and list
   operations fail with a structured error rather than silently returning an
   incomplete page. Consumer updates use the named
   `CONSUMER.CREATE` endpoint with an explicit update action and retain durable
-  identity when the new configuration omits it.
+identity when the new configuration omits it.
+- Completed locally: model consumer pause state with `Ptime.t` deadlines,
+  project paused/remaining state through INFO, and expose dedicated pause and
+  resume operations through `CONSUMER.PAUSE`. Consumer updates preserve the
+  current server deadline instead of pretending that the create/update API can
+  change it.
 - Extend publish acknowledgements with all server status fields and feature
   gates where supported.
 - Gate features by server version and return structured unsupported-feature
@@ -498,7 +504,9 @@ request/reply and subscription primitives.
   stream sequence after recovery, and preserves absolute caller deadlines
   across recovery attempts.
 - Remaining: add broader delivery semantics without introducing a second
-  runtime or subscription abstraction.
+  runtime or subscription abstraction. Priority-group pull consumers remain a
+  separate slice because they require pull request pinning, pin identifiers,
+  and unpin lifecycle semantics in addition to configuration fields.
 
 ### Acceptance tests
 
@@ -512,6 +520,9 @@ request/reply and subscription primitives.
   cancellation/cleanup,
   acknowledgement metadata, consumer-failure detection, and push lifecycle
   contracts through the Eio mock transport.
+- Completed locally: cover consumer pause deadline encoding, INFO projection,
+  dedicated pause/resume requests, and update/reconnect preservation through
+  the Eio mock transport.
 - Completed: heartbeat liveness and local/server timeout interaction.
 - Completed locally: cover ordered consumer creation, filtered stream-sequence
   gaps, consumer-sequence recovery, missing-heartbeat recovery, deletion
