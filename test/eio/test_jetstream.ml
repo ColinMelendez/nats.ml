@@ -525,9 +525,16 @@ let () =
                    Nats_eio.Jetstream.Error.pp_config error)));
       test "consumer config updaters preserve modeled fields" (fun () ->
           let span = Mtime.Span.of_uint64_ns 1_000_000L in
+          let second_span = Mtime.Span.of_uint64_ns 2_000_000L in
           let subject = Nats.Subject.literal "orders.push" in
           let group = Nats.Queue_group.literal "workers" in
           let filter = Nats.Subject.Filter.literal "orders.*" in
+          let filter_subjects =
+            [
+              Nats.Subject.Filter.literal "orders.created";
+              Nats.Subject.Filter.literal "orders.updated";
+            ]
+          in
           let config =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"worker"
@@ -536,7 +543,8 @@ let () =
                  ~deliver_policy:
                    (Nats_eio.Jetstream.Consumer.Config.By_start_sequence 1L)
                  ~ack_policy:Nats_eio.Jetstream.Consumer.Config.All
-                 ~ack_wait:span ~max_deliver:5 ~filter_subject:filter
+                 ~ack_wait:span ~max_deliver:5 ~filter_subjects
+                 ~backoff:[ span; second_span ]
                  ~sample_frequency:10 ~rate_limit:64000L ~replicas:3
                  ~metadata:[ ("owner", "server") ]
                  ~replay_policy:Nats_eio.Jetstream.Consumer.Config.Original
@@ -559,6 +567,13 @@ let () =
             (Nats_eio.Jetstream.Consumer.Config.rate_limit described);
           equal (option int) (Some 3)
             (Nats_eio.Jetstream.Consumer.Config.replicas described);
+          equal (list string)
+            [ "orders.created"; "orders.updated" ]
+            (List.map Nats.Subject.Filter.to_string
+               (Nats_eio.Jetstream.Consumer.Config.filter_subjects described));
+          equal (list int64) [ 1_000_000L; 2_000_000L ]
+            (List.map Mtime.Span.to_uint64_ns
+               (Nats_eio.Jetstream.Consumer.Config.backoff described));
           (match Nats_eio.Jetstream.Consumer.Config.metadata described with
           | [ ("owner", "server") ] -> ()
           | _ -> fail "consumer config updater lost metadata");
@@ -592,10 +607,60 @@ let () =
           (match Nats_eio.Jetstream.Consumer.Config.metadata cleared_metadata with
           | [] -> ()
           | _ -> fail "consumer config updater retained metadata");
+          let singular =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Consumer.Config.with_filter_subjects
+                 cleared_metadata filter_subjects)
+          in
+          (match
+             Nats_eio.Jetstream.Consumer.Config.filter_subject singular
+           with
+          | None -> ()
+          | Some _ -> fail "consumer config updater retained singular filter");
+          equal (list string)
+            [ "orders.created"; "orders.updated" ]
+            (List.map Nats.Subject.Filter.to_string
+               (Nats_eio.Jetstream.Consumer.Config.filter_subjects singular));
+          let singular =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Consumer.Config.with_filter_subject singular
+                 (Some filter))
+          in
+          (match Nats_eio.Jetstream.Consumer.Config.filter_subject singular with
+          | Some value when
+              String.equal (Nats.Subject.Filter.to_string value) "orders.*" ->
+              ()
+          | _ -> fail "consumer config updater did not set singular filter");
+          (match
+             Nats_eio.Jetstream.Consumer.Config.filter_subjects singular
+           with
+          | [] -> ()
+          | _ -> fail "consumer config updater retained plural filters");
+          let cleared_filters =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Consumer.Config.with_filter_subjects singular
+                 [])
+          in
+          (match
+             Nats_eio.Jetstream.Consumer.Config.filter_subject cleared_filters
+           with
+          | None -> ()
+          | Some _ -> fail "consumer config updater retained a cleared filter");
+          equal (list int64) [ 1_000_000L; 2_000_000L ]
+            (List.map Mtime.Span.to_uint64_ns
+               (Nats_eio.Jetstream.Consumer.Config.backoff cleared_filters));
+          let cleared_backoff =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Consumer.Config.with_backoff cleared_filters
+                 [])
+          in
+          (match Nats_eio.Jetstream.Consumer.Config.backoff cleared_backoff with
+          | [] -> ()
+          | _ -> fail "consumer config updater retained cleared backoff");
           let cleared_group =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Consumer.Config.with_deliver_group
-                 cleared_metadata None)
+                 cleared_backoff None)
           in
           let cleared_subject =
             expect_jetstream_config_ok
@@ -636,12 +701,29 @@ let () =
           | Error (Nats_eio.Jetstream.Error.Invalid_consumer_replicas (-1)) ->
               ()
           | _ -> fail "consumer config accepted negative replicas");
-          match Nats_eio.Jetstream.Consumer.Config.v ~rate_limit:1L () with
+          (match Nats_eio.Jetstream.Consumer.Config.v ~rate_limit:1L () with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_policy
                 { field = "rate_limit"; value = "requires deliver_subject" }) ->
               ()
           | _ -> fail "consumer config accepted pull rate limiting");
+          (match
+             Nats_eio.Jetstream.Consumer.Config.v
+               ~filter_subject:(Nats.Subject.Filter.literal "orders.*")
+               ~filter_subjects:
+                 [ Nats.Subject.Filter.literal "orders.created" ] ()
+           with
+          | Error
+              (Nats_eio.Jetstream.Error.Invalid_consumer_policy
+                { field = "filter_subjects"; value = "exclusive with filter_subject" }) ->
+              ()
+          | _ -> fail "consumer config accepted exclusive filter forms");
+          (match
+            Nats_eio.Jetstream.Consumer.Config.v
+              ~backoff:[ Mtime.Span.zero ] ()
+          with
+          | Ok _ -> ()
+          | Error _ -> fail "consumer config rejected zero backoff"));
       test "consumer create emits modern config fields" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
@@ -660,6 +742,16 @@ let () =
                   (Nats_eio.Jetstream.Consumer.Config.v
                      ~durable_name:"worker"
                      ~deliver_subject:(Nats.Subject.literal "orders.push")
+                     ~filter_subjects:
+                       [
+                         Nats.Subject.Filter.literal "orders.created";
+                         Nats.Subject.Filter.literal "orders.updated";
+                       ]
+                     ~backoff:
+                       [
+                         Mtime.Span.of_uint64_ns 1_000_000L;
+                         Mtime.Span.of_uint64_ns 2_000_000L;
+                       ]
                      ~sample_frequency:25 ~rate_limit:65536L ~replicas:3
                      ~metadata:[ ("owner", "client") ] ())
               in
@@ -680,6 +772,17 @@ let () =
               then fail "consumer create omitted rate limit";
               if not (contains_substring ~needle:"num_replicas\\\":3" trace)
               then fail "consumer create omitted replica count";
+              if
+                not
+                  (contains_substring
+                     ~needle:"filter_subjects\\\":[\\\"orders.created\\\",\\\"orders.updated\\\"]"
+                     trace)
+              then fail "consumer create omitted plural filters";
+              if
+                not
+                  (contains_substring ~needle:"backoff\\\":[1000000,2000000]"
+                     trace)
+              then fail "consumer create omitted backoff";
               if
                 not
                   (contains_substring
@@ -969,7 +1072,7 @@ let () =
               Eio.Promise.resolve info_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:1
-                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true}}|}));
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"filter_subjects":["orders.created","orders.updated"],"backoff":[1000000,2000000],"sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true}}|}));
               let current_info = expect_jetstream_ok (Eio.Promise.await info_result) in
               let preserved_config =
                 expect_jetstream_config_ok
@@ -1011,6 +1114,15 @@ let () =
                 expect_jetstream_config_ok
                   (Nats_eio.Jetstream.Consumer.Config.with_metadata config [])
               in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.with_filter_subjects
+                     config [])
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.with_backoff config [])
+              in
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve result_u
@@ -1019,7 +1131,7 @@ let () =
               Eio.Promise.resolve update_info_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:2
-                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true}}|}));
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"filter_subjects":["orders.created","orders.updated"],"backoff":[1000000,2000000],"sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true}}|}));
               yield_n 5;
               let trace_buffer = trace in
               let trace = Buffer.contents trace in
@@ -1085,6 +1197,19 @@ let () =
                   (contains_substring ~needle:"num_replicas\\\":0" clear_trace)
               then fail "consumer update did not restore replica inheritance";
               if
+                not
+                  (contains_substring ~needle:"filter_subject\\\":\\\"\\\""
+                     clear_trace)
+              then fail "consumer update did not clear singular filter";
+              if
+                not
+                  (contains_substring ~needle:"filter_subjects\\\":[]"
+                     clear_trace)
+              then fail "consumer update did not clear plural filters";
+              if
+                not (contains_substring ~needle:"backoff\\\":[]" clear_trace)
+              then fail "consumer update did not clear backoff";
+              if
                 not (contains_substring ~needle:"metadata\\\":{}" clear_trace)
               then
                 fail "consumer update did not clear metadata";
@@ -1096,7 +1221,7 @@ let () =
               Eio.Promise.resolve update_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:3
-                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"updated","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":7,"max_ack_pending":-1,"sample_freq":"0%","rate_limit_bps":0,"num_replicas":0,"metadata":{},"future_field":true},"num_pending":3}|}));
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"updated","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":7,"max_ack_pending":-1,"filter_subject":"","filter_subjects":[],"backoff":[],"sample_freq":"0%","rate_limit_bps":0,"num_replicas":0,"metadata":{},"future_field":true},"num_pending":3}|}));
               let info = expect_jetstream_ok (Eio.Promise.await result) in
               equal (option string) (Some "updated")
                 (Nats_eio.Jetstream.Consumer.Config.description
@@ -1116,6 +1241,24 @@ let () =
               equal (option int) None
                 (Nats_eio.Jetstream.Consumer.Config.replicas
                    (Nats_eio.Jetstream.Consumer.Info.config info));
+              (match
+                 Nats_eio.Jetstream.Consumer.Config.filter_subject
+                   (Nats_eio.Jetstream.Consumer.Info.config info)
+               with
+              | None -> ()
+              | Some _ -> fail "consumer update response retained singular filter");
+              (match
+                 Nats_eio.Jetstream.Consumer.Config.filter_subjects
+                   (Nats_eio.Jetstream.Consumer.Info.config info)
+               with
+              | [] -> ()
+              | _ -> fail "consumer update response retained plural filters");
+              (match
+                 Nats_eio.Jetstream.Consumer.Config.backoff
+                   (Nats_eio.Jetstream.Consumer.Info.config info)
+               with
+              | [] -> ()
+              | _ -> fail "consumer update response retained backoff");
               (match
                  Nats_eio.Jetstream.Consumer.Config.metadata
                    (Nats_eio.Jetstream.Consumer.Info.config info)
@@ -1167,6 +1310,22 @@ let () =
               then fail "consumer update did not preserve replica count";
               if
                 not
+                  (contains_substring ~needle:"filter_subject\\\":\\\"\\\""
+                     preserve_trace)
+              then fail "consumer update did not clear singular filter on preserve";
+              if
+                not
+                  (contains_substring
+                     ~needle:"filter_subjects\\\":[\\\"orders.created\\\",\\\"orders.updated\\\"]"
+                     preserve_trace)
+              then fail "consumer update did not preserve plural filters";
+              if
+                not
+                  (contains_substring ~needle:"backoff\\\":[1000000,2000000]"
+                     preserve_trace)
+              then fail "consumer update did not preserve backoff";
+              if
+                not
                   (contains_substring
                      ~needle:"metadata\\\":{\\\"owner\\\":\\\"server\\\"}"
                      preserve_trace)
@@ -1174,7 +1333,7 @@ let () =
               Eio.Promise.resolve preserve_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:5
-                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"preserved","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true}}|}));
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"preserved","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"filter_subject":"","filter_subjects":["orders.created","orders.updated"],"backoff":[1000000,2000000],"sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true}}|}));
               let preserved_info =
                 expect_jetstream_ok (Eio.Promise.await preserve_result)
               in
@@ -1187,6 +1346,21 @@ let () =
               equal (option int) (Some 2)
                 (Nats_eio.Jetstream.Consumer.Config.replicas
                    (Nats_eio.Jetstream.Consumer.Info.config preserved_info));
+              (match
+                 Nats_eio.Jetstream.Consumer.Config.filter_subject
+                   (Nats_eio.Jetstream.Consumer.Info.config preserved_info)
+               with
+              | None -> ()
+              | Some _ -> fail "consumer update response retained singular filter");
+              equal (list string)
+                [ "orders.created"; "orders.updated" ]
+                (List.map Nats.Subject.Filter.to_string
+                   (Nats_eio.Jetstream.Consumer.Config.filter_subjects
+                      (Nats_eio.Jetstream.Consumer.Info.config preserved_info)));
+              equal (list int64) [ 1_000_000L; 2_000_000L ]
+                (List.map Mtime.Span.to_uint64_ns
+                   (Nats_eio.Jetstream.Consumer.Config.backoff
+                      (Nats_eio.Jetstream.Consumer.Info.config preserved_info)));
               (match
                  Nats_eio.Jetstream.Consumer.Config.metadata
                    (Nats_eio.Jetstream.Consumer.Info.config preserved_info)
@@ -1794,7 +1968,9 @@ let () =
                        (consumer connection)));
               yield_n 5;
               Eio.Promise.resolve info_response_u
-                (Ok (ephemeral_push_consumer_info_wire_with_sid ~sid:1));
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","filter_subjects":["orders.created","orders.updated"],"backoff":[1000000,2000000],"sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"replay_policy":"instant"}}|}));
               let push = expect_jetstream_ok (Eio.Promise.await push_result) in
               let first_result, first_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -1833,6 +2009,38 @@ let () =
                   (contains_substring ~needle:"opt_start_seq\\\":2"
                      (Buffer.contents trace))
               then fail "ephemeral push resumed from the wrong sequence";
+              if
+                not
+                  (contains_substring
+                     ~needle:"filter_subjects\\\":[\\\"orders.created\\\",\\\"orders.updated\\\"]"
+                     (Buffer.contents trace))
+              then fail "ephemeral push dropped plural filters on recreate";
+              if
+                not
+                  (contains_substring ~needle:"backoff\\\":[1000000,2000000]"
+                     (Buffer.contents trace))
+              then fail "ephemeral push dropped backoff on recreate";
+              if
+                not
+                  (contains_substring ~needle:"sample_freq\\\":\\\"10%"
+                     (Buffer.contents trace))
+              then fail "ephemeral push dropped sample frequency on recreate";
+              if
+                not
+                  (contains_substring ~needle:"rate_limit_bps\\\":64000"
+                     (Buffer.contents trace))
+              then fail "ephemeral push dropped rate limit on recreate";
+              if
+                not
+                  (contains_substring ~needle:"num_replicas\\\":2"
+                     (Buffer.contents trace))
+              then fail "ephemeral push dropped replica count on recreate";
+              if
+                not
+                  (contains_substring
+                     ~needle:"metadata\\\":{\\\"owner\\\":\\\"server\\\"}"
+                     (Buffer.contents trace))
+              then fail "ephemeral push dropped metadata on recreate";
               Eio.Promise.resolve create_response_u
                 (Ok (ephemeral_push_create_wire_with_sid ~sid:4));
               Eio.Promise.resolve delivery_u

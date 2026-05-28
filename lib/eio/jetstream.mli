@@ -354,6 +354,8 @@ module Consumer : sig
       ?ack_wait:Mtime.Span.t ->
       ?max_deliver:int ->
       ?filter_subject:Nats.Subject.Filter.t ->
+      ?filter_subjects:Nats.Subject.Filter.t list ->
+      ?backoff:Mtime.Span.t list ->
       ?sample_frequency:int ->
       ?rate_limit:int64 ->
       ?replicas:int ->
@@ -381,6 +383,11 @@ module Consumer : sig
     val ack_wait : t -> Mtime.Span.t option
     val max_deliver : t -> int option
     val filter_subject : t -> Nats.Subject.Filter.t option
+    val filter_subjects : t -> Nats.Subject.Filter.t list
+    (** [filter_subjects config] returns the multi-subject filters. The list is
+        empty when the singular filter form is in use or no filter is set. *)
+    val backoff : t -> Mtime.Span.t list
+    (** [backoff config] returns the redelivery delay schedule. *)
     val sample_frequency : t -> int option
     (** [sample_frequency config] is the delivery sample percentage. *)
     val rate_limit : t -> int64 option
@@ -438,7 +445,18 @@ module Consumer : sig
 
     val with_filter_subject :
       t -> Nats.Subject.Filter.t option -> (t, error) result
-    (** [with_filter_subject config value] replaces the subject filter. *)
+    (** [with_filter_subject config value] replaces the singular subject
+        filter and clears any multi-subject filters. *)
+
+    val with_filter_subjects :
+      t -> Nats.Subject.Filter.t list -> (t, error) result
+    (** [with_filter_subjects config value] replaces the multi-subject filters
+        and clears the singular filter. An empty list clears all filters. *)
+
+    val with_backoff : t -> Mtime.Span.t list -> (t, error) result
+    (** [with_backoff config value] replaces the redelivery delay schedule.
+        [Mtime.Span.t] values are non-negative; an empty list clears the
+        schedule. *)
 
     val with_sample_frequency : t -> int option -> (t, error) result
     (** [with_sample_frequency config value] replaces the delivery sample

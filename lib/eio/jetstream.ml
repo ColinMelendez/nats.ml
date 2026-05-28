@@ -1513,6 +1513,8 @@ module Consumer = struct
       ack_wait : Mtime.Span.t option;
       max_deliver : int option;
       filter_subject : Nats.Subject.Filter.t option;
+      filter_subjects : Nats.Subject.Filter.t list;
+      backoff : Mtime.Span.t list;
       sample_frequency : int option;
       rate_limit : int64 option;
       replicas : int option;
@@ -1604,7 +1606,8 @@ module Consumer = struct
     let v ?durable_name ?description ?deliver_subject ?deliver_group
         ?idle_heartbeat ?flow_control ?(deliver_policy = All)
         ?(ack_policy = Explicit) ?ack_wait ?max_deliver ?filter_subject
-        ?sample_frequency ?rate_limit ?replicas ?(metadata = [])
+        ?(filter_subjects = []) ?(backoff = []) ?sample_frequency ?rate_limit
+        ?replicas ?(metadata = [])
         ?(replay_policy = Instant) ?max_ack_pending ?max_waiting ?max_batch
         ?max_expires ?max_bytes ?headers_only ?inactive_threshold ?mem_storage () =
       let max_expires = normalize_span max_expires in
@@ -1623,6 +1626,17 @@ module Consumer = struct
         | _ -> Ok ()
       in
       let* () = validate_deliver_policy deliver_policy in
+      let* () =
+        match (filter_subject, filter_subjects) with
+        | Some _, _ :: _ ->
+            Error
+              (Error.Invalid_consumer_policy
+                 {
+                   field = "filter_subjects";
+                   value = "exclusive with filter_subject";
+                 })
+        | _ -> Ok ()
+      in
       let* () = validate_sample_frequency sample_frequency in
       let* () = validate_rate_limit rate_limit in
       let* () = validate_replicas replicas in
@@ -1672,6 +1686,8 @@ module Consumer = struct
           ack_wait;
           max_deliver;
           filter_subject;
+          filter_subjects;
+          backoff;
           sample_frequency;
           rate_limit;
           replicas;
@@ -1698,6 +1714,8 @@ module Consumer = struct
     let ack_wait value = value.ack_wait
     let max_deliver value = value.max_deliver
     let filter_subject value = value.filter_subject
+    let filter_subjects value = value.filter_subjects
+    let backoff value = value.backoff
     let sample_frequency value = value.sample_frequency
     let rate_limit value = value.rate_limit
     let replicas value = value.replicas
@@ -1714,13 +1732,14 @@ module Consumer = struct
 
     let rebuild ~durable_name ~description ~deliver_subject ~deliver_group
         ~idle_heartbeat ~flow_control ~deliver_policy ~ack_policy ~ack_wait
-        ~max_deliver ~filter_subject ~sample_frequency ~rate_limit ~replicas
-        ~metadata ~replay_policy ~max_ack_pending ~max_waiting ~max_batch
+        ~max_deliver ~filter_subject ~filter_subjects ~backoff
+        ~sample_frequency ~rate_limit ~replicas ~metadata ~replay_policy
+        ~max_ack_pending ~max_waiting ~max_batch
         ~max_expires ~max_bytes ~headers_only ~inactive_threshold ~mem_storage =
       v ?durable_name ?description ?deliver_subject ?deliver_group
         ?idle_heartbeat ?flow_control ~deliver_policy ~ack_policy ?ack_wait
-        ?max_deliver ?filter_subject ?sample_frequency ?rate_limit ?replicas
-        ~metadata ~replay_policy ?max_ack_pending ?max_waiting ?max_batch
+        ?max_deliver ?filter_subject ~filter_subjects ~backoff ?sample_frequency
+        ?rate_limit ?replicas ~metadata ~replay_policy ?max_ack_pending ?max_waiting ?max_batch
         ?max_expires ?max_bytes ?headers_only ?inactive_threshold ?mem_storage ()
 
     let rebuild_modern value ~sample_frequency ~rate_limit ~replicas ~metadata =
@@ -1735,8 +1754,26 @@ module Consumer = struct
         ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
-        ~filter_subject:value.filter_subject ~sample_frequency ~rate_limit
+        ~filter_subject:value.filter_subject
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~sample_frequency ~rate_limit
         ~replicas ~metadata ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let rebuild_delivery value ~filter_subject ~filter_subjects ~backoff =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject ~filter_subjects ~backoff
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
+        ~replay_policy:value.replay_policy
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1750,6 +1787,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1765,6 +1803,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1780,6 +1819,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1795,6 +1835,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1810,6 +1851,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1825,6 +1867,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1840,6 +1883,7 @@ module Consumer = struct
         ~deliver_policy ~ack_policy:value.ack_policy ~ack_wait:value.ack_wait
         ~max_deliver:value.max_deliver ~filter_subject:value.filter_subject
         ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1855,6 +1899,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy ~ack_wait:value.ack_wait
         ~max_deliver:value.max_deliver ~filter_subject:value.filter_subject
         ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1870,6 +1915,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1885,6 +1931,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1900,6 +1947,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:[] ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1907,6 +1955,14 @@ module Consumer = struct
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
         ~mem_storage:value.mem_storage
+
+    let with_filter_subjects value filter_subjects =
+      rebuild_delivery value ~filter_subject:None ~filter_subjects
+        ~backoff:value.backoff
+
+    let with_backoff value backoff =
+      rebuild_delivery value ~filter_subject:value.filter_subject
+        ~filter_subjects:value.filter_subjects ~backoff
 
     let with_sample_frequency value (sample_frequency : int option) =
       rebuild_modern value ~sample_frequency:(Some sample_frequency)
@@ -1935,6 +1991,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1950,6 +2007,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending ~max_waiting:value.max_waiting
@@ -1965,6 +2023,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting
@@ -1980,6 +2039,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1995,6 +2055,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2010,6 +2071,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2025,6 +2087,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2040,6 +2103,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2054,6 +2118,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2076,6 +2141,8 @@ module Consumer = struct
     ack_wait : int64 option;
     max_deliver : int option;
     filter_subject : string option;
+    filter_subjects : string list option;
+    backoff : int64 list option;
     sample_frequency : string option;
     rate_limit : int64 option;
     replicas : int option;
@@ -2146,6 +2213,40 @@ module Consumer = struct
           | Some 0 -> Ok None
           | Some value -> Ok (Some value)
 
+  let filter_subjects_to_wire subjects =
+    match subjects with
+    | [] -> None
+    | subjects -> Some (List.map Nats.Subject.Filter.to_string subjects)
+
+  let filter_subjects_of_wire subjects =
+    match subjects with
+    | None -> Ok []
+    | Some subjects ->
+        let parsed = ref [] in
+        let parse_error = ref None in
+        List.iter
+          (fun subject ->
+            match !parse_error with
+            | Some _ -> ()
+            | None -> (
+                match Nats.Subject.Filter.of_string subject with
+                | Ok subject -> parsed := subject :: !parsed
+                | Error error -> parse_error := Some error))
+          subjects;
+        match !parse_error with
+        | Some error -> Error (Error.Invalid_subject error)
+        | None -> Ok (List.rev !parsed)
+
+  let backoff_to_wire backoff =
+    match backoff with
+    | [] -> None
+    | backoff -> Some (List.map Mtime.Span.to_uint64_ns backoff)
+
+  let backoff_of_wire backoff =
+    match backoff with
+    | None -> []
+    | Some backoff -> List.map Mtime.Span.of_uint64_ns backoff
+
   let wire_config_codec =
     Jsont.Object.map ~kind:"JetStream consumer config"
       (fun
@@ -2162,6 +2263,8 @@ module Consumer = struct
         ack_wait
         max_deliver
         filter_subject
+        filter_subjects
+        backoff
         sample_frequency
         rate_limit
         replicas
@@ -2191,6 +2294,8 @@ module Consumer = struct
           ack_wait;
           max_deliver;
           filter_subject;
+          filter_subjects;
+          backoff;
           sample_frequency;
           rate_limit;
           replicas;
@@ -2232,6 +2337,10 @@ module Consumer = struct
         value.max_deliver)
     |> Jsont.Object.opt_mem "filter_subject" Jsont.string ~enc:(fun value ->
         value.filter_subject)
+    |> Jsont.Object.opt_mem "filter_subjects" (Jsont.list Jsont.string)
+         ~enc:(fun value -> value.filter_subjects)
+    |> Jsont.Object.opt_mem "backoff" (Jsont.list Jsont.int64) ~enc:(fun value ->
+        value.backoff)
     |> Jsont.Object.opt_mem "sample_freq" Jsont.string ~enc:(fun value ->
         value.sample_frequency)
     |> Jsont.Object.opt_mem "rate_limit_bps" Jsont.int64 ~enc:(fun value ->
@@ -2309,6 +2418,9 @@ module Consumer = struct
       max_deliver = Config.max_deliver value;
       filter_subject =
         Option.map Nats.Subject.Filter.to_string (Config.filter_subject value);
+      filter_subjects =
+        filter_subjects_to_wire (Config.filter_subjects value);
+      backoff = backoff_to_wire (Config.backoff value);
       sample_frequency =
         sample_frequency_to_wire (Config.sample_frequency value);
       rate_limit = Config.rate_limit value;
@@ -2359,6 +2471,10 @@ module Consumer = struct
           | Ok subject -> Ok (Some subject)
           | Error error -> Error (Error.Invalid_subject error))
     in
+    let filter_subjects =
+      filter_subjects_of_wire value.filter_subjects
+    in
+    let backoff = backoff_of_wire value.backoff in
     let deliver_subject =
       match value.deliver_subject with
       | None | Some "" -> Ok None
@@ -2391,48 +2507,53 @@ module Consumer = struct
         match filter_subject with
         | Error error -> Error error
         | Ok filter_subject -> (
-            match deliver_subject with
+            match filter_subjects with
             | Error error -> Error error
-            | Ok deliver_subject -> (
-                match deliver_group with
+            | Ok filter_subjects -> (
+                match deliver_subject with
                 | Error error -> Error error
-                | Ok deliver_group -> (
-                    match sample_frequency with
+                | Ok deliver_subject -> (
+                    match deliver_group with
                     | Error error -> Error error
-                    | Ok sample_frequency -> (
-                        let ack_wait =
-                          Option.map Mtime.Span.of_uint64_ns value.ack_wait
-                        in
-                        let max_expires =
-                          Option.map Mtime.Span.of_uint64_ns value.max_expires
-                        in
-                        let inactive_threshold =
-                          Option.map Mtime.Span.of_uint64_ns
-                            value.inactive_threshold
-                        in
-                        let max_deliver =
-                          normalize_max_deliver value.max_deliver
-                        in
-                        let max_ack_pending = value.max_ack_pending in
-                        let max_waiting = value.max_waiting in
-                        let max_batch = value.max_batch in
-                        let max_bytes = value.max_bytes in
-                        match
-                          Config.v ?durable_name:value.durable_name
-                            ?description:value.description ?deliver_subject
-                            ?deliver_group ?idle_heartbeat
-                            ?flow_control:value.flow_control ~deliver_policy
-                            ~ack_policy:value.ack_policy ?ack_wait ?max_deliver
-                            ?filter_subject ?sample_frequency
-                            ?rate_limit ?replicas
-                            ~metadata:(metadata_of_wire value.metadata)
-                            ~replay_policy:value.replay_policy ?max_ack_pending
-                            ?max_waiting ?max_batch ?max_expires ?max_bytes
-                            ?headers_only:value.headers_only ?inactive_threshold
-                            ?mem_storage:value.mem_storage ()
-                        with
-                        | Ok config -> Ok (config, value.unknown)
-                        | Error error -> Error (Error.Invalid_config error))))))
+                    | Ok deliver_group -> (
+                        match sample_frequency with
+                        | Error error -> Error error
+                        | Ok sample_frequency -> (
+                            let ack_wait =
+                              Option.map Mtime.Span.of_uint64_ns value.ack_wait
+                            in
+                            let max_expires =
+                              Option.map Mtime.Span.of_uint64_ns value.max_expires
+                            in
+                            let inactive_threshold =
+                              Option.map Mtime.Span.of_uint64_ns
+                                value.inactive_threshold
+                            in
+                            let max_deliver =
+                              normalize_max_deliver value.max_deliver
+                            in
+                            let max_ack_pending = value.max_ack_pending in
+                            let max_waiting = value.max_waiting in
+                            let max_batch = value.max_batch in
+                            let max_bytes = value.max_bytes in
+                            match
+                              Config.v ?durable_name:value.durable_name
+                                ?description:value.description ?deliver_subject
+                                ?deliver_group ?idle_heartbeat
+                                ?flow_control:value.flow_control ~deliver_policy
+                                ~ack_policy:value.ack_policy ?ack_wait
+                                ?max_deliver ?filter_subject ~filter_subjects
+                                ~backoff ?sample_frequency ?rate_limit ?replicas
+                                ~metadata:(metadata_of_wire value.metadata)
+                                ~replay_policy:value.replay_policy
+                                ?max_ack_pending ?max_waiting ?max_batch
+                                ?max_expires ?max_bytes
+                                ?headers_only:value.headers_only ?inactive_threshold
+                                ?mem_storage:value.mem_storage ()
+                            with
+                            | Ok config -> Ok (config, value.unknown)
+                            | Error error ->
+                                Error (Error.Invalid_config error)))))))
 
   type wire_sequence = {
     consumer_sequence : int64 option;
@@ -2671,6 +2792,9 @@ module Consumer = struct
       idle_heartbeat = Some (Option.value ~default:0L value.idle_heartbeat);
       ack_wait = Some (Option.value ~default:0L value.ack_wait);
       max_deliver = Some (Option.value ~default:(-1) value.max_deliver);
+      filter_subject = Some (Option.value ~default:"" value.filter_subject);
+      filter_subjects = Some (Option.value ~default:[] value.filter_subjects);
+      backoff = Some (Option.value ~default:[] value.backoff);
       sample_frequency =
         Some (Option.value ~default:"0%" value.sample_frequency);
       rate_limit = Some (Option.value ~default:0L value.rate_limit);
@@ -3515,6 +3639,12 @@ module Consumer = struct
           ?ack_wait:(Config.ack_wait push.config)
           ?max_deliver:(Config.max_deliver push.config)
           ?filter_subject:(Config.filter_subject push.config)
+          ~filter_subjects:(Config.filter_subjects push.config)
+          ~backoff:(Config.backoff push.config)
+          ?sample_frequency:(Config.sample_frequency push.config)
+          ?rate_limit:(Config.rate_limit push.config)
+          ?replicas:(Config.replicas push.config)
+          ~metadata:(Config.metadata push.config)
           ~replay_policy:(Config.replay_policy push.config)
           ?max_ack_pending:(Config.max_ack_pending push.config)
           ?max_waiting:(Config.max_waiting push.config)
