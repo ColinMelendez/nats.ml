@@ -20,6 +20,9 @@ module Error = struct
     | Invalid_consumer_rate_limit of int64
     | Invalid_consumer_replicas of int
     | Invalid_consumer_pause_until of string
+    | Invalid_consumer_priority_group of string
+    | Invalid_consumer_priority_timestamp of string
+    | Invalid_consumer_priority_update
     | Invalid_consumer_policy of { field : string; value : string }
 
   type api = { code : int; err_code : int option; description : string }
@@ -43,6 +46,9 @@ module Error = struct
     | Unexpected_consumer_name of { expected : string; actual : string }
     | Invalid_batch of int
     | Invalid_max_bytes of int
+    | Invalid_priority_group of string
+    | Invalid_priority_threshold of { field : string; value : int64 }
+    | Invalid_priority of int
     | Invalid_fetch_span
     | Invalid_idle_heartbeat
     | Idle_heartbeat_expires_too_short
@@ -97,6 +103,13 @@ module Error = struct
         Format.fprintf ppf "consumer replicas must not be negative, got %d" value
     | Invalid_consumer_pause_until value ->
         Format.fprintf ppf "invalid consumer pause deadline %S" value
+    | Invalid_consumer_priority_group value ->
+        Format.fprintf ppf "invalid consumer priority group %S" value
+    | Invalid_consumer_priority_timestamp value ->
+        Format.fprintf ppf "invalid consumer priority timestamp %S" value
+    | Invalid_consumer_priority_update ->
+        Format.pp_print_string ppf
+          "consumer priority groups and policy cannot be changed by update"
     | Invalid_consumer_policy { field; value } ->
         Format.fprintf ppf "invalid consumer %s policy %S" field value
 
@@ -146,6 +159,15 @@ module Error = struct
     | Invalid_max_bytes value ->
         Format.fprintf ppf
           "JetStream fetch max_bytes must not be negative, got %d" value
+    | Invalid_priority_group value ->
+        Format.fprintf ppf "invalid JetStream priority group %S" value
+    | Invalid_priority_threshold { field; value } ->
+        Format.fprintf ppf
+          "JetStream priority %s threshold must not be negative, got %Ld"
+          field value
+    | Invalid_priority value ->
+        Format.fprintf ppf
+          "JetStream pull priority must be between 0 and 9, got %d" value
     | Invalid_fetch_span ->
         Format.pp_print_string ppf "JetStream fetch expiry must be positive"
     | Invalid_idle_heartbeat ->
@@ -1494,6 +1516,8 @@ module Consumer = struct
   module Config = struct
     type ack_policy = No_ack | All | Explicit
 
+    type priority_policy = Overflow | Pinned_client | Prioritized
+
     type deliver_policy =
       | All
       | Last
@@ -1519,6 +1543,9 @@ module Consumer = struct
       filter_subjects : Nats.Subject.Filter.t list;
       backoff : Mtime.Span.t list;
       pause_until : Ptime.t option;
+      priority_groups : string list;
+      priority_policy : priority_policy option;
+      priority_timeout : Mtime.Span.t option;
       sample_frequency : int option;
       rate_limit : int64 option;
       replicas : int option;
@@ -1607,17 +1634,52 @@ module Consumer = struct
       | Some value when value >= 0 -> Ok ()
       | Some value -> Error (Error.Invalid_consumer_replicas value)
 
+    let valid_priority_group_character character =
+      let code = Char.code character in
+      (code >= Char.code 'A' && code <= Char.code 'Z')
+      || (code >= Char.code 'a' && code <= Char.code 'z')
+      || (code >= Char.code '0' && code <= Char.code '9')
+      || Char.equal character '/' || Char.equal character '_'
+      || Char.equal character '-' || Char.equal character '='
+
+    let validate_priority_group group =
+      let length = String.length group in
+      if Int.equal length 0 || Int.compare length 16 > 0 then
+        Error (Error.Invalid_consumer_priority_group group)
+      else
+        let invalid = ref false in
+        for position = 0 to length - 1 do
+          if not (valid_priority_group_character (String.get group position))
+          then invalid := true
+        done;
+        if !invalid then Error (Error.Invalid_consumer_priority_group group)
+        else Ok ()
+
+    let validate_priority_groups groups =
+      match groups with
+      | [] -> Ok ()
+      | [ group ] -> validate_priority_group group
+      | _ :: _ :: _ ->
+          Error
+            (Error.Invalid_consumer_policy
+               {
+                 field = "priority_groups";
+                 value = "only one group is currently supported";
+               })
+
     let v ?durable_name ?description ?deliver_subject ?deliver_group
         ?idle_heartbeat ?flow_control ?(deliver_policy = All)
         ?(ack_policy = Explicit) ?ack_wait ?max_deliver ?filter_subject
-        ?(filter_subjects = []) ?(backoff = []) ?pause_until ?sample_frequency
-        ?rate_limit
+        ?(filter_subjects = []) ?(backoff = []) ?pause_until
+        ?(priority_groups = []) ?priority_policy ?priority_timeout
+        ?sample_frequency ?rate_limit
         ?replicas ?(metadata = [])
         ?(replay_policy = Instant) ?max_ack_pending ?max_waiting ?max_batch
         ?max_expires ?max_bytes ?headers_only ?inactive_threshold ?mem_storage () =
       let max_expires = normalize_span max_expires in
       let inactive_threshold = normalize_span inactive_threshold in
       let idle_heartbeat = normalize_span idle_heartbeat in
+      let priority_timeout = normalize_span priority_timeout in
       let ( let* ) value f =
         match value with Error error -> Error error | Ok value -> f value
       in
@@ -1645,6 +1707,53 @@ module Consumer = struct
       let* () = validate_sample_frequency sample_frequency in
       let* () = validate_rate_limit rate_limit in
       let* () = validate_replicas replicas in
+      let* () = validate_priority_groups priority_groups in
+      let* () =
+        match (priority_policy, priority_groups) with
+        | None, [] -> Ok ()
+        | None, _ :: _ ->
+            Error
+              (Error.Invalid_consumer_policy
+                 { field = "priority_groups"; value = "requires priority_policy" })
+        | Some _, [] ->
+            Error
+              (Error.Invalid_consumer_policy
+                 { field = "priority_policy"; value = "requires priority_groups" })
+        | Some _, _ :: _ -> Ok ()
+      in
+      let* () =
+        match (priority_policy, deliver_subject) with
+        | Some _, Some _ ->
+            Error
+              (Error.Invalid_consumer_policy
+                 { field = "priority_policy"; value = "requires pull consumer" })
+        | _ -> Ok ()
+      in
+      let* () =
+        match (priority_policy, ack_policy) with
+        | Some (Overflow | Pinned_client), (No_ack | All) ->
+            Error
+              (Error.Invalid_consumer_policy
+                 { field = "ack_policy"; value = "requires explicit" })
+        | _ -> Ok ()
+      in
+      let* () =
+        match (priority_policy, priority_timeout) with
+        | None, Some _ ->
+            Error
+              (Error.Invalid_consumer_policy
+                 { field = "priority_timeout"; value = "requires priority_policy" })
+        | Some (Overflow | Prioritized), Some _ ->
+            Error
+              (Error.Invalid_consumer_policy
+                 { field = "priority_timeout"; value = "requires pinned_client" })
+        | _ -> Ok ()
+      in
+      let* () =
+        validate_span
+          (Error.Invalid_consumer_span { field = "priority_timeout" })
+          priority_timeout
+      in
       let* () =
         match (deliver_subject, rate_limit) with
         | None, Some value when Int64.compare value 0L > 0 ->
@@ -1694,6 +1803,9 @@ module Consumer = struct
           filter_subjects;
           backoff;
           pause_until;
+          priority_groups;
+          priority_policy;
+          priority_timeout;
           sample_frequency;
           rate_limit;
           replicas;
@@ -1723,6 +1835,9 @@ module Consumer = struct
     let filter_subjects value = value.filter_subjects
     let backoff value = value.backoff
     let pause_until value = value.pause_until
+    let priority_groups value = value.priority_groups
+    let priority_policy value = value.priority_policy
+    let priority_timeout value = value.priority_timeout
     let sample_frequency value = value.sample_frequency
     let rate_limit value = value.rate_limit
     let replicas value = value.replicas
@@ -1740,14 +1855,16 @@ module Consumer = struct
     let rebuild ~durable_name ~description ~deliver_subject ~deliver_group
         ~idle_heartbeat ~flow_control ~deliver_policy ~ack_policy ~ack_wait
         ~max_deliver ~filter_subject ~filter_subjects ~backoff
-        ~pause_until ~sample_frequency ~rate_limit ~replicas ~metadata
+        ~pause_until ~priority_groups ~priority_policy ~priority_timeout
+        ~sample_frequency ~rate_limit ~replicas ~metadata
         ~replay_policy
         ~max_ack_pending ~max_waiting ~max_batch
         ~max_expires ~max_bytes ~headers_only ~inactive_threshold ~mem_storage =
       v ?durable_name ?description ?deliver_subject ?deliver_group
         ?idle_heartbeat ?flow_control ~deliver_policy ~ack_policy ?ack_wait
         ?max_deliver ?filter_subject ~filter_subjects ~backoff ?sample_frequency
-        ?pause_until ?rate_limit ?replicas ~metadata ~replay_policy
+        ?pause_until ~priority_groups ?priority_policy ?priority_timeout
+        ?rate_limit ?replicas ~metadata ~replay_policy
         ?max_ack_pending ?max_waiting ?max_batch
         ?max_expires ?max_bytes ?headers_only ?inactive_threshold ?mem_storage ()
 
@@ -1766,6 +1883,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency ~rate_limit
         ~replicas ~metadata ~replay_policy:value.replay_policy
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1782,9 +1902,31 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject ~filter_subjects ~backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~replay_policy:value.replay_policy
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage
+
+    let rebuild_priority value ~priority_groups ~priority_policy
+        ~priority_timeout =
+      rebuild ~durable_name:value.durable_name ~description:value.description
+        ~deliver_subject:value.deliver_subject ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until ~priority_groups ~priority_policy
+        ~priority_timeout ~sample_frequency:value.sample_frequency
+        ~rate_limit:value.rate_limit ~replicas:value.replicas
+        ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
@@ -1800,6 +1942,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1817,6 +1962,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1834,6 +1982,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1851,6 +2002,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1868,6 +2022,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1885,6 +2042,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1902,6 +2062,9 @@ module Consumer = struct
         ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1919,6 +2082,9 @@ module Consumer = struct
         ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1936,6 +2102,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1953,6 +2122,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1970,6 +2142,9 @@ module Consumer = struct
         ~filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:[] ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1994,6 +2169,19 @@ module Consumer = struct
       with
       | Error error -> Error error
       | Ok rebuilt -> Ok { rebuilt with pause_until }
+
+    let with_priority_groups value priority_groups =
+      rebuild_priority value ~priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
+
+    let with_priority_policy value priority_policy =
+      rebuild_priority value ~priority_groups:value.priority_groups
+        ~priority_policy ~priority_timeout:value.priority_timeout
+
+    let with_priority_timeout value priority_timeout =
+      rebuild_priority value ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy ~priority_timeout
 
     let with_sample_frequency value (sample_frequency : int option) =
       rebuild_modern value ~sample_frequency:(Some sample_frequency)
@@ -2024,6 +2212,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2041,6 +2232,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending ~max_waiting:value.max_waiting
@@ -2058,6 +2252,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting
@@ -2075,6 +2272,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2092,6 +2292,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2109,6 +2312,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2126,6 +2332,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2143,6 +2352,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2159,6 +2371,9 @@ module Consumer = struct
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until
+        ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2184,6 +2399,9 @@ module Consumer = struct
     filter_subjects : string list option;
     backoff : int64 list option;
     pause_until : string option;
+    priority_groups : string list option;
+    priority_policy : string option;
+    priority_timeout : int64 option;
     sample_frequency : string option;
     rate_limit : int64 option;
     replicas : int option;
@@ -2307,6 +2525,9 @@ module Consumer = struct
         filter_subjects
         backoff
         pause_until
+        priority_groups
+        priority_policy
+        priority_timeout
         sample_frequency
         rate_limit
         replicas
@@ -2339,6 +2560,9 @@ module Consumer = struct
           filter_subjects;
           backoff;
           pause_until;
+          priority_groups;
+          priority_policy;
+          priority_timeout;
           sample_frequency;
           rate_limit;
           replicas;
@@ -2386,6 +2610,12 @@ module Consumer = struct
         value.backoff)
     |> Jsont.Object.opt_mem "pause_until" Jsont.string ~enc:(fun value ->
         value.pause_until)
+    |> Jsont.Object.opt_mem "priority_groups" (Jsont.list Jsont.string)
+         ~enc:(fun value -> value.priority_groups)
+    |> Jsont.Object.opt_mem "priority_policy" Jsont.string ~enc:(fun value ->
+        value.priority_policy)
+    |> Jsont.Object.opt_mem "priority_timeout" Jsont.int64 ~enc:(fun value ->
+        value.priority_timeout)
     |> Jsont.Object.opt_mem "sample_freq" Jsont.string ~enc:(fun value ->
         value.sample_frequency)
     |> Jsont.Object.opt_mem "rate_limit_bps" Jsont.int64 ~enc:(fun value ->
@@ -2434,6 +2664,12 @@ module Consumer = struct
         value.action)
     |> Jsont.Object.finish
 
+  let priority_policy_to_wire = function
+    | None -> None
+    | Some Config.Overflow -> Some "overflow"
+    | Some Config.Pinned_client -> Some "pinned_client"
+    | Some Config.Prioritized -> Some "prioritized"
+
   let wire_config value =
     let deliver_policy, opt_start_seq, opt_start_time =
       match Config.deliver_policy value with
@@ -2470,6 +2706,13 @@ module Consumer = struct
         Option.map
           (Ptime.to_rfc3339 ~frac_s:9 ~tz_offset_s:0)
           (Config.pause_until value);
+      priority_groups =
+        (match Config.priority_groups value with
+        | [] -> None
+        | groups -> Some groups);
+      priority_policy = priority_policy_to_wire (Config.priority_policy value);
+      priority_timeout =
+        Option.map Mtime.Span.to_uint64_ns (Config.priority_timeout value);
       sample_frequency =
         sample_frequency_to_wire (Config.sample_frequency value);
       rate_limit = Config.rate_limit value;
@@ -2508,7 +2751,37 @@ module Consumer = struct
               (Error.Invalid_config
                  (Error.Invalid_consumer_pause_until raw)))
 
+  let priority_policy_of_wire = function
+    | None | Some "" | Some "none" -> Ok None
+    | Some "overflow" -> Ok (Some Config.Overflow)
+    | Some "pinned_client" -> Ok (Some Config.Pinned_client)
+    | Some "prioritized" -> Ok (Some Config.Prioritized)
+    | Some value ->
+        Error
+          (Error.Invalid_config
+             (Error.Invalid_consumer_policy
+                { field = "priority_policy"; value }))
+
+  let priority_groups_of_wire = function
+    | None -> Ok []
+    | Some groups -> (
+        match Config.validate_priority_groups groups with
+        | Ok () -> Ok groups
+        | Error error -> Error (Error.Invalid_config error))
+
+  let priority_timeout_of_wire = function
+    | None | Some 0L -> Ok None
+    | Some value when Int64.compare value 0L > 0 ->
+        Ok (Some (Mtime.Span.of_uint64_ns value))
+    | Some _ ->
+        Error
+          (Error.Invalid_config
+             (Error.Invalid_consumer_span { field = "priority_timeout" }))
+
   let config_of_wire value =
+    let ( let* ) value f =
+      match value with Error error -> Error error | Ok value -> f value
+    in
     let normalize_max_deliver = function Some -1 -> None | value -> value in
     let deliver_policy =
       match value.deliver_policy with
@@ -2544,6 +2817,9 @@ module Consumer = struct
     in
     let backoff = backoff_of_wire value.backoff in
     let pause_until = pause_until_of_wire value.pause_until in
+    let priority_groups = priority_groups_of_wire value.priority_groups in
+    let priority_policy = priority_policy_of_wire value.priority_policy in
+    let priority_timeout = priority_timeout_of_wire value.priority_timeout in
     let deliver_subject =
       match value.deliver_subject with
       | None | Some "" -> Ok None
@@ -2570,66 +2846,40 @@ module Consumer = struct
     let rate_limit =
       match value.rate_limit with Some 0L -> None | rate_limit -> rate_limit
     in
-    match deliver_policy with
-    | Error error -> Error error
-    | Ok deliver_policy -> (
-        match filter_subject with
-        | Error error -> Error error
-        | Ok filter_subject -> (
-            match filter_subjects with
-            | Error error -> Error error
-            | Ok filter_subjects -> (
-                match deliver_subject with
-                | Error error -> Error error
-                | Ok deliver_subject -> (
-                    match deliver_group with
-                    | Error error -> Error error
-                    | Ok deliver_group -> (
-                        match sample_frequency with
-                        | Error error -> Error error
-                        | Ok sample_frequency -> (
-                            match pause_until with
-                            | Error error -> Error error
-                            | Ok pause_until ->
-                                let ack_wait =
-                                  Option.map Mtime.Span.of_uint64_ns
-                                    value.ack_wait
-                                in
-                                let max_expires =
-                                  Option.map Mtime.Span.of_uint64_ns
-                                    value.max_expires
-                                in
-                                let inactive_threshold =
-                                  Option.map Mtime.Span.of_uint64_ns
-                                    value.inactive_threshold
-                                in
-                                let max_deliver =
-                                  normalize_max_deliver value.max_deliver
-                                in
-                                let max_ack_pending = value.max_ack_pending in
-                                let max_waiting = value.max_waiting in
-                                let max_batch = value.max_batch in
-                                let max_bytes = value.max_bytes in
-                                match
-                                  Config.v ?durable_name:value.durable_name
-                                    ?description:value.description
-                                    ?deliver_subject ?deliver_group
-                                    ?idle_heartbeat ?flow_control:value.flow_control
-                                    ~deliver_policy ~ack_policy:value.ack_policy
-                                    ?ack_wait ?max_deliver ?filter_subject
-                                    ~filter_subjects ~backoff ?pause_until
-                                    ?sample_frequency ?rate_limit ?replicas
-                                    ~metadata:(metadata_of_wire value.metadata)
-                                    ~replay_policy:value.replay_policy
-                                    ?max_ack_pending ?max_waiting ?max_batch
-                                    ?max_expires ?max_bytes
-                                    ?headers_only:value.headers_only
-                                    ?inactive_threshold ?mem_storage:value.mem_storage
-                                    ()
-                                with
-                                | Ok config -> Ok (config, value.unknown)
-                                | Error error ->
-                                    Error (Error.Invalid_config error)))))))
+    let* deliver_policy = deliver_policy in
+    let* filter_subject = filter_subject in
+    let* filter_subjects = filter_subjects in
+    let* deliver_subject = deliver_subject in
+    let* deliver_group = deliver_group in
+    let* sample_frequency = sample_frequency in
+    let* pause_until = pause_until in
+    let* priority_groups = priority_groups in
+    let* priority_policy = priority_policy in
+    let* priority_timeout = priority_timeout in
+    let ack_wait = Option.map Mtime.Span.of_uint64_ns value.ack_wait in
+    let max_expires = Option.map Mtime.Span.of_uint64_ns value.max_expires in
+    let inactive_threshold =
+      Option.map Mtime.Span.of_uint64_ns value.inactive_threshold
+    in
+    let max_deliver = normalize_max_deliver value.max_deliver in
+    let max_ack_pending = value.max_ack_pending in
+    let max_waiting = value.max_waiting in
+    let max_batch = value.max_batch in
+    let max_bytes = value.max_bytes in
+    match
+      Config.v ?durable_name:value.durable_name ?description:value.description
+        ?deliver_subject ?deliver_group ?idle_heartbeat
+        ?flow_control:value.flow_control ~deliver_policy
+        ~ack_policy:value.ack_policy ?ack_wait ?max_deliver ?filter_subject
+        ~filter_subjects ~backoff ?pause_until ~priority_groups
+        ?priority_policy ?priority_timeout ?sample_frequency ?rate_limit
+        ?replicas ~metadata:(metadata_of_wire value.metadata)
+        ~replay_policy:value.replay_policy ?max_ack_pending ?max_waiting
+        ?max_batch ?max_expires ?max_bytes ?headers_only:value.headers_only
+        ?inactive_threshold ?mem_storage:value.mem_storage ()
+    with
+    | Ok config -> Ok (config, value.unknown)
+    | Error error -> Error (Error.Invalid_config error)
 
   type wire_sequence = {
     consumer_sequence : int64 option;
@@ -2646,6 +2896,77 @@ module Consumer = struct
         value.stream_sequence)
     |> Jsont.Object.skip_unknown |> Jsont.Object.finish
 
+  type wire_priority_group = {
+    group : string;
+    pinned_client_id : string option;
+    pinned_ts : string option;
+  }
+
+  let wire_priority_group_codec =
+    Jsont.Object.map ~kind:"JetStream consumer priority group"
+      (fun group pinned_client_id pinned_ts ->
+        { group; pinned_client_id; pinned_ts })
+    |> Jsont.Object.mem "group" Jsont.string ~enc:(fun value -> value.group)
+    |> Jsont.Object.opt_mem "pinned_client_id" Jsont.string ~enc:(fun value ->
+        value.pinned_client_id)
+    |> Jsont.Object.opt_mem "pinned_ts" Jsont.string ~enc:(fun value ->
+        value.pinned_ts)
+    |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+
+  module Priority_group = struct
+    type t = {
+      name : string;
+      pinned_client_id : string option;
+      pinned_at : Ptime.t option;
+    }
+
+    let make ~name ~pinned_client_id ~pinned_at =
+      { name; pinned_client_id; pinned_at }
+
+    let name value = value.name
+    let pinned_client_id value = value.pinned_client_id
+    let pinned_at value = value.pinned_at
+  end
+
+  let priority_timestamp_of_wire = function
+    | None | Some "" -> Ok None
+    | Some raw -> (
+        match Ptime.of_rfc3339 ~strict:true raw with
+        | Ok (value, _, _) when is_zero_pause_until value -> Ok None
+        | Ok (value, _, _) -> Ok (Some value)
+        | Error _ ->
+            Error
+              (Error.Invalid_config
+                 (Error.Invalid_consumer_priority_timestamp raw)))
+
+  let priority_group_of_wire (value : wire_priority_group) =
+    let ( let* ) value f =
+      match value with Error error -> Error error | Ok value -> f value
+    in
+    let* () =
+      match Config.validate_priority_group value.group with
+      | Ok () -> Ok ()
+      | Error error -> Error (Error.Invalid_config error)
+    in
+    let* pinned_at = priority_timestamp_of_wire value.pinned_ts in
+    Ok
+      (Priority_group.make ~name:value.group
+         ~pinned_client_id:value.pinned_client_id ~pinned_at)
+
+  let priority_group_states_of_wire = function
+    | None -> Ok []
+    | Some values ->
+        List.fold_left
+          (fun result value ->
+            match result with
+            | Error _ -> result
+            | Ok values -> (
+                match priority_group_of_wire value with
+                | Error error -> Error error
+                | Ok value -> Ok (value :: values)))
+          (Ok []) values
+        |> Result.map List.rev
+
   type response = {
     error : api_error option;
     stream_name : string option;
@@ -2660,6 +2981,7 @@ module Consumer = struct
     num_pending : int64 option;
     paused : bool option;
     pause_remaining : int64 option;
+    priority_groups : wire_priority_group list option;
     unknown : Jsont.json;
   }
 
@@ -2679,6 +3001,7 @@ module Consumer = struct
         num_pending
         paused
         pause_remaining
+        priority_groups
         unknown
       ->
         {
@@ -2695,6 +3018,7 @@ module Consumer = struct
           num_pending;
           paused;
           pause_remaining;
+          priority_groups;
           unknown;
         })
     |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
@@ -2722,6 +3046,9 @@ module Consumer = struct
         value.paused)
     |> Jsont.Object.opt_mem "pause_remaining" Jsont.int64 ~enc:(fun value ->
         value.pause_remaining)
+    |> Jsont.Object.opt_mem "priority_groups"
+         (Jsont.list wire_priority_group_codec) ~enc:(fun value ->
+           value.priority_groups)
     |> Jsont.Object.keep_unknown
          ~enc:(fun value -> value.unknown)
          Jsont.json_mems
@@ -2795,6 +3122,7 @@ module Consumer = struct
       num_pending : int64;
       paused : bool;
       pause_remaining : Mtime.Span.t option;
+      priority_groups : Priority_group.t list;
     }
 
     let name value = value.name
@@ -2804,6 +3132,7 @@ module Consumer = struct
     let paused value = value.paused
     let pause_until value = Config.pause_until value.config
     let pause_remaining value = value.pause_remaining
+    let priority_groups value = value.priority_groups
     let unknown value = value.unknown
     let config_unknown value = value.config_unknown
 
@@ -2907,34 +3236,69 @@ module Consumer = struct
               | _ -> (
                   match config_of_wire config with
                   | Error error -> Error error
-                  | Ok (config, config_unknown) ->
-                      Ok
-                        {
-                          Info.name;
-                          stream_name;
-                          created = response.created;
-                          config;
-                          unknown = response.unknown;
-                          config_unknown;
-                          delivered = response.delivered;
-                          ack_floor = response.ack_floor;
-                          num_ack_pending =
-                            Option.value ~default:0 response.num_ack_pending;
-                          num_redelivered =
-                            Option.value ~default:0 response.num_redelivered;
-                          num_waiting =
-                            Option.value ~default:0 response.num_waiting;
-                          num_pending =
-                            Option.value ~default:0L response.num_pending;
-                          paused = Option.value ~default:false response.paused;
-                          pause_remaining =
-                            Option.map Mtime.Span.of_uint64_ns
-                              response.pause_remaining;
-                        })))
+                  | Ok (config, config_unknown) -> (
+                      match priority_group_states_of_wire response.priority_groups with
+                      | Error error -> Error error
+                      | Ok priority_groups ->
+                          Ok
+                            {
+                              Info.name;
+                              stream_name;
+                              created = response.created;
+                              config;
+                              unknown = response.unknown;
+                              config_unknown;
+                              delivered = response.delivered;
+                              ack_floor = response.ack_floor;
+                              num_ack_pending =
+                                Option.value ~default:0 response.num_ack_pending;
+                              num_redelivered =
+                                Option.value ~default:0 response.num_redelivered;
+                              num_waiting =
+                                Option.value ~default:0 response.num_waiting;
+                              num_pending =
+                                Option.value ~default:0L response.num_pending;
+                              paused = Option.value ~default:false response.paused;
+                              pause_remaining =
+                                Option.map Mtime.Span.of_uint64_ns
+                                  response.pause_remaining;
+                              priority_groups;
+                            }))))
+
+  let rec equal_string_lists left right =
+    match (left, right) with
+    | [], [] -> true
+    | left :: left_tail, right :: right_tail ->
+        String.equal left right && equal_string_lists left_tail right_tail
+    | _ -> false
+
+  let normalized_priority_policy = function
+    | None | Some "" | Some "none" -> None
+    | Some value -> Some value
+
+  let validate_priority_update ~(current : wire_config) value =
+    let current_groups = Option.value ~default:[] current.priority_groups in
+    let desired_groups = Config.priority_groups value in
+    let current_policy = normalized_priority_policy current.priority_policy in
+    let desired_policy = priority_policy_to_wire (Config.priority_policy value) in
+    let same_policy =
+      match (current_policy, desired_policy) with
+      | None, None -> true
+      | Some current, Some desired -> String.equal current desired
+      | None, Some _ | Some _, None -> false
+    in
+    if equal_string_lists current_groups desired_groups && same_policy then Ok ()
+    else Error (Error.Invalid_config Error.Invalid_consumer_priority_update)
 
   let wire_config_for_update ~current value =
     let metadata = Config.metadata value in
     let value = wire_config value in
+    let priority_timeout =
+      match normalized_priority_policy current.priority_policy with
+      | Some "pinned_client" ->
+          Some (Option.value ~default:0L value.priority_timeout)
+      | _ -> current.priority_timeout
+    in
     {
       value with
       durable_name =
@@ -2963,6 +3327,9 @@ module Consumer = struct
       inactive_threshold =
         Some (Option.value ~default:0L value.inactive_threshold);
       pause_until = current.pause_until;
+      priority_groups = current.priority_groups;
+      priority_policy = current.priority_policy;
+      priority_timeout;
       unknown = current.unknown;
     }
 
@@ -2973,25 +3340,60 @@ module Consumer = struct
     stream : stream;
     name : string;
     pause_until : Ptime.t option ref;
+    priority_pins : string String_map.t ref;
   }
+
+  let priority_pin consumer ~group =
+    String_map.find_opt group !(consumer.priority_pins)
+
+  let set_priority_pin consumer ~group ~pin =
+    match pin with
+    | None -> consumer.priority_pins := String_map.remove group !(consumer.priority_pins)
+    | Some pin ->
+        consumer.priority_pins :=
+          String_map.add group pin !(consumer.priority_pins)
 
   type next_request = {
     expires : int64;
     batch : int;
     max_bytes : int option;
     idle_heartbeat : int64 option;
+    group : string option;
+    min_pending : int64 option;
+    min_ack_pending : int64 option;
+    id : string option;
+    priority : int option;
   }
 
   let next_request_codec =
     Jsont.Object.map ~kind:"JetStream consumer pull request"
-      (fun expires batch max_bytes idle_heartbeat ->
-        { expires; batch; max_bytes; idle_heartbeat })
+      (fun expires batch max_bytes idle_heartbeat group min_pending
+          min_ack_pending id priority ->
+        {
+          expires;
+          batch;
+          max_bytes;
+          idle_heartbeat;
+          group;
+          min_pending;
+          min_ack_pending;
+          id;
+          priority;
+        })
     |> Jsont.Object.mem "expires" Jsont.int64 ~enc:(fun value -> value.expires)
     |> Jsont.Object.mem "batch" Jsont.int ~enc:(fun value -> value.batch)
     |> Jsont.Object.opt_mem "max_bytes" Jsont.int ~enc:(fun value ->
         value.max_bytes)
     |> Jsont.Object.opt_mem "idle_heartbeat" Jsont.int64 ~enc:(fun value ->
         value.idle_heartbeat)
+    |> Jsont.Object.opt_mem "group" Jsont.string ~enc:(fun value -> value.group)
+    |> Jsont.Object.opt_mem "min_pending" Jsont.int64 ~enc:(fun value ->
+        value.min_pending)
+    |> Jsont.Object.opt_mem "min_ack_pending" Jsont.int64 ~enc:(fun value ->
+        value.min_ack_pending)
+    |> Jsont.Object.opt_mem "id" Jsont.string ~enc:(fun value -> value.id)
+    |> Jsont.Object.opt_mem "priority" Jsont.int ~enc:(fun value ->
+        value.priority)
     |> Jsont.Object.finish
 
   let default_fetch_expires = Mtime.Span.(5 * s)
@@ -3004,7 +3406,47 @@ module Consumer = struct
       Mtime.Span.max_span
     else Mtime.Span.of_uint64_ns (Int64.add expires_ns leeway_ns)
 
-  let validate_fetch ~batch ~expires ~max_bytes ~idle_heartbeat =
+  let validate_pull_options ~group ~min_pending ~min_ack_pending ~priority =
+    let ( let* ) value f =
+      match value with Error error -> Error error | Ok value -> f value
+    in
+    let* () =
+      match group with
+      | None when
+          Option.is_some min_pending || Option.is_some min_ack_pending
+          || Option.is_some priority -> Error (Error.Invalid_priority_group "")
+      | None -> Ok ()
+      | Some group -> (
+          match Config.validate_priority_group group with
+          | Ok () -> Ok ()
+          | Error _ -> Error (Error.Invalid_priority_group group))
+    in
+    let* () =
+      match min_pending with
+      | None -> Ok ()
+      | Some value when Int64.compare value 0L >= 0 -> Ok ()
+      | Some value ->
+          Error
+            (Error.Invalid_priority_threshold
+               { field = "min_pending"; value })
+    in
+    let* () =
+      match min_ack_pending with
+      | None -> Ok ()
+      | Some value when Int64.compare value 0L >= 0 -> Ok ()
+      | Some value ->
+          Error
+            (Error.Invalid_priority_threshold
+               { field = "min_ack_pending"; value })
+    in
+    match priority with
+    | None -> Ok ()
+    | Some value when Int.compare value 0 >= 0 && Int.compare value 9 <= 0 ->
+        Ok ()
+    | Some value -> Error (Error.Invalid_priority value)
+
+  let validate_fetch ~batch ~expires ~max_bytes ~idle_heartbeat ~group
+      ~min_pending ~min_ack_pending ~priority =
     let ( let* ) value f =
       match value with Error error -> Error error | Ok value -> f value
     in
@@ -3022,6 +3464,7 @@ module Consumer = struct
       | Some value when Int.compare value 0 >= 0 -> Ok ()
       | Some value -> Error (Error.Invalid_max_bytes value)
     in
+    let* () = validate_pull_options ~group ~min_pending ~min_ack_pending ~priority in
     match idle_heartbeat with
     | None -> Ok ()
     | Some heartbeat ->
@@ -3072,6 +3515,7 @@ module Consumer = struct
     | Status_request_expired
     | Status_batch_completed
     | Status_max_bytes
+    | Status_pin_lost
     | Status_consumer_deleted
     | Status_conflict
     | Status_unexpected
@@ -3090,6 +3534,7 @@ module Consumer = struct
          || contains ~needle:"flow control" normalized)
     then Status_flow_control
     else if Int.equal code 408 then Status_request_expired
+    else if Int.equal code 423 then Status_pin_lost
     else if
       Int.equal code 409
       && contains ~needle:"message size exceeds maxbytes" normalized
@@ -3106,7 +3551,8 @@ module Consumer = struct
     | Status_request_expired | Status_batch_completed | Status_max_bytes ->
         Ok ()
     | Status_consumer_deleted -> Error Error.Consumer_deleted
-    | Status_conflict -> Error (Error.Conflict { code; description })
+    | Status_pin_lost | Status_conflict ->
+        Error (Error.Conflict { code; description })
     | Status_idle_heartbeat | Status_flow_control | Status_unexpected ->
         Error (Error.Unexpected_status { code; description })
 
@@ -3115,7 +3561,7 @@ module Consumer = struct
     let description = status.Nats.Op.description in
     match classify_status status with
     | Status_request_expired | Status_batch_completed -> Ok ()
-    | Status_max_bytes | Status_conflict ->
+    | Status_max_bytes | Status_pin_lost | Status_conflict ->
         Error (Error.Conflict { code; description })
     | Status_consumer_deleted -> Error Error.Consumer_deleted
     | Status_idle_heartbeat | Status_flow_control | Status_unexpected ->
@@ -3126,7 +3572,8 @@ module Consumer = struct
     let description = status.Nats.Op.description in
     match classify_status status with
     | Status_consumer_deleted -> Error.Consumer_deleted
-    | Status_max_bytes | Status_conflict -> Error.Conflict { code; description }
+    | Status_max_bytes | Status_pin_lost | Status_conflict ->
+        Error.Conflict { code; description }
     | Status_idle_heartbeat | Status_flow_control | Status_request_expired
     | Status_batch_completed | Status_unexpected ->
         Error.Unexpected_status { code; description }
@@ -3160,124 +3607,161 @@ module Consumer = struct
             Ok value
         | Error error, _ -> Error error)
 
-  let fetch ?expires ?idle_heartbeat ?max_bytes consumer ~batch =
+  let fetch ?expires ?idle_heartbeat ?max_bytes ?group ?min_pending
+      ?min_ack_pending ?priority consumer ~batch =
     let expires = Option.value expires ~default:default_fetch_expires in
-    match validate_fetch ~batch ~expires ~max_bytes ~idle_heartbeat with
+    match
+      validate_fetch ~batch ~expires ~max_bytes ~idle_heartbeat ~group
+        ~min_pending ~min_ack_pending ~priority
+    with
     | Error error -> Error error
     | Ok () -> (
-        let request =
+        let base_request =
           {
             expires = Mtime.Span.to_uint64_ns expires;
             batch;
             max_bytes;
             idle_heartbeat = Option.map Mtime.Span.to_uint64_ns idle_heartbeat;
+            group;
+            min_pending;
+            min_ack_pending;
+            id = None;
+            priority;
           }
         in
-        match encode next_request_codec request with
-        | Error error -> Error error
-        | Ok payload ->
-            with_fetch_subscription consumer (fun ~inbox subscription ->
-                let subject =
-                  api_subject consumer.jetstream
-                    [
-                      "CONSUMER";
-                      "MSG";
-                      "NEXT";
-                      Stream.name consumer.stream;
-                      consumer.name;
-                    ]
-                in
-                let connection = consumer.jetstream.connection in
-                match
-                  Connection.publish connection ~reply_to:inbox subject payload
-                with
-                | Error error -> Error (Error.Connection error)
-                | Ok () -> (
-                    let messages = ref [] in
-                    let count = ref 0 in
-                    let deadline =
-                      let local_expires = add_fetch_expiry_leeway expires in
+        with_fetch_subscription consumer (fun ~inbox subscription ->
+            let subject =
+              api_subject consumer.jetstream
+                [
+                  "CONSUMER";
+                  "MSG";
+                  "NEXT";
+                  Stream.name consumer.stream;
+                  consumer.name;
+                ]
+            in
+            let connection = consumer.jetstream.connection in
+            let messages = ref [] in
+            let count = ref 0 in
+            let deadline =
+              let local_expires = add_fetch_expiry_leeway expires in
+              match Mtime.add_span (Connection.now connection) local_expires with
+              | Some deadline -> deadline
+              | None -> Mtime.max_stamp
+            in
+            let heartbeat_deadline =
+              ref (heartbeat_deadline_at connection idle_heartbeat)
+            in
+            let terminal = ref None in
+            let publish_request () =
+              let id =
+                Option.bind group (fun group -> priority_pin consumer ~group)
+              in
+              let request =
+                { base_request with batch = batch - !count; id }
+              in
+              match encode next_request_codec request with
+              | Error error -> Error error
+              | Ok payload -> (
+                  match
+                    Connection.publish connection ~reply_to:inbox subject payload
+                  with
+                  | Error error -> Error (Error.Connection error)
+                  | Ok () -> Ok ())
+            in
+            match publish_request () with
+            | Error error -> Error error
+            | Ok () ->
+                while
+                  Int.compare !count batch < 0 && Option.is_none !terminal
+                do
+                  let current = Connection.now connection in
+                  let wait_deadline =
+                    Option.value
+                      (earliest_deadline !heartbeat_deadline (Some deadline))
+                      ~default:deadline
+                  in
+                  let wait_result =
+                    if Mtime.compare current wait_deadline >= 0 then
+                      Error Core_error.Timeout
+                    else
+                      let remaining = Mtime.span current wait_deadline in
                       match
-                        Mtime.add_span (Connection.now connection) local_expires
+                        Connection.Subscription.next_with_timeout
+                          ~timeout:remaining subscription
                       with
-                      | Some deadline -> deadline
-                      | None -> Mtime.max_stamp
-                    in
-                    let heartbeat_deadline =
-                      ref (heartbeat_deadline_at connection idle_heartbeat)
-                    in
-                    let terminal = ref None in
-                    while
-                      Int.compare !count batch < 0 && Option.is_none !terminal
-                    do
-                      let current = Connection.now connection in
-                      let wait_deadline =
-                        Option.value
-                          (earliest_deadline !heartbeat_deadline (Some deadline))
-                          ~default:deadline
-                      in
-                      let wait_result =
-                        if Mtime.compare current wait_deadline >= 0 then
-                          Error Core_error.Timeout
-                        else
-                          let remaining = Mtime.span current wait_deadline in
+                      | Error error -> Error error
+                      | Ok delivery -> Ok delivery
+                  in
+                  match wait_result with
+                  | Error Core_error.Timeout -> (
+                      let now = Connection.now connection in
+                      match !heartbeat_deadline with
+                      | Some heartbeat_deadline
+                        when Mtime.compare now heartbeat_deadline >= 0 ->
+                          terminal := Some (Error Error.Missing_heartbeat)
+                      | _ -> terminal := Some (Ok (List.rev !messages)))
+                  | Error error ->
+                      terminal := Some (Error (Error.Connection error))
+                  | Ok delivery -> (
+                      match delivery.status with
+                      | None -> (
                           match
-                            Connection.Subscription.next_with_timeout
-                              ~timeout:remaining subscription
+                            Msg.of_message ~jetstream:consumer.jetstream
+                              ~stream_name:(Stream.name consumer.stream)
+                              ~consumer_name:consumer.name delivery.message
                           with
-                          | Error error -> Error error
-                          | Ok delivery -> Ok delivery
-                      in
-                      match wait_result with
-                      | Error Core_error.Timeout -> (
-                          let now = Connection.now connection in
-                          match !heartbeat_deadline with
-                          | Some heartbeat_deadline
-                            when Mtime.compare now heartbeat_deadline >= 0 ->
-                              terminal := Some (Error Error.Missing_heartbeat)
-                          | _ -> terminal := Some (Ok (List.rev !messages)))
-                      | Error error ->
-                          terminal := Some (Error (Error.Connection error))
-                      | Ok delivery -> (
-                          match delivery.status with
-                          | None -> (
-                              match
-                                Msg.of_message ~jetstream:consumer.jetstream
-                                  ~stream_name:(Stream.name consumer.stream)
-                                  ~consumer_name:consumer.name delivery.message
-                              with
-                              | Error error -> terminal := Some (Error error)
-                              | Ok message ->
+                          | Error error -> terminal := Some (Error error)
+                          | Ok message ->
+                              (match
+                                 Nats.Header.find "Nats-Pin-Id"
+                                   (Msg.headers message)
+                               with
+                              | Some pin_id when not (String.equal pin_id "") ->
+                                  Option.iter
+                                    (fun group ->
+                                      set_priority_pin consumer ~group
+                                        ~pin:(Some pin_id))
+                                    group
+                              | Some _ | None -> ());
+                              heartbeat_deadline :=
+                                heartbeat_deadline_at connection idle_heartbeat;
+                              messages := message :: !messages;
+                              count := !count + 1)
+                      | Some status -> (
+                          match classify_status status with
+                          | Status_pin_lost ->
+                              Option.iter
+                                (fun group ->
+                                  set_priority_pin consumer ~group ~pin:None)
+                                group;
+                              heartbeat_deadline :=
+                                heartbeat_deadline_at connection idle_heartbeat;
+                              (match publish_request () with
+                              | Ok () -> ()
+                              | Error error ->
+                                  terminal := Some (Error error))
+                          | Status_idle_heartbeat -> (
+                              match idle_heartbeat with
+                              | Some _ ->
                                   heartbeat_deadline :=
                                     heartbeat_deadline_at connection
-                                      idle_heartbeat;
-                                  messages := message :: !messages;
-                                  count := !count + 1)
-                          | Some status -> (
-                              match classify_status status with
-                              | Status_idle_heartbeat -> (
-                                  match idle_heartbeat with
-                                  | Some _ ->
-                                      heartbeat_deadline :=
-                                        heartbeat_deadline_at connection
-                                          idle_heartbeat
-                                  | None -> (
-                                      match status_result status with
-                                      | Ok () ->
-                                          terminal :=
-                                            Some (Ok (List.rev !messages))
-                                      | Error error ->
-                                          terminal := Some (Error error)))
-                              | _ -> (
+                                      idle_heartbeat
+                              | None -> (
                                   match status_result status with
                                   | Ok () ->
                                       terminal := Some (Ok (List.rev !messages))
                                   | Error error ->
-                                      terminal := Some (Error error))))
-                    done;
-                    match !terminal with
-                    | Some result -> result
-                    | None -> Ok (List.rev !messages))))
+                                      terminal := Some (Error error)))
+                          | _ -> (
+                              match status_result status with
+                              | Ok () ->
+                                  terminal := Some (Ok (List.rev !messages))
+                              | Error error -> terminal := Some (Error error))))
+                done;
+                match !terminal with
+                | Some result -> result
+                | None -> Ok (List.rev !messages)))
 
   module Pull = struct
     type consumer = t
@@ -3289,7 +3773,7 @@ module Consumer = struct
       subscription : Connection.Subscription.t;
       inbox : Nats.Subject.t;
       subject : Nats.Subject.t;
-      payload : string;
+      request : next_request;
       batch : int;
       mutable remaining : int;
       idle_heartbeat : Mtime.Span.t option;
@@ -3336,20 +3820,29 @@ module Consumer = struct
         | Closed -> Error Error.Pull_closed
         | Failed error -> Error error
         | Open -> (
-            match
-              Connection.publish pull.connection ~reply_to:pull.inbox
-                pull.subject pull.payload
-            with
-            | Ok () -> (
-                match pull.state with
-                | Open ->
-                    pull.remaining <- pull.batch;
-                    pull.heartbeat_deadline <-
-                      heartbeat_deadline_at pull.connection pull.idle_heartbeat;
-                    Ok ()
-                | Closed -> Error Error.Pull_closed
-                | Failed error -> Error error)
-            | Error error -> connection_error pull error)
+            let id =
+              Option.bind pull.request.group (fun group ->
+                  priority_pin pull.consumer ~group)
+            in
+            let request = { pull.request with id } in
+            match encode next_request_codec request with
+            | Error error -> Error error
+            | Ok payload -> (
+                match
+                  Connection.publish pull.connection ~reply_to:pull.inbox
+                    pull.subject payload
+                with
+                | Ok () -> (
+                    match pull.state with
+                    | Open ->
+                        pull.remaining <- pull.batch;
+                        pull.heartbeat_deadline <-
+                          heartbeat_deadline_at pull.connection
+                            pull.idle_heartbeat;
+                        Ok ()
+                    | Closed -> Error Error.Pull_closed
+                    | Failed error -> Error error)
+                | Error error -> connection_error pull error))
 
     let timeout_error = Error.Connection (Core_error.Invalid_timeout "pull")
     let timed_out = Error.Connection Core_error.Timeout
@@ -3377,6 +3870,13 @@ module Consumer = struct
                       pull.heartbeat_deadline <- None;
                       Ok None
                   | Error error -> Error error))
+          | Status_pin_lost ->
+              Option.iter
+                (fun group -> set_priority_pin pull.consumer ~group ~pin:None)
+                pull.request.group;
+              pull.remaining <- 0;
+              pull.heartbeat_deadline <- None;
+              Ok None
           | _ -> (
               match pull_status_result status with
               | Ok () ->
@@ -3392,6 +3892,13 @@ module Consumer = struct
           with
           | Error error -> Error error
           | Ok message ->
+              (match Nats.Header.find "Nats-Pin-Id" (Msg.headers message) with
+              | Some pin_id when not (String.equal pin_id "") ->
+                  Option.iter
+                    (fun group ->
+                      set_priority_pin pull.consumer ~group ~pin:(Some pin_id))
+                    pull.request.group
+              | Some _ | None -> ());
               pull.remaining <- pull.remaining - 1;
               if Int.equal pull.remaining 0 then pull.heartbeat_deadline <- None
               else
@@ -3464,9 +3971,13 @@ module Consumer = struct
       done;
       match !result with Some result -> result | None -> assert false
 
-    let v ~sw ?(batch = 1) ?expires ?idle_heartbeat ?max_bytes consumer =
+    let v ~sw ?(batch = 1) ?expires ?idle_heartbeat ?max_bytes ?group
+        ?min_pending ?min_ack_pending ?priority consumer =
       let expires = Option.value expires ~default:default_fetch_expires in
-      match validate_fetch ~batch ~expires ~max_bytes ~idle_heartbeat with
+      match
+        validate_fetch ~batch ~expires ~max_bytes ~idle_heartbeat ~group
+          ~min_pending ~min_ack_pending ~priority
+      with
       | Error error -> Error error
       | Ok () -> (
           let request =
@@ -3475,54 +3986,55 @@ module Consumer = struct
               batch;
               max_bytes;
               idle_heartbeat = Option.map Mtime.Span.to_uint64_ns idle_heartbeat;
+              group;
+              min_pending;
+              min_ack_pending;
+              id = None;
+              priority;
             }
           in
-          match encode next_request_codec request with
-          | Error error -> Error error
-          | Ok payload -> (
-              let connection = consumer.jetstream.connection in
-              let inbox = Connection.fresh_inbox connection in
-              let filter =
-                Nats.Subject.Filter.literal (Nats.Subject.to_string inbox)
+          let connection = consumer.jetstream.connection in
+          let inbox = Connection.fresh_inbox connection in
+          let filter =
+            Nats.Subject.Filter.literal (Nats.Subject.to_string inbox)
+          in
+          match
+            Connection.subscribe connection ~replay_on_reconnect:false filter
+          with
+          | Error error -> Error (Error.Connection error)
+          | Ok subscription ->
+              let subject =
+                api_subject consumer.jetstream
+                  [
+                    "CONSUMER";
+                    "MSG";
+                    "NEXT";
+                    Stream.name consumer.stream;
+                    consumer.name;
+                  ]
               in
-              match
-                Connection.subscribe connection ~replay_on_reconnect:false
-                  filter
-              with
-              | Error error -> Error (Error.Connection error)
-              | Ok subscription ->
-                  let subject =
-                    api_subject consumer.jetstream
-                      [
-                        "CONSUMER";
-                        "MSG";
-                        "NEXT";
-                        Stream.name consumer.stream;
-                        consumer.name;
-                      ]
-                  in
-                  let pull =
-                    {
-                      consumer;
-                      connection;
-                      subscription;
-                      inbox;
-                      subject;
-                      payload;
-                      batch;
-                      remaining = 0;
-                      idle_heartbeat;
-                      heartbeat_deadline = None;
-                      state = Open;
-                      hook = None;
-                    }
-                  in
-                  let hook =
-                    Eio.Switch.on_release_cancellable sw (fun () ->
-                        ignore (close pull))
-                  in
-                  pull.hook <- Some hook;
-                  Ok pull))
+              let pull =
+                {
+                  consumer;
+                  connection;
+                  subscription;
+                  inbox;
+                  subject;
+                  request;
+                  batch;
+                  remaining = 0;
+                  idle_heartbeat;
+                  heartbeat_deadline = None;
+                  state = Open;
+                  hook = None;
+                }
+              in
+              let hook =
+                Eio.Switch.on_release_cancellable sw (fun () ->
+                    ignore (close pull))
+              in
+              pull.hook <- Some hook;
+              Ok pull)
 
     let next pull = next_loop pull ~deadline:None
 
@@ -3551,7 +4063,14 @@ module Consumer = struct
   let bind (stream : Stream.t) ~name =
     match Config.validate_name (Some name) with
     | Ok () ->
-        Ok { jetstream = stream.jetstream; stream; name; pause_until = ref None }
+        Ok
+          {
+            jetstream = stream.jetstream;
+            stream;
+            name;
+            pause_until = ref None;
+            priority_pins = ref String_map.empty;
+          }
     | Error error -> Error (Error.Invalid_config error)
 
   let name value = value.name
@@ -3595,6 +4114,7 @@ module Consumer = struct
                             stream;
                             name;
                             pause_until = ref (Config.pause_until actual_config);
+                            priority_pins = ref String_map.empty;
                           }
                     | Error error -> Error error))))
 
@@ -3666,6 +4186,52 @@ module Consumer = struct
             consumer.pause_until := Pause.pause_until response;
             Ok response)
 
+  type unpin_request = { group : string }
+
+  let unpin_request_codec =
+    Jsont.Object.map ~kind:"JetStream consumer unpin request" (fun group ->
+        { group })
+    |> Jsont.Object.mem "group" Jsont.string ~enc:(fun value -> value.group)
+    |> Jsont.Object.finish
+
+  type unpin_response = { error : api_error option }
+
+  let unpin_response_codec =
+    Jsont.Object.map ~kind:"JetStream consumer unpin response" (fun error ->
+        { error })
+    |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
+        value.error)
+    |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+
+  let decode_unpin_response message =
+    match decode unpin_response_codec message with
+    | Error error -> Error error
+    | Ok { error = Some error } -> Error (Error.Api error)
+    | Ok { error = None } -> Ok ()
+
+  let unpin ?timeout consumer ~group =
+    match Config.validate_priority_group group with
+    | Error _ -> Error (Error.Invalid_priority_group group)
+    | Ok () ->
+        let subject =
+          api_subject consumer.jetstream
+            [ "CONSUMER"; "UNPIN"; Stream.name consumer.stream; consumer.name ]
+        in
+        match encode unpin_request_codec { group } with
+        | Error error -> Error error
+        | Ok payload -> (
+            match
+              request_msg ?timeout consumer.jetstream
+                (Nats.Message.v ~subject payload)
+            with
+            | Error error -> Error error
+            | Ok message -> (
+                match decode_unpin_response message with
+                | Error error -> Error error
+                | Ok () ->
+                    set_priority_pin consumer ~group ~pin:None;
+                    Ok ()))
+
   let update ?timeout consumer config =
     match Config.durable_name config with
     | Some actual when not (String.equal actual consumer.name) ->
@@ -3685,42 +4251,46 @@ module Consumer = struct
                 match response.config with
                 | None -> Error (Error.Missing_field "config")
                 | Some current -> (
-                    let subject =
-                      api_subject consumer.jetstream
-                        [
-                          "CONSUMER";
-                          "CREATE";
-                          Stream.name consumer.stream;
-                          consumer.name;
-                        ]
-                    in
-                    let request =
-                      {
-                        stream_name = Stream.name consumer.stream;
-                        config = wire_config_for_update ~current config;
-                        action = Some "update";
-                      }
-                    in
-                    match encode create_request_codec request with
+                    match validate_priority_update ~current config with
                     | Error error -> Error error
-                    | Ok payload -> (
-                        match
-                          request_msg ?timeout consumer.jetstream
-                            (Nats.Message.v ~subject payload)
-                        with
+                    | Ok () ->
+                        let subject =
+                          api_subject consumer.jetstream
+                            [
+                              "CONSUMER";
+                              "CREATE";
+                              Stream.name consumer.stream;
+                              consumer.name;
+                            ]
+                        in
+                        let request =
+                          {
+                            stream_name = Stream.name consumer.stream;
+                            config = wire_config_for_update ~current config;
+                            action = Some "update";
+                          }
+                        in
+                        match encode create_request_codec request with
                         | Error error -> Error error
-                        | Ok message -> (
-                            match decode_response message with
+                        | Ok payload -> (
+                            match
+                              request_msg ?timeout consumer.jetstream
+                                (Nats.Message.v ~subject payload)
+                            with
                             | Error error -> Error error
-                            | Ok response -> (
-                                match
-                                  info_of_response ~stream:consumer.stream
-                                    ~expected_name:consumer.name response
-                                with
+                            | Ok message -> (
+                                match decode_response message with
                                 | Error error -> Error error
-                                | Ok info ->
-                                    consumer.pause_until := Info.pause_until info;
-                                    Ok info)))))))
+                                | Ok response -> (
+                                    match
+                                      info_of_response ~stream:consumer.stream
+                                        ~expected_name:consumer.name response
+                                    with
+                                    | Error error -> Error error
+                                    | Ok info ->
+                                        consumer.pause_until :=
+                                          Info.pause_until info;
+                                        Ok info)))))))
 
   let delete ?timeout consumer =
     let subject =
@@ -4518,7 +5088,8 @@ module Consumer = struct
       in
       match
         validate_fetch ~batch ~expires ~max_bytes
-          ~idle_heartbeat:(Some idle_heartbeat)
+          ~idle_heartbeat:(Some idle_heartbeat) ~group:None ~min_pending:None
+          ~min_ack_pending:None ~priority:None
       with
       | Error error -> Error error
       | Ok () -> (

@@ -19,6 +19,9 @@ module Error : sig
     | Invalid_consumer_rate_limit of int64
     | Invalid_consumer_replicas of int
     | Invalid_consumer_pause_until of string
+    | Invalid_consumer_priority_group of string
+    | Invalid_consumer_priority_timestamp of string
+    | Invalid_consumer_priority_update
     | Invalid_consumer_policy of { field : string; value : string }
 
   type api = { code : int; err_code : int option; description : string }
@@ -42,6 +45,9 @@ module Error : sig
     | Unexpected_consumer_name of { expected : string; actual : string }
     | Invalid_batch of int
     | Invalid_max_bytes of int
+    | Invalid_priority_group of string
+    | Invalid_priority_threshold of { field : string; value : int64 }
+    | Invalid_priority of int
     | Invalid_fetch_span
     | Invalid_idle_heartbeat
     | Idle_heartbeat_expires_too_short
@@ -331,6 +337,8 @@ module Consumer : sig
   module Config : sig
     type ack_policy = No_ack | All | Explicit
 
+    type priority_policy = Overflow | Pinned_client | Prioritized
+
     type deliver_policy =
       | All
       | Last
@@ -358,6 +366,9 @@ module Consumer : sig
       ?filter_subjects:Nats.Subject.Filter.t list ->
       ?backoff:Mtime.Span.t list ->
       ?pause_until:Ptime.t ->
+      ?priority_groups:string list ->
+      ?priority_policy:priority_policy ->
+      ?priority_timeout:Mtime.Span.t ->
       ?sample_frequency:int ->
       ?rate_limit:int64 ->
       ?replicas:int ->
@@ -392,6 +403,15 @@ module Consumer : sig
     (** [backoff config] returns the redelivery delay schedule. *)
     val pause_until : t -> Ptime.t option
     (** [pause_until config] is the server-side pause deadline, when set. *)
+    val priority_groups : t -> string list
+    (** [priority_groups config] returns the configured priority group names.
+        A priority consumer currently requires exactly one name. *)
+    val priority_policy : t -> priority_policy option
+    (** [priority_policy config] is the pull-consumer priority policy, when
+        configured. *)
+    val priority_timeout : t -> Mtime.Span.t option
+    (** [priority_timeout config] is the pinned-client grace period, when
+        configured. *)
     val sample_frequency : t -> int option
     (** [sample_frequency config] is the delivery sample percentage. *)
     val rate_limit : t -> int64 option
@@ -468,6 +488,22 @@ module Consumer : sig
         a consumer does not change its pause state; use {!Consumer.resume} or
         {!Consumer.pause} for that operation. *)
 
+    val with_priority_groups : t -> string list -> (t, error) result
+    (** [with_priority_groups config groups] replaces the priority group names.
+        Priority groups are pull-only; the current implementation accepts one
+        name of at most sixteen ASCII letters, digits, [/], [_], [-], or [=]
+        characters. *)
+
+    val with_priority_policy :
+      t -> priority_policy option -> (t, error) result
+    (** [with_priority_policy config policy] replaces the priority policy.
+        A policy requires at least one priority group. *)
+
+    val with_priority_timeout :
+      t -> Mtime.Span.t option -> (t, error) result
+    (** [with_priority_timeout config timeout] replaces the pinned-client
+        grace period. It is meaningful only with {!Pinned_client}. *)
+
     val with_sample_frequency : t -> int option -> (t, error) result
     (** [with_sample_frequency config value] replaces the delivery sample
         percentage. Values must be non-negative. [None] clears sampling. *)
@@ -514,6 +550,20 @@ module Consumer : sig
     (** [with_mem_storage config value] replaces consumer state storage. *)
   end
 
+  module Priority_group : sig
+    type t
+
+    val name : t -> string
+    (** [name group] is the configured priority-group name. *)
+
+    val pinned_client_id : t -> string option
+    (** [pinned_client_id group] is the current server-issued pin, when set.
+    *)
+
+    val pinned_at : t -> Ptime.t option
+    (** [pinned_at group] is the server timestamp at which the pin was set. *)
+  end
+
   module Info : sig
     type t
 
@@ -524,6 +574,9 @@ module Consumer : sig
     val paused : t -> bool
     val pause_until : t -> Ptime.t option
     val pause_remaining : t -> Mtime.Span.t option
+    val priority_groups : t -> Priority_group.t list
+    (** [priority_groups info] reports the server's current pin state for each
+        configured priority group. *)
     val unknown : t -> Jsont.json
     val config_unknown : t -> Jsont.json
     val delivered_consumer_sequence : t -> int64 option
@@ -580,6 +633,12 @@ module Consumer : sig
   val resume : ?timeout:Mtime.Span.t -> t -> (Pause.t, Error.t) result
   (** [resume ?timeout consumer] clears the consumer pause deadline. *)
 
+  val unpin :
+    ?timeout:Mtime.Span.t -> t -> group:string -> (unit, Error.t) result
+  (** [unpin ?timeout consumer ~group] asks the server to select another
+      pinned-client member for [group]. The name must satisfy the priority-group
+      syntax; the server reports whether the group is configured. *)
+
   val list : stream -> (Info.t list, Error.t) result
   (** [list stream] returns detailed information for all consumers on [stream].
   *)
@@ -591,6 +650,10 @@ module Consumer : sig
     ?expires:Mtime.Span.t ->
     ?idle_heartbeat:Mtime.Span.t ->
     ?max_bytes:int ->
+    ?group:string ->
+    ?min_pending:int64 ->
+    ?min_ack_pending:int64 ->
+    ?priority:int ->
     t ->
     batch:int ->
     (Msg.t list, Error.t) result
@@ -599,7 +662,12 @@ module Consumer : sig
       [idle_heartbeat] is set, status-100 idle heartbeats keep the request
       alive; failure to receive one within two heartbeat intervals returns
       [Missing_heartbeat]. The heartbeat must be positive and no greater than
-      half of [expires]. *)
+      half of [expires]. [group] selects a configured priority group;
+      [min_pending] and [min_ack_pending] are overflow thresholds; and
+      [priority] selects a prioritized-policy level from zero (highest) to
+      nine (lowest). Priority options require [group]. On a pinned-client
+      consumer, the handle retains the [Nats-Pin-Id] from a delivery for later
+      fetches and retries a 423 pin mismatch without the stale id. *)
 
   module Pull : sig
     type consumer = t
@@ -611,25 +679,37 @@ module Consumer : sig
       ?expires:Mtime.Span.t ->
       ?idle_heartbeat:Mtime.Span.t ->
       ?max_bytes:int ->
+      ?group:string ->
+      ?min_pending:int64 ->
+      ?min_ack_pending:int64 ->
+      ?priority:int ->
       consumer ->
       (t, Error.t) result
     (** [v ~sw consumer] opens a persistent pull session using a fresh reply
         inbox. The default batch is one and the default server expiry is five
         seconds. With [idle_heartbeat], status-100 idle heartbeats keep the
         outstanding request alive and a missing heartbeat fails the session with
-        [Missing_heartbeat]. The heartbeat must be positive and no greater than
-        half of [expires]. The session owns its subscription and closes it when
-        [sw] releases. A session is not transparently restored after a transport
-        loss; recreate it after receiving [Error (Connection Disconnected)]. A
-        pull session is single-owner: do not call [next] or [next_with_timeout]
-        concurrently on the same value. *)
+        [Missing_heartbeat]. [group] joins a configured priority group;
+        [min_pending] and [min_ack_pending] are overflow thresholds, and
+        [priority] is a prioritized-policy value between zero and nine. The
+        session uses the consumer handle's private per-group table for any
+        server-issued pinned-client id on later requests and clears it after a
+        423 pin-mismatch response. The heartbeat
+        must be positive and no greater than half of [expires]. The session
+        owns its subscription and closes it when [sw] releases. A session is
+        not transparently restored after a transport loss; recreate it after
+        receiving [Error (Connection Disconnected)]. A pull session is
+        single-owner: do not call [next] or [next_with_timeout] concurrently on
+        the same value. *)
 
     val next : t -> (Msg.t, Error.t) result
     (** [next pull] waits for the next message. Empty pull batches and the
         JetStream [408], [batch completed], and configured idle-heartbeat
-        statuses are handled internally. Other statuses, including
-        [message size exceeds maxbytes], fail the session. Messages are not
-        acknowledged automatically. Explicit closure returns [Pull_closed]. *)
+        statuses are handled internally. A priority-group 423 pin mismatch
+        clears the private pin and retries the request. Other statuses,
+        including [message size exceeds maxbytes], fail the session. Messages
+        are not acknowledged automatically. Explicit closure returns
+        [Pull_closed]. *)
 
     val next_with_timeout : timeout:Mtime.Span.t -> t -> (Msg.t, Error.t) result
     (** [next_with_timeout ~timeout pull] bounds the wait, including retries
