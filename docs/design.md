@@ -213,7 +213,10 @@ request. The configuration is a full replacement of modeled fields; the
 from `Info.config` without rebuilding every field. The handle name remains the
 consumer identity: an omitted durable name retains an existing durable
 identity, an explicit name must match, and configuration members not modeled by
-the public `Config.t` are preserved from the preceding INFO response.
+the public `Config.t` are preserved from the preceding INFO response. The
+modeled configuration includes consumer metadata, sample frequency, push rate
+limit, and replica inheritance; create omits unset optional values while update
+uses explicit server clear sentinels for those fields.
 Concurrent updates intentionally use last-writer-wins semantics.
 
 The high-level API still exposes raw request/reply and raw NATS messages for

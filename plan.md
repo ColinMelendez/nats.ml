@@ -448,10 +448,11 @@ request/reply and subscription primitives.
   create/bind/info/list/delete/update with typed configuration combinators, and
   durable publish acknowledgements with message-id options over application
   subjects. Stream configuration retains per-subject limits and direct/rollup
-  flags. Stream and consumer updates preserve unknown server configuration
-  through an INFO/read-modify-
-  write cycle, and list operations fail with a structured error rather than
-  silently returning an incomplete page. Consumer updates use the named
+  flags. Consumer configuration models metadata, sample frequency, push rate
+  limit, and replica inheritance. Stream and consumer updates preserve unknown
+  server configuration through an INFO/read-modify-write cycle, and list
+  operations fail with a structured error rather than silently returning an
+  incomplete page. Consumer updates use the named
   `CONSUMER.CREATE` endpoint with an explicit update action and retain durable
   identity when the new configuration omits it.
 - Extend publish acknowledgements with all server status fields and feature
@@ -504,8 +505,9 @@ request/reply and subscription primitives.
   message counts, unknown-config preservation, and cleanup; it runs in
   anonymous and username/password modes.
 - Completed locally: add typed server-error assertions, consumer management,
-  consumer update action envelopes and unknown-field preservation, pull
-  backpressure, server-expiry behavior, cancellation/cleanup,
+  consumer create/update scalar configuration coverage, update action envelopes
+  and unknown-field preservation, pull backpressure, server-expiry behavior,
+  cancellation/cleanup,
   acknowledgement metadata, consumer-failure detection, and push lifecycle
   contracts through the Eio mock transport.
 - Completed: heartbeat liveness and local/server timeout interaction.
