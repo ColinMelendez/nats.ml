@@ -19,6 +19,7 @@ module Error = struct
     | Invalid_consumer_sample_frequency of string
     | Invalid_consumer_rate_limit of int64
     | Invalid_consumer_replicas of int
+    | Invalid_consumer_pause_until of string
     | Invalid_consumer_policy of { field : string; value : string }
 
   type api = { code : int; err_code : int option; description : string }
@@ -94,6 +95,8 @@ module Error = struct
           value
     | Invalid_consumer_replicas value ->
         Format.fprintf ppf "consumer replicas must not be negative, got %d" value
+    | Invalid_consumer_pause_until value ->
+        Format.fprintf ppf "invalid consumer pause deadline %S" value
     | Invalid_consumer_policy { field; value } ->
         Format.fprintf ppf "invalid consumer %s policy %S" field value
 
@@ -1515,6 +1518,7 @@ module Consumer = struct
       filter_subject : Nats.Subject.Filter.t option;
       filter_subjects : Nats.Subject.Filter.t list;
       backoff : Mtime.Span.t list;
+      pause_until : Ptime.t option;
       sample_frequency : int option;
       rate_limit : int64 option;
       replicas : int option;
@@ -1606,7 +1610,8 @@ module Consumer = struct
     let v ?durable_name ?description ?deliver_subject ?deliver_group
         ?idle_heartbeat ?flow_control ?(deliver_policy = All)
         ?(ack_policy = Explicit) ?ack_wait ?max_deliver ?filter_subject
-        ?(filter_subjects = []) ?(backoff = []) ?sample_frequency ?rate_limit
+        ?(filter_subjects = []) ?(backoff = []) ?pause_until ?sample_frequency
+        ?rate_limit
         ?replicas ?(metadata = [])
         ?(replay_policy = Instant) ?max_ack_pending ?max_waiting ?max_batch
         ?max_expires ?max_bytes ?headers_only ?inactive_threshold ?mem_storage () =
@@ -1688,6 +1693,7 @@ module Consumer = struct
           filter_subject;
           filter_subjects;
           backoff;
+          pause_until;
           sample_frequency;
           rate_limit;
           replicas;
@@ -1716,6 +1722,7 @@ module Consumer = struct
     let filter_subject value = value.filter_subject
     let filter_subjects value = value.filter_subjects
     let backoff value = value.backoff
+    let pause_until value = value.pause_until
     let sample_frequency value = value.sample_frequency
     let rate_limit value = value.rate_limit
     let replicas value = value.replicas
@@ -1733,13 +1740,15 @@ module Consumer = struct
     let rebuild ~durable_name ~description ~deliver_subject ~deliver_group
         ~idle_heartbeat ~flow_control ~deliver_policy ~ack_policy ~ack_wait
         ~max_deliver ~filter_subject ~filter_subjects ~backoff
-        ~sample_frequency ~rate_limit ~replicas ~metadata ~replay_policy
+        ~pause_until ~sample_frequency ~rate_limit ~replicas ~metadata
+        ~replay_policy
         ~max_ack_pending ~max_waiting ~max_batch
         ~max_expires ~max_bytes ~headers_only ~inactive_threshold ~mem_storage =
       v ?durable_name ?description ?deliver_subject ?deliver_group
         ?idle_heartbeat ?flow_control ~deliver_policy ~ack_policy ?ack_wait
         ?max_deliver ?filter_subject ~filter_subjects ~backoff ?sample_frequency
-        ?rate_limit ?replicas ~metadata ~replay_policy ?max_ack_pending ?max_waiting ?max_batch
+        ?pause_until ?rate_limit ?replicas ~metadata ~replay_policy
+        ?max_ack_pending ?max_waiting ?max_batch
         ?max_expires ?max_bytes ?headers_only ?inactive_threshold ?mem_storage ()
 
     let rebuild_modern value ~sample_frequency ~rate_limit ~replicas ~metadata =
@@ -1756,6 +1765,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency ~rate_limit
         ~replicas ~metadata ~replay_policy:value.replay_policy
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1771,6 +1781,7 @@ module Consumer = struct
         ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject ~filter_subjects ~backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~replay_policy:value.replay_policy
@@ -1788,6 +1799,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1804,6 +1816,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1820,6 +1833,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1836,6 +1850,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1852,6 +1867,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1868,6 +1884,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1884,6 +1901,7 @@ module Consumer = struct
         ~max_deliver:value.max_deliver ~filter_subject:value.filter_subject
         ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1900,6 +1918,7 @@ module Consumer = struct
         ~max_deliver:value.max_deliver ~filter_subject:value.filter_subject
         ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1916,6 +1935,7 @@ module Consumer = struct
         ~ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1932,6 +1952,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1948,6 +1969,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:[] ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -1963,6 +1985,15 @@ module Consumer = struct
     let with_backoff value backoff =
       rebuild_delivery value ~filter_subject:value.filter_subject
         ~filter_subjects:value.filter_subjects ~backoff
+
+    let with_pause_until value pause_until =
+      match
+        rebuild_modern value ~sample_frequency:(Some value.sample_frequency)
+          ~rate_limit:(Some value.rate_limit) ~replicas:(Some value.replicas)
+          ~metadata:(Some value.metadata)
+      with
+      | Error error -> Error error
+      | Ok rebuilt -> Ok { rebuilt with pause_until }
 
     let with_sample_frequency value (sample_frequency : int option) =
       rebuild_modern value ~sample_frequency:(Some sample_frequency)
@@ -1992,6 +2023,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2008,6 +2040,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending ~max_waiting:value.max_waiting
@@ -2024,6 +2057,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting
@@ -2040,6 +2074,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2056,6 +2091,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2072,6 +2108,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2088,6 +2125,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2104,6 +2142,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2119,6 +2158,7 @@ module Consumer = struct
         ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
         ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until
         ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
         ~replicas:value.replicas ~metadata:value.metadata
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
@@ -2143,6 +2183,7 @@ module Consumer = struct
     filter_subject : string option;
     filter_subjects : string list option;
     backoff : int64 list option;
+    pause_until : string option;
     sample_frequency : string option;
     rate_limit : int64 option;
     replicas : int option;
@@ -2265,6 +2306,7 @@ module Consumer = struct
         filter_subject
         filter_subjects
         backoff
+        pause_until
         sample_frequency
         rate_limit
         replicas
@@ -2296,6 +2338,7 @@ module Consumer = struct
           filter_subject;
           filter_subjects;
           backoff;
+          pause_until;
           sample_frequency;
           rate_limit;
           replicas;
@@ -2341,6 +2384,8 @@ module Consumer = struct
          ~enc:(fun value -> value.filter_subjects)
     |> Jsont.Object.opt_mem "backoff" (Jsont.list Jsont.int64) ~enc:(fun value ->
         value.backoff)
+    |> Jsont.Object.opt_mem "pause_until" Jsont.string ~enc:(fun value ->
+        value.pause_until)
     |> Jsont.Object.opt_mem "sample_freq" Jsont.string ~enc:(fun value ->
         value.sample_frequency)
     |> Jsont.Object.opt_mem "rate_limit_bps" Jsont.int64 ~enc:(fun value ->
@@ -2421,6 +2466,10 @@ module Consumer = struct
       filter_subjects =
         filter_subjects_to_wire (Config.filter_subjects value);
       backoff = backoff_to_wire (Config.backoff value);
+      pause_until =
+        Option.map
+          (Ptime.to_rfc3339 ~frac_s:9 ~tz_offset_s:0)
+          (Config.pause_until value);
       sample_frequency =
         sample_frequency_to_wire (Config.sample_frequency value);
       rate_limit = Config.rate_limit value;
@@ -2439,6 +2488,25 @@ module Consumer = struct
       mem_storage = Config.mem_storage value;
       unknown = Jsont.Json.object' [];
     }
+
+  let is_zero_pause_until value =
+    let (year, month, day), ((hour, minute, second), _) =
+      Ptime.to_date_time ~tz_offset_s:0 value
+    in
+    Int.equal year 1 && Int.equal month 1 && Int.equal day 1
+    && Int.equal hour 0 && Int.equal minute 0 && Int.equal second 0
+    && Ptime.Span.equal (Ptime.frac_s value) Ptime.Span.zero
+
+  let pause_until_of_wire = function
+    | None | Some "" -> Ok None
+    | Some raw -> (
+        match Ptime.of_rfc3339 ~strict:true raw with
+        | Ok (value, _, _) when is_zero_pause_until value -> Ok None
+        | Ok (value, _, _) -> Ok (Some value)
+        | Error _ ->
+            Error
+              (Error.Invalid_config
+                 (Error.Invalid_consumer_pause_until raw)))
 
   let config_of_wire value =
     let normalize_max_deliver = function Some -1 -> None | value -> value in
@@ -2475,6 +2543,7 @@ module Consumer = struct
       filter_subjects_of_wire value.filter_subjects
     in
     let backoff = backoff_of_wire value.backoff in
+    let pause_until = pause_until_of_wire value.pause_until in
     let deliver_subject =
       match value.deliver_subject with
       | None | Some "" -> Ok None
@@ -2519,41 +2588,48 @@ module Consumer = struct
                         match sample_frequency with
                         | Error error -> Error error
                         | Ok sample_frequency -> (
-                            let ack_wait =
-                              Option.map Mtime.Span.of_uint64_ns value.ack_wait
-                            in
-                            let max_expires =
-                              Option.map Mtime.Span.of_uint64_ns value.max_expires
-                            in
-                            let inactive_threshold =
-                              Option.map Mtime.Span.of_uint64_ns
-                                value.inactive_threshold
-                            in
-                            let max_deliver =
-                              normalize_max_deliver value.max_deliver
-                            in
-                            let max_ack_pending = value.max_ack_pending in
-                            let max_waiting = value.max_waiting in
-                            let max_batch = value.max_batch in
-                            let max_bytes = value.max_bytes in
-                            match
-                              Config.v ?durable_name:value.durable_name
-                                ?description:value.description ?deliver_subject
-                                ?deliver_group ?idle_heartbeat
-                                ?flow_control:value.flow_control ~deliver_policy
-                                ~ack_policy:value.ack_policy ?ack_wait
-                                ?max_deliver ?filter_subject ~filter_subjects
-                                ~backoff ?sample_frequency ?rate_limit ?replicas
-                                ~metadata:(metadata_of_wire value.metadata)
-                                ~replay_policy:value.replay_policy
-                                ?max_ack_pending ?max_waiting ?max_batch
-                                ?max_expires ?max_bytes
-                                ?headers_only:value.headers_only ?inactive_threshold
-                                ?mem_storage:value.mem_storage ()
-                            with
-                            | Ok config -> Ok (config, value.unknown)
-                            | Error error ->
-                                Error (Error.Invalid_config error)))))))
+                            match pause_until with
+                            | Error error -> Error error
+                            | Ok pause_until ->
+                                let ack_wait =
+                                  Option.map Mtime.Span.of_uint64_ns
+                                    value.ack_wait
+                                in
+                                let max_expires =
+                                  Option.map Mtime.Span.of_uint64_ns
+                                    value.max_expires
+                                in
+                                let inactive_threshold =
+                                  Option.map Mtime.Span.of_uint64_ns
+                                    value.inactive_threshold
+                                in
+                                let max_deliver =
+                                  normalize_max_deliver value.max_deliver
+                                in
+                                let max_ack_pending = value.max_ack_pending in
+                                let max_waiting = value.max_waiting in
+                                let max_batch = value.max_batch in
+                                let max_bytes = value.max_bytes in
+                                match
+                                  Config.v ?durable_name:value.durable_name
+                                    ?description:value.description
+                                    ?deliver_subject ?deliver_group
+                                    ?idle_heartbeat ?flow_control:value.flow_control
+                                    ~deliver_policy ~ack_policy:value.ack_policy
+                                    ?ack_wait ?max_deliver ?filter_subject
+                                    ~filter_subjects ~backoff ?pause_until
+                                    ?sample_frequency ?rate_limit ?replicas
+                                    ~metadata:(metadata_of_wire value.metadata)
+                                    ~replay_policy:value.replay_policy
+                                    ?max_ack_pending ?max_waiting ?max_batch
+                                    ?max_expires ?max_bytes
+                                    ?headers_only:value.headers_only
+                                    ?inactive_threshold ?mem_storage:value.mem_storage
+                                    ()
+                                with
+                                | Ok config -> Ok (config, value.unknown)
+                                | Error error ->
+                                    Error (Error.Invalid_config error)))))))
 
   type wire_sequence = {
     consumer_sequence : int64 option;
@@ -2582,6 +2658,8 @@ module Consumer = struct
     num_redelivered : int option;
     num_waiting : int option;
     num_pending : int64 option;
+    paused : bool option;
+    pause_remaining : int64 option;
     unknown : Jsont.json;
   }
 
@@ -2599,6 +2677,8 @@ module Consumer = struct
         num_redelivered
         num_waiting
         num_pending
+        paused
+        pause_remaining
         unknown
       ->
         {
@@ -2613,6 +2693,8 @@ module Consumer = struct
           num_redelivered;
           num_waiting;
           num_pending;
+          paused;
+          pause_remaining;
           unknown;
         })
     |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
@@ -2636,6 +2718,10 @@ module Consumer = struct
         value.num_waiting)
     |> Jsont.Object.opt_mem "num_pending" Jsont.int64 ~enc:(fun value ->
         value.num_pending)
+    |> Jsont.Object.opt_mem "paused" Jsont.bool ~enc:(fun value ->
+        value.paused)
+    |> Jsont.Object.opt_mem "pause_remaining" Jsont.int64 ~enc:(fun value ->
+        value.pause_remaining)
     |> Jsont.Object.keep_unknown
          ~enc:(fun value -> value.unknown)
          Jsont.json_mems
@@ -2707,12 +2793,17 @@ module Consumer = struct
       num_redelivered : int;
       num_waiting : int;
       num_pending : int64;
+      paused : bool;
+      pause_remaining : Mtime.Span.t option;
     }
 
     let name value = value.name
     let stream_name value = value.stream_name
     let created value = value.created
     let config value = value.config
+    let paused value = value.paused
+    let pause_until value = Config.pause_until value.config
+    let pause_remaining value = value.pause_remaining
     let unknown value = value.unknown
     let config_unknown value = value.config_unknown
 
@@ -2737,6 +2828,63 @@ module Consumer = struct
       Format.fprintf ppf "JetStream consumer %S on stream %S (pending=%Ld)"
         value.name value.stream_name value.num_pending
   end
+
+  module Pause = struct
+    type t = {
+      paused : bool;
+      pause_until : Ptime.t option;
+      pause_remaining : Mtime.Span.t option;
+    }
+
+    let paused value = value.paused
+    let pause_until value = value.pause_until
+    let pause_remaining value = value.pause_remaining
+  end
+
+  type pause_request = { pause_until : string option }
+
+  let pause_request_codec =
+    Jsont.Object.map ~kind:"JetStream consumer pause request"
+      (fun pause_until -> { pause_until })
+    |> Jsont.Object.opt_mem "pause_until" Jsont.string ~enc:(fun value ->
+        value.pause_until)
+    |> Jsont.Object.finish
+
+  type pause_response = {
+    error : api_error option;
+    paused : bool;
+    pause_until : string option;
+    pause_remaining : int64 option;
+  }
+
+  let pause_response_codec =
+    Jsont.Object.map ~kind:"JetStream consumer pause response"
+      (fun error paused pause_until pause_remaining ->
+        { error; paused; pause_until; pause_remaining })
+    |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
+        value.error)
+    |> Jsont.Object.mem "paused" Jsont.bool ~enc:(fun value -> value.paused)
+    |> Jsont.Object.opt_mem "pause_until" Jsont.string ~enc:(fun value ->
+        value.pause_until)
+    |> Jsont.Object.opt_mem "pause_remaining" Jsont.int64 ~enc:(fun value ->
+        value.pause_remaining)
+    |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+
+  let decode_pause_response message =
+    match decode pause_response_codec message with
+    | Error error -> Error error
+    | Ok { error = Some error; _ } -> Error (Error.Api error)
+    | Ok response -> (
+        match pause_until_of_wire response.pause_until with
+        | Error error -> Error error
+        | Ok pause_until ->
+            Ok
+              {
+                Pause.paused = response.paused;
+                pause_until;
+                pause_remaining =
+                  Option.map Mtime.Span.of_uint64_ns response.pause_remaining;
+              })
 
   let info_of_response ~stream ?expected_name (response : response) =
     match response.error with
@@ -2778,6 +2926,10 @@ module Consumer = struct
                             Option.value ~default:0 response.num_waiting;
                           num_pending =
                             Option.value ~default:0L response.num_pending;
+                          paused = Option.value ~default:false response.paused;
+                          pause_remaining =
+                            Option.map Mtime.Span.of_uint64_ns
+                              response.pause_remaining;
                         })))
 
   let wire_config_for_update ~current value =
@@ -2810,12 +2962,18 @@ module Consumer = struct
       max_bytes = Some (Option.value ~default:0 value.max_bytes);
       inactive_threshold =
         Some (Option.value ~default:0L value.inactive_threshold);
+      pause_until = current.pause_until;
       unknown = current.unknown;
     }
 
   type jetstream = t
   type stream = Stream.t
-  type t = { jetstream : jetstream; stream : stream; name : string }
+  type t = {
+    jetstream : jetstream;
+    stream : stream;
+    name : string;
+    pause_until : Ptime.t option ref;
+  }
 
   type next_request = {
     expires : int64;
@@ -3392,7 +3550,8 @@ module Consumer = struct
 
   let bind (stream : Stream.t) ~name =
     match Config.validate_name (Some name) with
-    | Ok () -> Ok { jetstream = stream.jetstream; stream; name }
+    | Ok () ->
+        Ok { jetstream = stream.jetstream; stream; name; pause_until = ref None }
     | Error error -> Error (Error.Invalid_config error)
 
   let name value = value.name
@@ -3429,7 +3588,14 @@ module Consumer = struct
                          { expected; actual = name })
                 | _ -> (
                     match config_of_wire response_config with
-                    | Ok _ -> Ok { jetstream; stream; name }
+                    | Ok (actual_config, _) ->
+                        Ok
+                          {
+                            jetstream;
+                            stream;
+                            name;
+                            pause_until = ref (Config.pause_until actual_config);
+                          }
                     | Error error -> Error error))))
 
   let info_response ?timeout consumer =
@@ -3449,9 +3615,56 @@ module Consumer = struct
   let info ?timeout consumer =
     match info_response ?timeout consumer with
     | Error error -> Error error
-    | Ok response ->
-        info_of_response ~stream:consumer.stream ~expected_name:consumer.name
-          response
+    | Ok response -> (
+        match
+          info_of_response ~stream:consumer.stream
+            ~expected_name:consumer.name response
+        with
+        | Error error -> Error error
+        | Ok info ->
+            consumer.pause_until := Info.pause_until info;
+            Ok info)
+
+  let pause ?timeout consumer ~until =
+    let request =
+      {
+        pause_until =
+          Some (Ptime.to_rfc3339 ~frac_s:9 ~tz_offset_s:0 until);
+      }
+    in
+    let subject =
+      api_subject consumer.jetstream
+        [ "CONSUMER"; "PAUSE"; Stream.name consumer.stream; consumer.name ]
+    in
+    match encode pause_request_codec request with
+    | Error error -> Error error
+    | Ok payload -> (
+        match
+          request_msg ?timeout consumer.jetstream (Nats.Message.v ~subject payload)
+        with
+        | Error error -> Error error
+        | Ok message -> (
+            match decode_pause_response message with
+            | Error error -> Error error
+            | Ok response ->
+                consumer.pause_until := Pause.pause_until response;
+                Ok response))
+
+  let resume ?timeout consumer =
+    let subject =
+      api_subject consumer.jetstream
+        [ "CONSUMER"; "PAUSE"; Stream.name consumer.stream; consumer.name ]
+    in
+    match
+      request_msg ?timeout consumer.jetstream (Nats.Message.v ~subject "")
+    with
+    | Error error -> Error error
+    | Ok message -> (
+        match decode_pause_response message with
+        | Error error -> Error error
+        | Ok response ->
+            consumer.pause_until := Pause.pause_until response;
+            Ok response)
 
   let update ?timeout consumer config =
     match Config.durable_name config with
@@ -3467,7 +3680,8 @@ module Consumer = struct
                 ~expected_name:consumer.name response
             with
             | Error error -> Error error
-            | Ok _ -> (
+            | Ok current -> (
+                consumer.pause_until := Info.pause_until current;
                 match response.config with
                 | None -> Error (Error.Missing_field "config")
                 | Some current -> (
@@ -3498,9 +3712,15 @@ module Consumer = struct
                         | Ok message -> (
                             match decode_response message with
                             | Error error -> Error error
-                            | Ok response ->
-                                info_of_response ~stream:consumer.stream
-                                  ~expected_name:consumer.name response))))))
+                            | Ok response -> (
+                                match
+                                  info_of_response ~stream:consumer.stream
+                                    ~expected_name:consumer.name response
+                                with
+                                | Error error -> Error error
+                                | Ok info ->
+                                    consumer.pause_until := Info.pause_until info;
+                                    Ok info)))))))
 
   let delete ?timeout consumer =
     let subject =
@@ -3641,6 +3861,7 @@ module Consumer = struct
           ?filter_subject:(Config.filter_subject push.config)
           ~filter_subjects:(Config.filter_subjects push.config)
           ~backoff:(Config.backoff push.config)
+          ?pause_until:!(push.consumer.pause_until)
           ?sample_frequency:(Config.sample_frequency push.config)
           ?rate_limit:(Config.rate_limit push.config)
           ?replicas:(Config.replicas push.config)

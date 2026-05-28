@@ -34,6 +34,7 @@
   cstruct
   tls-eio
   mtime
+  ptime
   base64
   digestif
   (alcobar :with-test)

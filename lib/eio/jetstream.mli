@@ -18,6 +18,7 @@ module Error : sig
     | Invalid_consumer_sample_frequency of string
     | Invalid_consumer_rate_limit of int64
     | Invalid_consumer_replicas of int
+    | Invalid_consumer_pause_until of string
     | Invalid_consumer_policy of { field : string; value : string }
 
   type api = { code : int; err_code : int option; description : string }
@@ -356,6 +357,7 @@ module Consumer : sig
       ?filter_subject:Nats.Subject.Filter.t ->
       ?filter_subjects:Nats.Subject.Filter.t list ->
       ?backoff:Mtime.Span.t list ->
+      ?pause_until:Ptime.t ->
       ?sample_frequency:int ->
       ?rate_limit:int64 ->
       ?replicas:int ->
@@ -388,6 +390,8 @@ module Consumer : sig
         empty when the singular filter form is in use or no filter is set. *)
     val backoff : t -> Mtime.Span.t list
     (** [backoff config] returns the redelivery delay schedule. *)
+    val pause_until : t -> Ptime.t option
+    (** [pause_until config] is the server-side pause deadline, when set. *)
     val sample_frequency : t -> int option
     (** [sample_frequency config] is the delivery sample percentage. *)
     val rate_limit : t -> int64 option
@@ -458,6 +462,12 @@ module Consumer : sig
         [Mtime.Span.t] values are non-negative; an empty list clears the
         schedule. *)
 
+    val with_pause_until : t -> Ptime.t option -> (t, error) result
+    (** [with_pause_until config value] replaces the pause deadline. [None]
+        requests an unpaused configuration when creating a consumer. Updating
+        a consumer does not change its pause state; use {!Consumer.resume} or
+        {!Consumer.pause} for that operation. *)
+
     val with_sample_frequency : t -> int option -> (t, error) result
     (** [with_sample_frequency config value] replaces the delivery sample
         percentage. Values must be non-negative. [None] clears sampling. *)
@@ -511,6 +521,9 @@ module Consumer : sig
     val stream_name : t -> string
     val created : t -> string option
     val config : t -> Config.t
+    val paused : t -> bool
+    val pause_until : t -> Ptime.t option
+    val pause_remaining : t -> Mtime.Span.t option
     val unknown : t -> Jsont.json
     val config_unknown : t -> Jsont.json
     val delivered_consumer_sequence : t -> int64 option
@@ -522,6 +535,14 @@ module Consumer : sig
     val num_waiting : t -> int
     val num_pending : t -> int64
     val pp : Format.formatter -> t -> unit
+  end
+
+  module Pause : sig
+    type t
+
+    val paused : t -> bool
+    val pause_until : t -> Ptime.t option
+    val pause_remaining : t -> Mtime.Span.t option
   end
 
   type jetstream = t
@@ -544,10 +565,20 @@ module Consumer : sig
       configuration is a full replacement of the fields modeled by {!Config.t};
       use the {!Config.with_description} family to derive a replacement from
       {!Info.config}. The operation reads the current server configuration first
-      and preserves fields not modeled by {!Config.t}. The consumer identity
+      and preserves fields not modeled by {!Config.t}. [pause_until] is read
+      from the current server configuration and is preserved; pause state is
+      changed only by {!pause} and {!resume}. The consumer identity
       remains tied to [name consumer]; a supplied durable name must match it,
       while an omitted durable name retains an existing durable identity.
       Concurrent changes use last-writer-wins semantics. *)
+
+  val pause :
+    ?timeout:Mtime.Span.t -> t -> until:Ptime.t -> (Pause.t, Error.t) result
+  (** [pause ?timeout consumer ~until] pauses [consumer] until the supplied
+      UTC deadline. *)
+
+  val resume : ?timeout:Mtime.Span.t -> t -> (Pause.t, Error.t) result
+  (** [resume ?timeout consumer] clears the consumer pause deadline. *)
 
   val list : stream -> (Info.t list, Error.t) result
   (** [list stream] returns detailed information for all consumers on [stream].

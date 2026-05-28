@@ -41,6 +41,11 @@ let expect_jetstream_error result predicate =
           (Format.asprintf "unexpected JetStream error: %a"
              Nats_eio.Jetstream.Error.pp error)
 
+let ptime_of_rfc3339 value =
+  match Ptime.of_rfc3339 value with
+  | Ok (value, _, _) -> value
+  | Error _ -> fail (Format.asprintf "invalid test timestamp %S" value)
+
 let operation_wire operation =
   match Nats.Codec.encode operation with
   | Ok wire -> wire
@@ -535,6 +540,9 @@ let () =
               Nats.Subject.Filter.literal "orders.updated";
             ]
           in
+          let pause_until =
+            ptime_of_rfc3339 "2026-08-13T12:00:00.000000000Z"
+          in
           let config =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"worker"
@@ -545,6 +553,7 @@ let () =
                  ~ack_policy:Nats_eio.Jetstream.Consumer.Config.All
                  ~ack_wait:span ~max_deliver:5 ~filter_subjects
                  ~backoff:[ span; second_span ]
+                 ~pause_until
                  ~sample_frequency:10 ~rate_limit:64000L ~replicas:3
                  ~metadata:[ ("owner", "server") ]
                  ~replay_policy:Nats_eio.Jetstream.Consumer.Config.Original
@@ -574,6 +583,11 @@ let () =
           equal (list int64) [ 1_000_000L; 2_000_000L ]
             (List.map Mtime.Span.to_uint64_ns
                (Nats_eio.Jetstream.Consumer.Config.backoff described));
+          (match
+             Nats_eio.Jetstream.Consumer.Config.pause_until described
+           with
+          | Some value when Ptime.equal pause_until value -> ()
+          | _ -> fail "consumer config updater lost pause deadline");
           (match Nats_eio.Jetstream.Consumer.Config.metadata described with
           | [ ("owner", "server") ] -> ()
           | _ -> fail "consumer config updater lost metadata");
@@ -737,6 +751,9 @@ let () =
                 expect_jetstream_ok
                   (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
               in
+              let pause_until =
+                ptime_of_rfc3339 "2026-08-13T12:00:00.000000000Z"
+              in
               let config =
                 expect_jetstream_config_ok
                   (Nats_eio.Jetstream.Consumer.Config.v
@@ -752,6 +769,7 @@ let () =
                          Mtime.Span.of_uint64_ns 1_000_000L;
                          Mtime.Span.of_uint64_ns 2_000_000L;
                        ]
+                     ~pause_until
                      ~sample_frequency:25 ~rate_limit:65536L ~replicas:3
                      ~metadata:[ ("owner", "client") ] ())
               in
@@ -786,6 +804,13 @@ let () =
               if
                 not
                   (contains_substring
+                     ~needle:
+                       "pause_until\\\":\\\"2026-08-13T12:00:00.000000000Z"
+                     trace)
+              then fail "consumer create omitted pause deadline";
+              if
+                not
+                  (contains_substring
                      ~needle:"metadata\\\":{\\\"owner\\\":\\\"client\\\"}"
                      trace)
               then fail "consumer create omitted metadata";
@@ -795,6 +820,140 @@ let () =
                       {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","sample_freq":"25%","rate_limit_bps":65536,"num_replicas":3,"metadata":{"owner":"client"},"replay_policy":"instant"}}|}));
               let consumer = expect_jetstream_ok (Eio.Promise.await result) in
               equal string "worker" (Nats_eio.Jetstream.Consumer.name consumer);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "consumer pause and resume use the dedicated control endpoint"
+        (fun () ->
+          let pause_response, pause_response_u = Eio.Promise.create () in
+          let resume_response, resume_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await pause_response;
+                `Await resume_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let consumer = consumer connection in
+              let until = ptime_of_rfc3339 "2026-08-13T12:00:00.000000000Z" in
+              let pause_result, pause_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve pause_result_u
+                    (Nats_eio.Jetstream.Consumer.pause consumer ~until));
+              yield_n 5;
+              Eio.Promise.resolve pause_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"paused":true,"pause_until":"2026-08-13T12:00:00.000000000Z","pause_remaining":60000000000,"future_field":true}|}));
+              let paused = expect_jetstream_ok (Eio.Promise.await pause_result) in
+              equal bool true (Nats_eio.Jetstream.Consumer.Pause.paused paused);
+              (match
+                 Nats_eio.Jetstream.Consumer.Pause.pause_until paused
+               with
+              | Some value when Ptime.equal until value -> ()
+              | _ -> fail "pause response lost its deadline");
+              equal (option int64) (Some 60_000_000_000L)
+                (Option.map Mtime.Span.to_uint64_ns
+                   (Nats_eio.Jetstream.Consumer.Pause.pause_remaining paused));
+              let resume_result, resume_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve resume_result_u
+                    (Nats_eio.Jetstream.Consumer.resume consumer));
+              yield_n 5;
+              Eio.Promise.resolve resume_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:2
+                      {|{"paused":false,"pause_until":"0001-01-01T00:00:00.000000000+00:00"}|}));
+              let resumed =
+                expect_jetstream_ok (Eio.Promise.await resume_result)
+              in
+              equal bool false
+                (Nats_eio.Jetstream.Consumer.Pause.paused resumed);
+              (match
+                 Nats_eio.Jetstream.Consumer.Pause.pause_until resumed
+               with
+              | None -> ()
+              | Some _ -> fail "consumer resume retained its deadline");
+              equal (option int64) None
+                (Option.map Mtime.Span.to_uint64_ns
+                   (Nats_eio.Jetstream.Consumer.Pause.pause_remaining resumed));
+              let trace = Buffer.contents trace in
+              if
+                not
+                  (contains_substring
+                     ~needle:"wrote \"PUB $JS.API.CONSUMER.PAUSE.ORDERS.worker"
+                     trace)
+              then fail "consumer pause did not use the pause endpoint";
+              if
+                not
+                  (Int.equal
+                     (count_substring
+                        ~needle:
+                          "wrote \"PUB $JS.API.CONSUMER.PAUSE.ORDERS.worker"
+                        trace)
+                     2)
+              then fail "consumer resume did not use the pause endpoint";
+              if
+                not
+                  (contains_substring
+                     ~needle:
+                       "pause_until\\\":\\\"2026-08-13T12:00:00.000000000Z"
+                     trace)
+              then fail "consumer pause omitted its deadline";
+              if
+                not
+                  (Int.equal (count_substring ~needle:" 0\\r\\n\"" trace) 1)
+              then
+                fail "consumer resume did not send an empty request";
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "consumer info normalizes zero and rejects malformed pause deadlines"
+        (fun () ->
+          let zero_response, zero_response_u = Eio.Promise.create () in
+          let malformed_response, malformed_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:
+              [
+                `Return info_wire;
+                `Await zero_response;
+                `Await malformed_response;
+                `Await hold;
+              ]
+            (fun ~sw connection ->
+              let consumer = consumer connection in
+              let zero_result, zero_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve zero_result_u
+                    (Nats_eio.Jetstream.Consumer.info consumer));
+              yield_n 5;
+              Eio.Promise.resolve zero_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","pause_until":"0001-01-01T00:00:00.000000000+00:00"}}|}));
+              let zero_info = expect_jetstream_ok (Eio.Promise.await zero_result) in
+              (match
+                 Nats_eio.Jetstream.Consumer.Info.pause_until zero_info
+               with
+              | None -> ()
+              | Some _ -> fail "consumer info retained the zero pause deadline");
+              let malformed_result, malformed_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve malformed_result_u
+                    (Nats_eio.Jetstream.Consumer.info consumer));
+              yield_n 5;
+              Eio.Promise.resolve malformed_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:2
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","pause_until":"not-a-timestamp"}}|}));
+              expect_jetstream_error (Eio.Promise.await malformed_result) (function
+                | Nats_eio.Jetstream.Error.Invalid_config
+                    (Nats_eio.Jetstream.Error.Invalid_consumer_pause_until
+                      "not-a-timestamp") ->
+                    true
+                | _ -> false);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream create emits retained config fields" (fun () ->
@@ -1072,8 +1231,22 @@ let () =
               Eio.Promise.resolve info_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:1
-                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"filter_subjects":["orders.created","orders.updated"],"backoff":[1000000,2000000],"sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true}}|}));
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"filter_subjects":["orders.created","orders.updated"],"backoff":[1000000,2000000],"pause_until":"2026-08-13T12:00:00Z","sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true},"paused":true,"pause_remaining":60000000000}|}));
               let current_info = expect_jetstream_ok (Eio.Promise.await info_result) in
+              equal bool true
+                (Nats_eio.Jetstream.Consumer.Info.paused current_info);
+              (match
+                 Nats_eio.Jetstream.Consumer.Info.pause_until current_info
+               with
+              | Some value
+                when
+                  Ptime.equal (ptime_of_rfc3339 "2026-08-13T12:00:00Z") value ->
+                  ()
+              | _ -> fail "consumer info lost pause deadline");
+              equal (option int64) (Some 60_000_000_000L)
+                (Option.map Mtime.Span.to_uint64_ns
+                   (Nats_eio.Jetstream.Consumer.Info.pause_remaining
+                      current_info));
               let preserved_config =
                 expect_jetstream_config_ok
                   (Nats_eio.Jetstream.Consumer.Config.with_description
@@ -1123,6 +1296,11 @@ let () =
                 expect_jetstream_config_ok
                   (Nats_eio.Jetstream.Consumer.Config.with_backoff config [])
               in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.with_pause_until config
+                     None)
+              in
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve result_u
@@ -1131,7 +1309,7 @@ let () =
               Eio.Promise.resolve update_info_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:2
-                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"filter_subjects":["orders.created","orders.updated"],"backoff":[1000000,2000000],"sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true}}|}));
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"filter_subjects":["orders.created","orders.updated"],"backoff":[1000000,2000000],"pause_until":"2026-08-13T12:00:00Z","sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true}}|}));
               yield_n 5;
               let trace_buffer = trace in
               let trace = Buffer.contents trace in
@@ -1210,6 +1388,12 @@ let () =
                 not (contains_substring ~needle:"backoff\\\":[]" clear_trace)
               then fail "consumer update did not clear backoff";
               if
+                not
+                  (contains_substring
+                     ~needle:"2026-08-13T12:00:00Z"
+                     clear_trace)
+              then fail "consumer update did not preserve pause deadline";
+              if
                 not (contains_substring ~needle:"metadata\\\":{}" clear_trace)
               then
                 fail "consumer update did not clear metadata";
@@ -1221,7 +1405,7 @@ let () =
               Eio.Promise.resolve update_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:3
-                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"updated","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":7,"max_ack_pending":-1,"filter_subject":"","filter_subjects":[],"backoff":[],"sample_freq":"0%","rate_limit_bps":0,"num_replicas":0,"metadata":{},"future_field":true},"num_pending":3}|}));
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"updated","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":7,"max_ack_pending":-1,"filter_subject":"","filter_subjects":[],"backoff":[],"pause_until":"2026-08-13T12:00:00Z","sample_freq":"0%","rate_limit_bps":0,"num_replicas":0,"metadata":{},"future_field":true},"paused":true,"pause_remaining":60000000000,"num_pending":3}|}));
               let info = expect_jetstream_ok (Eio.Promise.await result) in
               equal (option string) (Some "updated")
                 (Nats_eio.Jetstream.Consumer.Config.description
@@ -1274,7 +1458,7 @@ let () =
               Eio.Promise.resolve preserve_info_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:4
-                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"updated","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":7,"max_ack_pending":-1,"sample_freq":"0%","rate_limit_bps":0,"num_replicas":0,"metadata":{},"future_field":true}}|}));
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"updated","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":7,"max_ack_pending":-1,"pause_until":"2026-08-13T12:00:00Z","sample_freq":"0%","rate_limit_bps":0,"num_replicas":0,"metadata":{},"future_field":true},"paused":true,"pause_remaining":60000000000}|}));
               yield_n 5;
               let final_trace = Buffer.contents trace_buffer in
               let preserve_trace =
@@ -1333,7 +1517,7 @@ let () =
               Eio.Promise.resolve preserve_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:5
-                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"preserved","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"filter_subject":"","filter_subjects":["orders.created","orders.updated"],"backoff":[1000000,2000000],"sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true}}|}));
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"preserved","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"filter_subject":"","filter_subjects":["orders.created","orders.updated"],"backoff":[1000000,2000000],"pause_until":"2026-08-13T12:00:00Z","sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true},"paused":true,"pause_remaining":60000000000}|}));
               let preserved_info =
                 expect_jetstream_ok (Eio.Promise.await preserve_result)
               in
@@ -1937,6 +2121,7 @@ let () =
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "push recreates an ephemeral consumer after reconnect" (fun () ->
           let info_response, info_response_u = Eio.Promise.create () in
+          let pause_response, pause_response_u = Eio.Promise.create () in
           let first_delivery, first_delivery_u = Eio.Promise.create () in
           let disconnect, disconnect_u = Eio.Promise.create () in
           let reconnect_info, reconnect_info_u = Eio.Promise.create () in
@@ -1949,6 +2134,7 @@ let () =
               [
                 `Return info_wire;
                 `Await info_response;
+                `Await pause_response;
                 `Await first_delivery;
                 `Await disconnect;
               ]
@@ -1972,6 +2158,21 @@ let () =
                    (consumer_info_wire_with_sid ~sid:1
                       {|{"stream_name":"ORDERS","name":"worker","config":{"deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","filter_subjects":["orders.created","orders.updated"],"backoff":[1000000,2000000],"sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"replay_policy":"instant"}}|}));
               let push = expect_jetstream_ok (Eio.Promise.await push_result) in
+              let pause_until =
+                ptime_of_rfc3339 "2026-08-13T12:00:00.000000000Z"
+              in
+              let pause_result, pause_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve pause_result_u
+                    (Nats_eio.Jetstream.Consumer.pause
+                       (Nats_eio.Jetstream.Consumer.Push.consumer push)
+                       ~until:pause_until));
+              yield_n 5;
+              Eio.Promise.resolve pause_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:3
+                      {|{"paused":true,"pause_until":"2026-08-13T12:00:00.000000000Z","pause_remaining":60000000000}|}));
+              ignore (expect_jetstream_ok (Eio.Promise.await pause_result));
               let first_result, first_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve first_result_u
@@ -1995,7 +2196,7 @@ let () =
                 ~needle:"wrote \"PUB $JS.API.CONSUMER.INFO.ORDERS.worker"
                 ~count:2;
               Eio.Promise.resolve restore_info_u
-                (Ok (consumer_not_found_wire ~sid:3));
+                (Ok (consumer_not_found_wire ~sid:4));
               wait_for_trace ~clock ~trace
                 ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS" ~count:1;
               if
@@ -2022,6 +2223,12 @@ let () =
               then fail "ephemeral push dropped backoff on recreate";
               if
                 not
+                  (contains_substring
+                     ~needle:"2026-08-13T12:00:00.000000000Z"
+                     (Buffer.contents trace))
+              then fail "ephemeral push dropped pause deadline on recreate";
+              if
+                not
                   (contains_substring ~needle:"sample_freq\\\":\\\"10%"
                      (Buffer.contents trace))
               then fail "ephemeral push dropped sample frequency on recreate";
@@ -2042,7 +2249,7 @@ let () =
                      (Buffer.contents trace))
               then fail "ephemeral push dropped metadata on recreate";
               Eio.Promise.resolve create_response_u
-                (Ok (ephemeral_push_create_wire_with_sid ~sid:4));
+                (Ok (ephemeral_push_create_wire_with_sid ~sid:5));
               Eio.Promise.resolve delivery_u
                 (Ok (delivery_wire_with_sid ~sid:2 "after-ephemeral-recreate"));
               let message =
