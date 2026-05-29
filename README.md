@@ -35,6 +35,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/start-colima.sh
 ./scripts/runtest-server.sh
 ./scripts/runtest-reconnect.sh
+./scripts/runtest-cluster.sh
 ./scripts/runtest-tls.sh
 ```
 
@@ -45,9 +46,11 @@ default; set `COLIMA_DISK_GIB` only when a larger disk is actually needed. Set
 `NATS_SERVER_IMAGE` to try another server image. Cluster, TLS, and reconnect
 scenarios are split into focused runners; the reconnect runner starts two
 single-node servers, kills the active one, and checks subscription recovery.
+The cluster runner starts a three-node route mesh, connects only to the seed,
+checks the advertised client URLs, kills the seed, and checks failover to a
+discovered peer with subscription recovery.
 The TLS runner generates an ephemeral CA and hostname-checked server
-certificate, then verifies a real TLS connection. Cluster scenarios will be
-added as the corresponding implementation phases land. To
+certificate, then verifies a real TLS connection. To
 exercise username/password authentication, set both `NATS_TEST_USER` and
 `NATS_TEST_PASS` to non-empty ephemeral credentials before running the script;
 the credentials must use only ASCII letters, digits, underscores, and hyphens.
@@ -79,8 +82,9 @@ compression, and stream metadata. `Nats_eio.Key_value` provides revisioned
 values, compare-and-set mutations, finite scans, history, and cancellable
 watches. `Nats_eio.Service` provides typed endpoint workers, queue groups,
 `$SRV.*` monitoring and fan-out discovery, request/service-error replies,
-statistics, replayable subscriptions, and service-local draining. Real cluster
-and cross-SDK interoperability coverage remain in the final acceptance phase.
+statistics, replayable subscriptions, and service-local draining. Advanced
+cluster failure scenarios and cross-SDK interoperability coverage remain in
+the final acceptance phase.
 
 The project uses Dune package management. No compatibility layer for NATS
 Streaming is planned.
