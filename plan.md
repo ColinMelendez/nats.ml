@@ -101,7 +101,12 @@ implemented through replayable subscription
 recovery, including durable confirmation and ephemeral recreation. Real cluster
 and cross-SDK interop coverage is deliberately deferred to the final acceptance
 phase; current consumer confidence comes from local mock transport and
-pure-boundary tests.
+pure-boundary tests. Priority-group pull consumers are now modeled locally:
+validated single-group policy configuration, per-request thresholds and
+priorities, INFO pin state, explicit unpin, pinned-client request echoing, and
+423 retry behavior are covered by the Eio mock transport. Future multi-group
+consumer support and real priority-group interoperability remain acceptance
+work.
 The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
@@ -457,7 +462,12 @@ request/reply and subscription primitives.
   operations fail with a structured error rather than silently returning an
   incomplete page. Consumer updates use the named
   `CONSUMER.CREATE` endpoint with an explicit update action and retain durable
-identity when the new configuration omits it.
+  identity when the new configuration omits it.
+- Completed locally: model JetStream priority-group consumer policies and one
+  validated group name, including the pull-only and explicit-ack invariants;
+  encode policy, groups, and pinned-client timeouts through consumer create and
+  update requests; project server pin state through `Consumer.Info`; and expose
+  `Consumer.unpin`.
 - Completed locally: model consumer pause state with `Ptime.t` deadlines,
   project paused/remaining state through INFO, and expose dedicated pause and
   resume operations through `CONSUMER.PAUSE`. Consumer updates preserve the
@@ -503,10 +513,13 @@ identity when the new configuration omits it.
   continuity rather than stream sequence continuity, resumes at the next
   stream sequence after recovery, and preserves absolute caller deadlines
   across recovery attempts.
-- Remaining: add broader delivery semantics without introducing a second
-  runtime or subscription abstraction. Priority-group pull consumers remain a
-  separate slice because they require pull request pinning, pin identifiers,
-  and unpin lifecycle semantics in addition to configuration fields.
+- Completed locally: extend one-shot and persistent pull requests with
+  priority groups, overflow thresholds, and prioritized levels. Consumer
+  handles retain server-issued `Nats-Pin-Id` values per group, so both
+  persistent sessions and subsequent one-shot fetches echo them privately;
+  both paths clear stale identity on 423 pin mismatch and retry. Multiple
+  configured groups are rejected until the server-side multi-group design is
+  available.
 
 ### Acceptance tests
 
@@ -523,6 +536,10 @@ identity when the new configuration omits it.
 - Completed locally: cover consumer pause deadline encoding, INFO projection,
   dedicated pause/resume requests, and update/reconnect preservation through
   the Eio mock transport.
+- Completed locally: cover priority policy/group validation, create/update wire
+  fields, INFO pin state, unpin requests, priority fetch/pull fields,
+  pin-header capture, explicit-unpin cache clearing, 423 stale-pin recovery,
+  and subsequent requests without the stale id through the Eio mock transport.
 - Completed: heartbeat liveness and local/server timeout interaction.
 - Completed locally: cover ordered consumer creation, filtered stream-sequence
   gaps, consumer-sequence recovery, missing-heartbeat recovery, deletion

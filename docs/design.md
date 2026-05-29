@@ -228,6 +228,33 @@ updates preserve the current server pause deadline because the create/update
 endpoint does not mutate it.
 Concurrent updates intentionally use last-writer-wins semantics.
 
+Priority-group consumers are pull-only and are modeled as an extension of the
+same consumer configuration and pull session. A configuration names one
+validated group and selects `overflow`, `pinned_client`, or
+`prioritized` policy; overflow thresholds and prioritized levels belong to an
+individual pull request, not to the consumer handle. The public request
+surface follows the server's JSON fields (`group`, `min_pending`,
+`min_ack_pending`, and `priority`) and validates group syntax, non-negative
+thresholds, and the inclusive priority range 0--9 before publishing.
+
+Pinned-client sessions keep the opaque `Nats-Pin-Id` returned in a delivery
+header in the consumer handle's per-group pin table. Later `Pull` requests and
+subsequent one-shot `fetch` calls on that handle echo it without exposing it as
+application state. A 423 pin-mismatch status clears the local identifier and
+causes the outstanding pull or fetch request to retry without it; the explicit
+`Consumer.unpin` operation uses the server's `CONSUMER.UNPIN` endpoint. INFO
+projections expose the group's configured name, pinned client id, and pin
+timestamp. Priority policy and group identity are preserved across consumer
+updates; changing that identity through the typed update API fails rather than
+silently changing failover semantics. The initial implementation follows
+ADR-42 and rejects multi-group configurations; future server-side multi-group
+consumers and transparent priority-pull restoration after transport recovery
+remain outside this slice.
+
+The wire behavior is based on the [NATS priority groups
+documentation](https://docs.nats.io/learn/jetstream/priority-groups) and
+[ADR-42](https://github.com/nats-io/nats-architecture-and-design/blob/main/adr/ADR-42.md).
+
 The high-level API still exposes raw request/reply and raw NATS messages for
 advanced JetStream features that arrive before a convenience wrapper.
 
