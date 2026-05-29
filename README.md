@@ -34,6 +34,8 @@ against a pinned `nats-server` Docker image is available with:
 ```sh
 ./scripts/start-colima.sh
 ./scripts/runtest-server.sh
+./scripts/runtest-reconnect.sh
+./scripts/runtest-tls.sh
 ```
 
 The script requires Docker and is intentionally outside `dune runtest`; Docker
@@ -41,7 +43,11 @@ is the one integration dependency supplied by the host rather than Nix. The
 Colima helper creates or starts the `default` profile with a 10 GiB disk by
 default; set `COLIMA_DISK_GIB` only when a larger disk is actually needed. Set
 `NATS_SERVER_IMAGE` to try another server image. Cluster, TLS, and reconnect
-scenarios will be added as the corresponding implementation phases land. To
+scenarios are split into focused runners; the reconnect runner starts two
+single-node servers, kills the active one, and checks subscription recovery.
+The TLS runner generates an ephemeral CA and hostname-checked server
+certificate, then verifies a real TLS connection. Cluster scenarios will be
+added as the corresponding implementation phases land. To
 exercise username/password authentication, set both `NATS_TEST_USER` and
 `NATS_TEST_PASS` to non-empty ephemeral credentials before running the script;
 the credentials must use only ASCII letters, digits, underscores, and hyphens.
