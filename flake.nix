@@ -20,6 +20,7 @@
           pkgs = import nixpkgs { inherit system; };
           base_packages = with pkgs; [
             curl
+            gawk
             gmp
             git
             pkg-config

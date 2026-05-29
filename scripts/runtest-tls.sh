@@ -79,9 +79,10 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 status=0
-if NATS_TEST_TLS_SERVER="nats://127.0.0.1:$port" \
-    NATS_TEST_TLS_CA="$cert_dir/ca.pem" dune exec test/server/server_tls.exe \
-    >"$log" 2>&1
+if dune build test/server/server_tls.exe >"$log" 2>&1 && \
+    NATS_TEST_TLS_SERVER="nats://127.0.0.1:$port" \
+    NATS_TEST_TLS_CA="$cert_dir/ca.pem" \
+    "$(pwd)/_build/default/test/server/server_tls.exe" >>"$log" 2>&1
 then
   cat "$log"
 else
