@@ -378,6 +378,9 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
   failover to a discovered peer plus subscription replay. Expand this harness
   for additional failure injection as the Core acceptance matrix grows. Do not
   add silent Core publish replay or pending-request replay.
+- The two-server reconnect runner now holds a request across the active-server
+  failure and verifies that it fails as `Disconnected` before subscription
+  recovery continues.
 - Pending requests and flush barriers now fail structurally and exactly once
   on disconnect, cancellation, timeout, and drain; they never silently replay.
 - Enforce bounded subscription and event queues with an explicit overflow
@@ -393,16 +396,17 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
 The opt-in server harnesses currently cover single-server publish/subscribe,
 headers, queue groups, request/reply, no-responders, flush, close, optional
 username/password authentication, server-required TLS, two-server
-subscription recovery, request timeout/cancellation cleanup, auto-unsubscribe,
-subscription drain, connection drain, and three-node cluster
+subscription recovery and pending-request disconnect failure, request
+timeout/cancellation cleanup, auto-unsubscribe, subscription drain, connection
+drain, and three-node cluster
 discovery/failover. They use private executables and are not part of the
 default Dune test alias. The
 following matrix tracks the acceptance surface; the remaining scenarios
 require additional server configuration or failure-injection control.
 
 - Core publish/subscribe, queue-group load balancing, headers, and replies.
-- Request success, timeout, no responders, and cancellation are live-server
-  covered; the disconnect race remains a reconnect/failure-injection case.
+- Request success, timeout, no responders, cancellation, and a pending-request
+  disconnect race are live-server covered; broader failure injection remains.
 - `flush` confirms server processing rather than local write completion.
 - Reconnect restores subscriptions and remaining auto-unsubscribe counts.
 - A cluster seed advertises reachable peers, and reconnect fails over to a

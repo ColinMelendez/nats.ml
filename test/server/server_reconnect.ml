@@ -116,8 +116,14 @@ let run env =
     expect_ok "connect"
       (Nats_eio.Connection.connect ~sw ~net ~clock ~config endpoints)
   in
+  let responder =
+    expect_ok "responder connect"
+      (Nats_eio.Connection.connect ~sw ~net ~clock ~config endpoints)
+  in
   Fun.protect
-    ~finally:(fun () -> ignore (Nats_eio.Connection.close connection))
+    ~finally:(fun () ->
+      ignore (Nats_eio.Connection.close responder);
+      ignore (Nats_eio.Connection.close connection))
     (fun () ->
       let events = Nats_eio.Connection.events connection in
       expect_initial_connection ~clock events;
@@ -144,8 +150,36 @@ let run env =
       if not (String.equal (Nats.Message.payload baseline.message) "before")
       then
         failf "baseline payload was %S" (Nats.Message.payload baseline.message);
+      let request_subject = Nats.Subject.literal "ocaml.integration.reconnect.request" in
+      let request_filter =
+        Nats.Subject.Filter.literal "ocaml.integration.reconnect.request"
+      in
+      let request_subscription =
+        expect_ok "pending request subscribe"
+          (Nats_eio.Connection.subscribe responder request_filter)
+      in
+      expect_ok "pending request subscribe flush"
+        (Nats_eio.Connection.flush responder);
+      let request_result, request_result_u = Eio.Promise.create () in
+      Eio.Fiber.fork ~sw (fun () ->
+          Eio.Promise.resolve request_result_u
+            (Nats_eio.Connection.request ~timeout connection request_subject
+               "pending"));
+      let pending_request =
+        expect_ok "pending request delivery"
+          (Nats_eio.Subscription.next_with_timeout ~timeout request_subscription)
+      in
+      (match Nats.Message.reply_to pending_request.message with
+      | Some _ -> ()
+      | None -> failf "pending request had no reply subject");
       touch signal;
       expect_disconnected ~clock events;
+      (match Eio.Promise.await request_result with
+      | Error Nats_eio.Error.Disconnected -> ()
+      | Ok _ -> failf "pending request unexpectedly completed"
+      | Error error ->
+          failf "pending request returned %s instead of disconnected"
+            (error_message error));
       expect_reconnected ~clock events;
       expect_recovered ~clock subscription initial_recovery;
       expect_ok "post-reconnect publish"

@@ -45,7 +45,8 @@ Colima helper creates or starts the `default` profile with a 10 GiB disk by
 default; set `COLIMA_DISK_GIB` only when a larger disk is actually needed. Set
 `NATS_SERVER_IMAGE` to try another server image. Cluster, TLS, and reconnect
 scenarios are split into focused runners; the reconnect runner starts two
-single-node servers, kills the active one, and checks subscription recovery.
+single-node servers, kills the active one, checks pending-request failure, and
+checks subscription recovery.
 The cluster runner starts a three-node route mesh, connects only to the seed,
 checks the advertised client URLs, kills the seed, and checks failover to a
 discovered peer with subscription recovery.

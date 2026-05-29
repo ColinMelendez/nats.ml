@@ -546,7 +546,9 @@ non-terminal `Disconnected` and `Reconnected` events, defers unsubscribe and
 auto-unsubscribe commands until the replacement session is connected, and
 leaves ordinary publishes and pending requests unreplayed. Explicit `tls://`
 candidates perform bounded TLS before the NATS handshake, while peer identity
-and SNI remain caller-owned through `Tls.Config.client`. Delayed reconnects
+and SNI remain caller-owned through `Tls.Config.client`. A live two-server
+acceptance test also holds a request across active-server failure and verifies
+that it fails as `Disconnected` rather than being replayed. Delayed reconnects
 support bounded configurable jitter while retaining a deterministic backoff
 base; the opt-in real-server harness covers single-server Core NATS
 publish/subscribe, headers, queue groups, request/reply, no-responders,
@@ -692,7 +694,8 @@ name/SNI policy is therefore part of that configuration. Multi-endpoint TCP
 dialing policy, server discovery, and explicit endpoint TLS are implemented in
 the Eio endpoint planner; peer identity/SNI selection remains caller-owned.
 The opt-in real-server harness now exercises username/password authentication,
-server-required TLS, and reconnect recovery alongside single-server Core NATS
+server-required TLS, reconnect recovery, and pending-request disconnect failure
+alongside single-server Core NATS
 headers, queue groups, request/reply, and no-responders. NKey/JWT server
 acceptance remains a later Core milestone.
 
