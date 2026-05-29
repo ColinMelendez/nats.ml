@@ -152,6 +152,15 @@ let delivery_wire_with_sid ~sid payload =
   in
   operation_wire (Nats.Op.Hmsg { sid; message; status = None })
 
+let delivery_wire_with_headers ~sid ~headers payload =
+  let message =
+    Nats.Message.v
+      ~subject:(Nats.Subject.literal "orders.created")
+      ~reply_to:(Nats.Subject.literal "$JS.ACK.ORDERS.worker.1.1.1.0.0")
+      ~headers payload
+  in
+  operation_wire (Nats.Op.Hmsg { sid; message; status = None })
+
 let ordered_delivery_wire ~sid ~consumer ~stream_sequence ~consumer_sequence
     payload =
   let reply_to =
@@ -738,6 +747,264 @@ let () =
           with
           | Ok _ -> ()
           | Error _ -> fail "consumer config rejected zero backoff"));
+      test "priority consumer configuration validates policy constraints" (fun () ->
+          let timeout = Mtime.Span.(30 * s) in
+          let config =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Consumer.Config.v
+                 ~priority_groups:[ "blue" ]
+                 ~priority_policy:
+                   Nats_eio.Jetstream.Consumer.Config.Pinned_client
+                 ~priority_timeout:timeout ())
+          in
+          equal (list string) [ "blue" ]
+            (Nats_eio.Jetstream.Consumer.Config.priority_groups config);
+          (match
+             Nats_eio.Jetstream.Consumer.Config.priority_policy config
+           with
+          | Some Nats_eio.Jetstream.Consumer.Config.Pinned_client -> ()
+          | _ -> fail "priority consumer lost its policy");
+          equal int64 30_000_000_000L
+            (Mtime.Span.to_uint64_ns
+               (Option.get
+                  (Nats_eio.Jetstream.Consumer.Config.priority_timeout config)));
+          (match
+             Nats_eio.Jetstream.Consumer.Config.v
+               ~priority_groups:[ "blue"; "green" ]
+               ~priority_policy:
+                 Nats_eio.Jetstream.Consumer.Config.Pinned_client ()
+           with
+          | Error
+              (Nats_eio.Jetstream.Error.Invalid_consumer_policy
+                {
+                  field = "priority_groups";
+                  value = "only one group is currently supported";
+                }) ->
+              ()
+          | _ -> fail "priority config accepted multiple groups");
+          (match
+             Nats_eio.Jetstream.Consumer.Config.v
+               ~priority_groups:[ "bad.group" ]
+               ~priority_policy:
+                 Nats_eio.Jetstream.Consumer.Config.Prioritized ()
+           with
+          | Error
+              (Nats_eio.Jetstream.Error.Invalid_consumer_priority_group
+                "bad.group") ->
+              ()
+          | _ -> fail "priority config accepted an invalid group name");
+          (match
+             Nats_eio.Jetstream.Consumer.Config.v
+               ~priority_policy:
+                 Nats_eio.Jetstream.Consumer.Config.Prioritized ()
+          with
+          | Error
+              (Nats_eio.Jetstream.Error.Invalid_consumer_policy
+                { field = "priority_policy"; value = "requires priority_groups" }) ->
+              ()
+          | _ -> fail "priority policy accepted an empty group list");
+          (match
+             Nats_eio.Jetstream.Consumer.Config.v
+               ~priority_groups:[ "blue" ] ~priority_timeout:timeout ()
+           with
+          | Error
+              (Nats_eio.Jetstream.Error.Invalid_consumer_policy
+                { field = "priority_groups"; value = "requires priority_policy" }) ->
+              ()
+          | _ -> fail "priority groups accepted no policy");
+          (match
+             Nats_eio.Jetstream.Consumer.Config.v
+               ~priority_groups:[ "blue" ]
+               ~priority_policy:Nats_eio.Jetstream.Consumer.Config.Overflow
+               ~priority_timeout:timeout ()
+           with
+          | Error
+              (Nats_eio.Jetstream.Error.Invalid_consumer_policy
+                { field = "priority_timeout"; value = "requires pinned_client" }) ->
+              ()
+          | _ -> fail "overflow policy accepted a pin timeout");
+          (match
+             Nats_eio.Jetstream.Consumer.Config.v
+               ~deliver_subject:(Nats.Subject.literal "orders.push")
+               ~priority_groups:[ "blue" ]
+               ~priority_policy:
+                 Nats_eio.Jetstream.Consumer.Config.Prioritized ()
+           with
+          | Error
+              (Nats_eio.Jetstream.Error.Invalid_consumer_policy
+                { field = "priority_policy"; value = "requires pull consumer" }) ->
+              ()
+          | _ -> fail "priority config accepted a push consumer");
+          (match
+             Nats_eio.Jetstream.Consumer.Config.v
+               ~ack_policy:Nats_eio.Jetstream.Consumer.Config.No_ack
+               ~priority_groups:[ "blue" ]
+               ~priority_policy:
+                 Nats_eio.Jetstream.Consumer.Config.Overflow ()
+           with
+          | Error
+              (Nats_eio.Jetstream.Error.Invalid_consumer_policy
+                { field = "ack_policy"; value = "requires explicit" }) ->
+              ()
+          | _ -> fail "overflow policy accepted implicit acknowledgement"));
+      test "priority consumer create emits policy and timeout" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.v
+                     ~durable_name:"worker" ~priority_groups:[ "blue" ]
+                     ~priority_policy:
+                       Nats_eio.Jetstream.Consumer.Config.Pinned_client
+                     ~priority_timeout:Mtime.Span.(30 * s) ())
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.create stream config));
+              yield_n 5;
+              let trace = Buffer.contents trace in
+              if
+                not
+                  (contains_substring
+                     ~needle:"priority_groups\\\":[\\\"blue\\\"]" trace)
+              then fail "priority consumer create omitted its groups";
+              if
+                not
+                  (contains_substring
+                     ~needle:"priority_policy\\\":\\\"pinned_client"
+                     trace)
+              then fail "priority consumer create omitted its policy";
+              if
+                not
+                  (contains_substring ~needle:"priority_timeout\\\":30000000000"
+                     trace)
+              then fail "priority consumer create omitted its timeout";
+              Eio.Promise.resolve response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","priority_groups":["blue"],"priority_policy":"pinned_client","priority_timeout":30000000000,"deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant"}}|}));
+              let consumer = expect_jetstream_ok (Eio.Promise.await result) in
+              equal string "worker" (Nats_eio.Jetstream.Consumer.name consumer);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "consumer info exposes priority pin state" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw connection ->
+              let consumer = consumer connection in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.info consumer));
+              yield_n 5;
+              Eio.Promise.resolve response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","priority_groups":["blue"],"priority_policy":"pinned_client","priority_timeout":120000000000,"deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant"},"priority_groups":[{"group":"blue","pinned_client_id":"pin-1","pinned_ts":"2026-08-12T12:00:00.000000000Z"}]}|}));
+              let info = expect_jetstream_ok (Eio.Promise.await result) in
+              let config = Nats_eio.Jetstream.Consumer.Info.config info in
+              equal (list string) [ "blue" ]
+                (Nats_eio.Jetstream.Consumer.Config.priority_groups config);
+              (match
+                 Nats_eio.Jetstream.Consumer.Info.priority_groups info
+               with
+              | [ group ] ->
+                  equal string "blue"
+                    (Nats_eio.Jetstream.Consumer.Priority_group.name group);
+                  equal (option string) (Some "pin-1")
+                    (Nats_eio.Jetstream.Consumer.Priority_group.pinned_client_id
+                       group);
+                  (match
+                     Nats_eio.Jetstream.Consumer.Priority_group.pinned_at group
+                   with
+                  | Some value when
+                      Ptime.equal value
+                        (ptime_of_rfc3339
+                           "2026-08-12T12:00:00.000000000Z") ->
+                      ()
+                  | _ -> fail "consumer info lost the pin timestamp")
+              | _ -> fail "consumer info lost its priority group state");
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "consumer unpin sends the group request and clears its pin" (fun () ->
+          let first_response, first_response_u = Eio.Promise.create () in
+          let unpin_response, unpin_response_u = Eio.Promise.create () in
+          let second_response, second_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await first_response;
+                `Await unpin_response;
+                `Await second_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let consumer = consumer connection in
+              let headers =
+                match Nats.Header.of_list [ ("Nats-Pin-Id", "pin-unpin") ] with
+                | Ok headers -> headers
+                | Error error ->
+                    fail (Format.asprintf "%a" Nats.Header.pp_error error)
+              in
+              let first_result, first_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_result_u
+                    (Nats_eio.Jetstream.Consumer.fetch consumer ~batch:1
+                       ~group:"blue"));
+              yield_n 5;
+              Eio.Promise.resolve first_response_u
+                (Ok (delivery_wire_with_headers ~sid:1 ~headers "first"));
+              ignore (expect_jetstream_ok (Eio.Promise.await first_result));
+              let unpin_result, unpin_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve unpin_result_u
+                    (Nats_eio.Jetstream.Consumer.unpin consumer ~group:"blue"));
+              yield_n 5;
+              let unpin_trace = Buffer.contents trace in
+              if
+                not
+                  (contains_substring
+                     ~needle:"CONSUMER.UNPIN.ORDERS.worker" unpin_trace)
+              then fail "consumer unpin used the wrong endpoint";
+              if
+                not (contains_substring ~needle:"group\\\":\\\"blue" unpin_trace)
+              then fail "consumer unpin omitted its group";
+              Eio.Promise.resolve unpin_response_u (Ok (api_ok_wire ~sid:2));
+              expect_jetstream_ok (Eio.Promise.await unpin_result);
+              let second_result, second_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve second_result_u
+                    (Nats_eio.Jetstream.Consumer.fetch consumer ~batch:1
+                       ~group:"blue"));
+              yield_n 5;
+              let second_trace = Buffer.contents trace in
+              if
+                not
+                  (Int.equal
+                     (count_substring ~needle:"id\\\":\\\"pin-unpin" second_trace)
+                     0)
+              then
+                fail "consumer unpin left a stale local pin";
+              Eio.Promise.resolve second_response_u
+                (Ok (delivery_wire_with_sid ~sid:3 "second"));
+              ignore (expect_jetstream_ok (Eio.Promise.await second_result));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "consumer create emits modern config fields" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
@@ -1551,6 +1818,99 @@ let () =
                with
               | [ ("owner", "server") ] -> ()
               | _ -> fail "consumer update response lost preserved metadata");
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "consumer update retains modeled priority configuration" (fun () ->
+          let info_response, info_response_u = Eio.Promise.create () in
+          let update_response, update_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await info_response;
+                `Await update_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.v
+                     ~durable_name:"worker" ~description:"updated"
+                     ~priority_groups:[ "blue" ]
+                     ~priority_policy:
+                       Nats_eio.Jetstream.Consumer.Config.Pinned_client
+                     ~priority_timeout:Mtime.Span.(30 * s) ())
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.update (consumer connection)
+                       config));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","priority_groups":["blue"],"priority_policy":"pinned_client","priority_timeout":120000000000,"deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","future_field":true}}|}));
+              yield_n 5;
+              let trace = Buffer.contents trace in
+              if
+                not
+                  (contains_substring
+                     ~needle:"priority_groups\\\":[\\\"blue\\\"]" trace)
+              then fail "consumer update dropped priority groups";
+              if
+                not
+                  (contains_substring
+                     ~needle:"priority_policy\\\":\\\"pinned_client"
+                     trace)
+              then fail "consumer update dropped priority policy";
+              if
+                not
+                  (contains_substring ~needle:"priority_timeout\\\":30000000000"
+                     trace)
+              then fail "consumer update dropped priority timeout";
+              Eio.Promise.resolve update_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:2
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"updated","priority_groups":["blue"],"priority_policy":"pinned_client","priority_timeout":30000000000,"deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant"}}|}));
+              let info = expect_jetstream_ok (Eio.Promise.await result) in
+              equal (list string) [ "blue" ]
+                (Nats_eio.Jetstream.Consumer.Config.priority_groups
+                   (Nats_eio.Jetstream.Consumer.Info.config info));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "consumer update rejects priority identity changes" (fun () ->
+          let info_response, info_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await info_response; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.v
+                     ~durable_name:"worker" ~priority_groups:[ "green" ]
+                     ~priority_policy:
+                       Nats_eio.Jetstream.Consumer.Config.Prioritized ())
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.update (consumer connection)
+                       config));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","priority_groups":["blue"],"priority_policy":"pinned_client","priority_timeout":120000000000,"deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant"}}|}));
+              expect_jetstream_error (Eio.Promise.await result) (function
+                | Nats_eio.Jetstream.Error.Invalid_config
+                    Nats_eio.Jetstream.Error.Invalid_consumer_priority_update ->
+                    true
+                | _ -> false);
+              let trace = Buffer.contents trace in
+              if contains_substring ~needle:"action\\\":\\\"update" trace then
+                fail "priority identity rejection sent an update";
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream purge sends a filtered request and returns the count" (fun () ->
@@ -3229,6 +3589,194 @@ let () =
                     Int.equal code 409
                     && String.equal description "message size exceeds maxbytes"
                 | _ -> false);
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Pull.close pull);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "one-shot fetch retains a pinned priority id" (fun () ->
+          let first_response, first_response_u = Eio.Promise.create () in
+          let second_response, second_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await first_response;
+                `Await second_response;
+                `Await hold;
+            ]
+            (fun ~sw ~trace connection ->
+              let consumer = consumer connection in
+              let headers =
+                match Nats.Header.of_list [ ("Nats-Pin-Id", "pin-fetch") ] with
+                | Ok headers -> headers
+                | Error error ->
+                    fail (Format.asprintf "%a" Nats.Header.pp_error error)
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.fetch consumer
+                       ~batch:1 ~group:"blue" ~priority:4));
+              yield_n 5;
+              let first_trace = Buffer.contents trace in
+              if
+                not
+                  (Int.equal
+                     (count_substring
+                        ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker" first_trace)
+                     1)
+              then fail "one-shot fetch did not send its request";
+              if
+                not
+                  (Int.equal
+                     (count_substring ~needle:"id\\\":\\\"pin-fetch" first_trace)
+                     0)
+              then fail "one-shot fetch sent a pin id too early";
+              Eio.Promise.resolve first_response_u
+                (Ok (delivery_wire_with_headers ~sid:1 ~headers "first-fetch"));
+              (match expect_jetstream_ok (Eio.Promise.await result) with
+              | [ message ] ->
+                  equal string "first-fetch"
+                    (Nats_eio.Jetstream.Msg.payload message)
+              | _ -> fail "one-shot fetch returned the wrong first batch");
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.fetch consumer
+                       ~batch:1 ~group:"blue" ~priority:4));
+              yield_n 5;
+              let second_trace = Buffer.contents trace in
+              if
+                not
+                  (Int.equal
+                     (count_substring
+                        ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker" second_trace)
+                     2)
+              then fail "one-shot fetch did not issue its second request";
+              if
+                not
+                  (Int.equal
+                     (count_substring ~needle:"id\\\":\\\"pin-fetch" second_trace)
+                     1)
+              then fail "one-shot fetch did not retain its pin id";
+              Eio.Promise.resolve second_response_u
+                (Ok (delivery_wire_with_sid ~sid:2 "second-fetch"));
+              (match expect_jetstream_ok (Eio.Promise.await result) with
+              | [ message ] ->
+                  equal string "second-fetch"
+                    (Nats_eio.Jetstream.Msg.payload message)
+              | _ -> fail "one-shot fetch returned the wrong second batch");
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "pull carries priority options and recovers a lost pin" (fun () ->
+          let first_response, first_response_u = Eio.Promise.create () in
+          let pin_lost, pin_lost_u = Eio.Promise.create () in
+          let second_response, second_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await first_response;
+                `Await pin_lost;
+                `Await second_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let headers =
+                match Nats.Header.of_list [ ("Nats-Pin-Id", "pin-1") ] with
+                | Ok headers -> headers
+                | Error error ->
+                    fail (Format.asprintf "%a" Nats.Header.pp_error error)
+              in
+              let pull =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Consumer.Pull.v ~sw ~batch:1
+                     ~group:"blue" ~min_pending:2L ~min_ack_pending:3L
+                     ~priority:4 (consumer connection))
+              in
+              let first_result, first_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_result_u
+                    (Nats_eio.Jetstream.Consumer.Pull.next pull));
+              yield_n 5;
+              let first_trace = Buffer.contents trace in
+              if
+                not
+                  (Int.equal
+                     (count_substring
+                        ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker" first_trace)
+                     1)
+              then fail "pull did not send its first priority request";
+              if
+                not
+                  (Int.equal
+                     (count_substring ~needle:"id\\\":\\\"pin-1" first_trace)
+                     0)
+              then
+                fail "pull sent a pin id before receiving one";
+              if
+                not (contains_substring ~needle:"group\\\":\\\"blue" first_trace)
+              then fail "pull omitted its priority group";
+              if not (contains_substring ~needle:"min_pending\\\":2" first_trace)
+              then fail "pull omitted its pending threshold";
+              if
+                not
+                  (contains_substring ~needle:"min_ack_pending\\\":3"
+                     first_trace)
+              then fail "pull omitted its ack-pending threshold";
+              if not (contains_substring ~needle:"priority\\\":4" first_trace)
+              then fail "pull omitted its priority";
+              Eio.Promise.resolve first_response_u
+                (Ok (delivery_wire_with_headers ~sid:1 ~headers "first"));
+              let first = expect_jetstream_ok (Eio.Promise.await first_result) in
+              equal string "first" (Nats_eio.Jetstream.Msg.payload first);
+              let second_result, second_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve second_result_u
+                    (Nats_eio.Jetstream.Consumer.Pull.next pull));
+              yield_n 5;
+              let second_trace = Buffer.contents trace in
+              if
+                not
+                  (Int.equal
+                     (count_substring
+                        ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker" second_trace)
+                     2)
+              then fail "pull did not issue its second request";
+              if
+                not
+                  (Int.equal
+                     (count_substring ~needle:"id\\\":\\\"pin-1" second_trace)
+                     1)
+              then
+                fail "pull did not echo the server pin id";
+              Eio.Promise.resolve pin_lost_u
+                (Ok
+                   (status_wire_with_sid ~sid:1 ~code:423
+                      ~description:"Nats-Pin-Id mismatch"));
+              yield_n 5;
+              let third_trace = Buffer.contents trace in
+              if
+                not
+                  (Int.equal
+                     (count_substring
+                        ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker" third_trace)
+                     3)
+              then fail "pull did not retry after losing its pin";
+              if
+                not
+                  (Int.equal
+                     (count_substring ~needle:"id\\\":\\\"pin-1" third_trace)
+                     1)
+              then
+                fail "pull retained a stale pin id after a mismatch";
+              Eio.Promise.resolve second_response_u
+                (Ok (delivery_wire_with_sid ~sid:1 "second"));
+              let second =
+                expect_jetstream_ok (Eio.Promise.await second_result)
+              in
+              equal string "second" (Nats_eio.Jetstream.Msg.payload second);
               expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Pull.close pull);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
