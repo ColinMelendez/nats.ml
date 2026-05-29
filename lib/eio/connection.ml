@@ -672,7 +672,7 @@ type t = {
   mutable reconnect_deadline : Mtime.t option;
   mutable connect_sent : bool;
   mutable tls_active : bool;
-  mutable tls_info_received : bool;
+  mutable connect_info_ready : bool;
   mutable pending_commands : int;
   mutable active_request_setup : (int, Error.t) result Eio.Promise.u option;
   deferred_commands : command Queue.t;
@@ -1110,7 +1110,7 @@ let apply_transition t (transition : Nats.Client.transition) =
         && List.exists
              (function Nats.Event.Info _ -> true | _ -> false)
              transition.events
-      then t.tls_info_received <- true;
+      then t.connect_info_ready <- true;
       match handle_events t transition.events with
       | Error error -> Error error
       | Ok () -> handle_deliveries t transition.deliveries)
@@ -1175,11 +1175,14 @@ let upgrade_tls t =
             | Ok flow ->
                 t.flow.flow <- Flow flow;
                 t.tls_active <- true;
-                t.tls_info_received <- false;
+                (* A server-required upgrade follows the plaintext INFO; that
+                   INFO is already sufficient to construct CONNECT. TLS-first
+                   connections set this flag when their encrypted INFO arrives. *)
+                t.connect_info_ready <- true;
                 start_reader t;
                 Ok ()))
 
-let connect_after_info t =
+let rec connect_after_info t =
   if
     Nats.Client.phase t.state = Nats.Client.Awaiting_connect
     && not t.connect_sent
@@ -1187,8 +1190,11 @@ let connect_after_info t =
     if
       (tls_required_by_server t || t.config.Config.tls_required)
       && not t.tls_active
-    then upgrade_tls t
-    else if t.tls_active && not t.tls_info_received then Ok ()
+    then (
+      match upgrade_tls t with
+      | Error error -> Error error
+      | Ok () -> connect_after_info t)
+    else if t.tls_active && not t.connect_info_ready then Ok ()
     else
       match Nats.Client.info t.state with
       | None -> Error (protocol Nats.Error.Info_not_received)
@@ -1317,7 +1323,7 @@ let reset_reconnect_attempt t =
   t.handshake_deadline <- None;
   t.connect_sent <- false;
   t.tls_active <- false;
-  t.tls_info_received <- false;
+  t.connect_info_ready <- false;
   t.reconnect_deadline <- None;
   invalidate_timer t;
   close_transport t.flow;
@@ -1377,7 +1383,7 @@ let start_reconnect_attempt t =
         (match Nats.Endpoint.scheme endpoint with
         | Nats.Endpoint.Nats -> false
         | Nats.Endpoint.Tls -> true);
-      t.tls_info_received <- false;
+      t.connect_info_ready <- false;
       t.flow.flow <- flow;
       t.flow.closed <- false;
       t.handshake_deadline <-
@@ -2157,7 +2163,7 @@ let create ~sw ~clock ~config ~(dial : dial) ~pool ~current_endpoint ~tls_active
       reconnect_deadline = None;
       connect_sent = false;
       tls_active;
-      tls_info_received = false;
+      connect_info_ready = false;
       pending_commands = 0;
       active_request_setup = None;
       deferred_commands = Queue.create ();

@@ -549,9 +549,9 @@ candidates perform bounded TLS before the NATS handshake, while peer identity
 and SNI remain caller-owned through `Tls.Config.client`. Delayed reconnects
 support bounded configurable jitter while retaining a deterministic backoff
 base; the opt-in real-server harness covers single-server Core NATS
-publish/subscribe, headers, queue groups, request/reply, no-responders, and
-username/password authentication, while cluster, TLS, and reconnect acceptance
-remain later work.
+publish/subscribe, headers, queue groups, request/reply, no-responders,
+username/password authentication, server-required TLS, and reconnect recovery;
+cluster acceptance remains later work.
 
 The normal user operations should be direct-style and result-returning:
 
@@ -675,21 +675,23 @@ capability in its configuration and invokes it after the settled `INFO`, while
 parsing/storage belongs in an optional authentication module, and the signer
 contract expects the caller to provide any required signature encoding.
 
-The Eio adapter now owns the TCP-to-TLS transition: it reads
-the initial plaintext `INFO`, pauses and joins its reader, wraps the flow with
-the configured TLS client, waits for the post-TLS `INFO`, and only then sends
-`CONNECT` with `tls_required=true`. The pure core sees only that final protocol
-intent; it does not depend on TLS. The adapter rejects bytes left over from the
-plaintext phase, bounds the TLS handshake with the configured handshake
-deadline, and reports TLS failures through structured adapter errors. The
+The Eio adapter now owns the TCP-to-TLS transition: for a server-required
+upgrade it reads the initial plaintext `INFO`, pauses and joins its reader,
+wraps the flow with the configured TLS client, and sends `CONNECT` using that
+already-parsed `INFO` with `tls_required=true`. For an explicit TLS-first
+endpoint it performs TLS before reading the first encrypted `INFO`. The pure
+core sees only the final protocol intent; it does not depend on TLS. The
+adapter rejects bytes left over from the plaintext phase, bounds the TLS
+handshake with the configured handshake deadline, and reports TLS failures
+through structured adapter errors. The
 caller supplies the TLS peer configuration and must install the TLS RNG; host
 name/SNI policy is therefore part of that configuration. Multi-endpoint TCP
 dialing policy, server discovery, and explicit endpoint TLS are implemented in
 the Eio endpoint planner; peer identity/SNI selection remains caller-owned.
-The opt-in real-server harness now exercises username/password authentication
-alongside single-server Core NATS headers, queue groups, request/reply, and
-no-responders. NKey/JWT server acceptance, TLS, and reconnect acceptance remain
-later Core milestones.
+The opt-in real-server harness now exercises username/password authentication,
+server-required TLS, and reconnect recovery alongside single-server Core NATS
+headers, queue groups, request/reply, and no-responders. NKey/JWT server
+acceptance remains a later Core milestone.
 
 ### JetStream, KV, Object Store, and Services
 

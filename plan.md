@@ -44,8 +44,8 @@ barriers. Mock-transport coverage exercises fragmented/coalesced frames,
 replies, no responders, timeouts, cancellation, sibling delivery during drain,
 and multi-barrier ordering. The Eio adapter now also negotiates TLS-required
 servers through a replaceable flow and reader lifecycle: it bounds the TLS
-handshake, rejects buffered plaintext, waits for the post-TLS `INFO`, and
-reports structured TLS/timeout/close failures. Transport recovery with
+handshake, rejects buffered plaintext, and reports structured
+TLS/timeout/close failures. Transport recovery with
 configurable retry/backoff is now implemented: the first redial is immediate,
 later attempts use capped exponential waits, `Some 3` is the default attempt
 limit, `None` permits unlimited attempts, and `Some 0` disables recovery.
@@ -63,8 +63,9 @@ available through the same configuration. Reconnect jitter is configurable,
 zero by default, and applied only to delayed retries. An opt-in Docker-backed
 real-server acceptance harness now covers single-server pub/sub, headers, queue
 groups, request/reply, no-responders, flush, close, and optional
-username/password authentication; cluster, TLS, and reconnect acceptance remain
-ahead of the G2 stability gate. Authentication capabilities now cover anonymous,
+username/password authentication, server-required TLS, and reconnect recovery;
+cluster acceptance remains ahead of the G2 stability gate. Authentication
+capabilities now cover anonymous,
 token, username/password, NKey, and JWT credentials; nonce signing is repeated
 for every INFO, while private-key parsing and NKey/JWT server acceptance remain
 later work. The JetStream foundation now adds a typed, resource-free capability
@@ -346,9 +347,10 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
   `Tls.Config.client`, and server-required TLS still works through that
   configuration.
 - The TLS upgrade path supports INFO-driven or explicitly forced TLS with a
-  caller-owned `Tls.Config.client`,
-  a replaceable reader, a bounded handshake, and a required post-TLS `INFO`
-  before `CONNECT`. Callers must install the TLS RNG and configure peer
+  caller-owned `Tls.Config.client`, a replaceable reader, and a bounded
+  handshake. A server-required upgrade sends `CONNECT` using the already-parsed
+  plaintext `INFO`; an explicit `tls://` endpoint sends it after the first
+  encrypted `INFO`. Callers must install the TLS RNG and configure peer
   identity in the TLS client configuration.
 - Start one protocol-owner fiber per connection and serialize all commands
   through it.
@@ -384,12 +386,13 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
 
 ### Acceptance tests against `nats-server`
 
-The opt-in `scripts/runtest-server.sh` harness currently covers single-server
-publish/subscribe, headers, queue groups, request/reply, no-responders, flush,
-close, and optional username/password authentication. It uses a private
-executable and is not part of the default Dune test alias. The remaining
-scenarios below require server configuration, a cluster, or failure-injection
-control that a lone `nats-server` process cannot provide.
+The opt-in server harnesses currently cover single-server publish/subscribe,
+headers, queue groups, request/reply, no-responders, flush, close, optional
+username/password authentication, server-required TLS, and two-server
+subscription recovery. They use private executables and are not part of the
+default Dune test alias. The remaining scenarios below require server
+configuration, a cluster, or failure-injection control that a lone
+`nats-server` process cannot provide.
 
 - Core publish/subscribe, queue-group load balancing, headers, and replies.
 - Request success, timeout, no responders, cancellation, and disconnect race.
