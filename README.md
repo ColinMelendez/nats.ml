@@ -21,14 +21,25 @@ dune build
 dune runtest
 ```
 
+The real-server tests use a smaller, separate shell so integration-only
+tooling does not become part of the normal OCaml development environment:
+
+```sh
+nix develop .#integration
+```
+
 The current pure-core tests are portable. An opt-in Core NATS acceptance run
 against a pinned `nats-server` Docker image is available with:
 
 ```sh
+./scripts/start-colima.sh
 ./scripts/runtest-server.sh
 ```
 
-The script requires Docker and is intentionally outside `dune runtest`; set
+The script requires Docker and is intentionally outside `dune runtest`; Docker
+is the one integration dependency supplied by the host rather than Nix. The
+Colima helper creates or starts the `default` profile with a 10 GiB disk by
+default; set `COLIMA_DISK_GIB` only when a larger disk is actually needed. Set
 `NATS_SERVER_IMAGE` to try another server image. Cluster, TLS, and reconnect
 scenarios will be added as the corresponding implementation phases land. To
 exercise username/password authentication, set both `NATS_TEST_USER` and

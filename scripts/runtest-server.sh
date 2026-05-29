@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
+script_dir=$(CDPATH=; export CDPATH; cd "$(dirname "$0")" && pwd)
 cd "$script_dir/.."
 
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
@@ -90,7 +90,7 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 if NATS_TEST_SERVER="$server" NATS_TEST_JETSTREAM="$jetstream" \
-    NATS_TEST_JETSTREAM_RUN_ID="$jetstream_run_id" nix develop -c dune exec \
+    NATS_TEST_JETSTREAM_RUN_ID="$jetstream_run_id" nix develop .#integration -c dune exec \
     test/server/server_acceptance.exe >"$log" 2>&1
 then
   cat "$log"
