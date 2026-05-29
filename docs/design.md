@@ -550,9 +550,11 @@ and SNI remain caller-owned through `Tls.Config.client`. Delayed reconnects
 support bounded configurable jitter while retaining a deterministic backoff
 base; the opt-in real-server harness covers single-server Core NATS
 publish/subscribe, headers, queue groups, request/reply, no-responders,
-username/password authentication, server-required TLS, and reconnect recovery;
-three-node cluster discovery/failover with subscription recovery. Advanced
-cluster failure scenarios and cross-SDK acceptance remain later work.
+username/password authentication, server-required TLS, request timeout and
+cancellation cleanup, auto-unsubscribe, subscription drain, connection drain,
+reconnect recovery, and three-node cluster discovery/failover with subscription
+recovery. Advanced cluster failure scenarios and cross-SDK acceptance remain
+later work.
 
 The normal user operations should be direct-style and result-returning:
 
@@ -779,7 +781,7 @@ through individual helper functions:
   without a network;
 - run black-box integration tests against a real `nats-server` for reconnect,
   three-node cluster discovery/failover, TLS/authentication, queue groups, and
-  JetStream. The
+  lifecycle/error behavior, and JetStream. The
   current opt-in Docker harness enables its JetStream slice with
   `NATS_TEST_JETSTREAM=1` and covers stream management, stream update/list,
   consumer inventory, unknown-config preservation, publish acknowledgements,

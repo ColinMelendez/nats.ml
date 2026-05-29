@@ -58,7 +58,9 @@ The harness then requires anonymous connection rejection as well as successful
 authenticated traffic. To enable the JetStream acceptance slice, also set
 `NATS_TEST_JETSTREAM=1`; this starts the server with JetStream enabled and
 exercises stream management, publish acknowledgements, duplicate message ids,
-and cleanup. The JetStream test uses a per-run stream name; set
+and cleanup. The server runner also checks request timeout/cancellation
+cleanup, auto-unsubscribe limits, subscription drain, and connection drain.
+The JetStream test uses a per-run stream name; set
 `NATS_TEST_JETSTREAM_RUN_ID` only when a stable, safe identifier is useful for
 debugging.
 

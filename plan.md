@@ -63,9 +63,10 @@ available through the same configuration. Reconnect jitter is configurable,
 zero by default, and applied only to delayed retries. An opt-in Docker-backed
 real-server acceptance harness now covers single-server pub/sub, headers, queue
 groups, request/reply, no-responders, flush, close, and optional
-username/password authentication, server-required TLS, reconnect recovery, and
-three-node cluster discovery/failover with subscription recovery. Authentication
-capabilities now cover anonymous,
+username/password authentication, server-required TLS, request timeout and
+cancellation cleanup, auto-unsubscribe, subscription drain, connection drain,
+reconnect recovery, and three-node cluster discovery/failover with subscription
+recovery. Authentication capabilities now cover anonymous,
 token, username/password, NKey, and JWT credentials; nonce signing is repeated
 for every INFO, while private-key parsing and NKey/JWT server acceptance remain
 later work. The JetStream foundation now adds a typed, resource-free capability
@@ -392,13 +393,16 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
 The opt-in server harnesses currently cover single-server publish/subscribe,
 headers, queue groups, request/reply, no-responders, flush, close, optional
 username/password authentication, server-required TLS, two-server
-subscription recovery, and three-node cluster discovery/failover. They use
-private executables and are not part of the default Dune test alias. The
+subscription recovery, request timeout/cancellation cleanup, auto-unsubscribe,
+subscription drain, connection drain, and three-node cluster
+discovery/failover. They use private executables and are not part of the
+default Dune test alias. The
 following matrix tracks the acceptance surface; the remaining scenarios
 require additional server configuration or failure-injection control.
 
 - Core publish/subscribe, queue-group load balancing, headers, and replies.
-- Request success, timeout, no responders, cancellation, and disconnect race.
+- Request success, timeout, no responders, and cancellation are live-server
+  covered; the disconnect race remains a reconnect/failure-injection case.
 - `flush` confirms server processing rather than local write completion.
 - Reconnect restores subscriptions and remaining auto-unsubscribe counts.
 - A cluster seed advertises reachable peers, and reconnect fails over to a

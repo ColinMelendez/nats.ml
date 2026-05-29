@@ -11,6 +11,10 @@
  (libraries nats nats-eio eio eio_main))
 
 (executable
+ (name server_lifecycle)
+ (libraries nats nats-eio eio eio_main))
+
+(executable
  (name server_tls)
  (libraries nats nats-eio eio eio_main tls x509 domain-name
   mirage-crypto-rng.unix ptime))

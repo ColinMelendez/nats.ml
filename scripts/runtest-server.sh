@@ -12,6 +12,7 @@ jetstream_run_id=${NATS_TEST_JETSTREAM_RUN_ID:-$$}
 container=
 log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-server.XXXXXX")
 
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT/INT/TERM trap.
 cleanup() {
   if [ -n "$container" ]; then
     docker rm -f "$container" >/dev/null 2>&1 || true
@@ -89,12 +90,24 @@ if [ "$ready" -ne 1 ]; then
   exit 1
 fi
 
+status=0
 if NATS_TEST_SERVER="$server" NATS_TEST_JETSTREAM="$jetstream" \
     NATS_TEST_JETSTREAM_RUN_ID="$jetstream_run_id" nix develop .#integration -c dune exec \
     test/server/server_acceptance.exe >"$log" 2>&1
 then
+  if NATS_TEST_SERVER="$server" nix develop .#integration -c dune exec \
+      test/server/server_lifecycle.exe >>"$log" 2>&1
+  then
+    :
+  else
+    status=$?
+  fi
+else
+  status=$?
+fi
+if [ "$status" -eq 0 ]; then
   cat "$log"
 else
   cat "$log" >&2
-  exit 1
 fi
+exit "$status"
