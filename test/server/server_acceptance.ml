@@ -70,6 +70,14 @@ let next_with_timeout ~clock ~timeout subscription =
       Eio.Time.Mono.sleep clock timeout;
       Error Nats_eio.Error.Timeout)
 
+let next_event_with_timeout ~clock ~timeout events =
+  let timeout = Mtime.Span.to_float_ns timeout /. 1e9 in
+  Eio.Fiber.first
+    (fun () -> Nats_eio.Event_stream.next events)
+    (fun () ->
+      Eio.Time.Mono.sleep clock timeout;
+      Error Nats_eio.Error.Timeout)
+
 let collect_queue_payloads ~sw ~clock ~timeout ~expected worker_one worker_two =
   let payloads = Eio.Stream.create expected in
   let collect subscription =
@@ -899,6 +907,45 @@ let expect_auth_required ~sw ~net ~clock endpoint =
       failf "anonymous connection succeeded against an auth server"
   | Error error -> failf "anonymous connection: %s" (error_message error)
 
+let invalid_authentication () =
+  match Sys.getenv_opt "NATS_TEST_TOKEN" with
+  | Some _ -> Nats.Auth.token "ocaml_invalid_credentials"
+  | None ->
+      Nats.Auth.user_pass ~user:"ocaml_invalid_user" ~pass:"ocaml_invalid_pass"
+
+let expect_invalid_authentication ~sw ~net ~clock ~timeout endpoint =
+  let config =
+    expect_ok "invalid auth config"
+      (Nats_eio.Connection.Config.v ~auth:(invalid_authentication ())
+         ~max_reconnect_attempts:(Some 0) ())
+  in
+  let connection =
+    expect_ok "invalid auth connect"
+      (Nats_eio.Connection.connect ~sw ~net ~clock ~config [ endpoint ])
+  in
+  let events = Nats_eio.Connection.events connection in
+  let rec wait_for_rejection remaining server_error_seen =
+    if Int.equal remaining 0 then
+      failf "invalid credentials did not produce a server rejection"
+    else
+      match next_event_with_timeout ~clock ~timeout events with
+      | Ok
+          (Nats_eio.Event.Core
+            (Nats.Event.Server_error { message }))
+        when contains_substring ~needle:"authorization"
+               (String.lowercase_ascii message) ->
+          wait_for_rejection (remaining - 1) true
+      | Ok (Nats_eio.Event.Core (Nats.Event.Server_error { message })) ->
+          failf "invalid credentials produced an unrelated server error: %S"
+            message
+      | Ok _ -> wait_for_rejection (remaining - 1) server_error_seen
+      | Error Nats_eio.Error.Disconnected when server_error_seen -> ()
+      | Error error ->
+          failf "invalid credentials terminated with %s" (error_message error)
+  in
+  wait_for_rejection 16 false;
+  expect_ok "close invalid auth connection" (Nats_eio.Connection.close connection)
+
 let run env =
   Eio.Switch.run @@ fun sw ->
   let endpoint = endpoint () in
@@ -1043,6 +1090,7 @@ let run env =
   | None -> ()
   | Some _ ->
       expect_auth_required ~sw ~net ~clock endpoint;
+      expect_invalid_authentication ~sw ~net ~clock ~timeout endpoint;
       let mode =
         match Sys.getenv_opt "NATS_TEST_TOKEN" with
         | Some _ -> "token"
