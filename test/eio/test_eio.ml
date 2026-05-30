@@ -900,6 +900,59 @@ let () =
                   fail
                     (Format.asprintf "expected slow consumer, got %a"
                        Nats_eio.Error.pp error)));
+      test "a full event stream reports a slow consumer" (fun () ->
+          let extra_info, extra_info_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let config =
+            expect_ok (Nats_eio.Connection.Config.v ~event_capacity:2 ())
+          in
+          with_connection ~config
+            ~reads:[ `Return info_wire; `Await extra_info; `Await hold ]
+            (fun ~sw:_ connection ->
+              let events = Nats_eio.Connection.events connection in
+              (match expect_core_event (Nats_eio.Event_stream.next events) with
+              | Nats.Event.Info _ -> ()
+              | event ->
+                  fail
+                    (Format.asprintf "expected initial INFO, got %a"
+                       Nats.Event.pp event));
+              (match expect_core_event (Nats_eio.Event_stream.next events) with
+              | Nats.Event.Connected -> ()
+              | event ->
+                  fail
+                    (Format.asprintf "expected initial CONNECTED, got %a"
+                       Nats.Event.pp event));
+              Eio.Promise.resolve extra_info_u
+                (Ok (info_wire ^ info_wire ^ info_wire));
+              yield_n 5;
+              (match expect_core_event (Nats_eio.Event_stream.next events) with
+              | Nats.Event.Info _ -> ()
+              | event ->
+                  fail
+                    (Format.asprintf "expected queued INFO, got %a"
+                       Nats.Event.pp event));
+              (match expect_core_event (Nats_eio.Event_stream.next events) with
+              | Nats.Event.Info _ -> ()
+              | event ->
+                  fail
+                    (Format.asprintf "expected second queued INFO, got %a"
+                       Nats.Event.pp event));
+              (match Nats_eio.Event_stream.next events with
+              | Ok
+                  (Nats_eio.Event.Slow_consumer Nats_eio.Error.Events) ->
+                  ()
+              | Ok event ->
+                  fail
+                    (Format.asprintf
+                       "expected event-stream slow-consumer error, got %a"
+                       Nats_eio.Event.pp event)
+              | Error error ->
+                  fail
+                    (Format.asprintf
+                       "expected event-stream slow-consumer error, got %a"
+                       Nats_eio.Error.pp error));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "reports EOF after processing complete input" (fun () ->
           let config =
             expect_ok
