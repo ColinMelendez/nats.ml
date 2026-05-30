@@ -397,7 +397,7 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
 
 The opt-in server harnesses currently cover single-server publish/subscribe,
 headers, queue groups, request/reply, no-responders, flush, close, optional
-username/password authentication, server-required TLS, two-server
+token or username/password authentication, server-required TLS, two-server
 subscription recovery and pending-request disconnect failure, request
 timeout/cancellation cleanup, auto-unsubscribe, bounded slow-consumer handling,
 subscription drain, connection drain, parent-switch cleanup, lame-duck handling,
