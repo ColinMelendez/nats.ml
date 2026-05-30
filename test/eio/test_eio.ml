@@ -306,6 +306,42 @@ let () =
               equal string "hello" (Nats.Message.payload delivery.message);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "reports server errors without closing the connection" (fun () ->
+          let server_error, server_error_u = Eio.Promise.create () in
+          let delivery, delivery_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:
+              [
+                `Return info_wire;
+                `Await server_error;
+                `Await delivery;
+                `Await hold;
+              ]
+            (fun ~sw:_ connection ->
+              let events = Nats_eio.Connection.events connection in
+              ignore (expect_core_event (Nats_eio.Event_stream.next events));
+              ignore (expect_core_event (Nats_eio.Event_stream.next events));
+              Eio.Promise.resolve server_error_u
+                (Ok "-ERR 'permissions violation'\r\n");
+              (match expect_core_event (Nats_eio.Event_stream.next events) with
+              | Nats.Event.Server_error { message = "permissions violation" } ->
+                  ()
+              | event ->
+                  fail
+                    (Format.asprintf "expected server error event, got %a"
+                       Nats.Event.pp event));
+              let subscription =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              Eio.Promise.resolve delivery_u
+                (Ok "MSG orders.created 1 5\r\nhello\r\n");
+              let received =
+                expect_ok (Nats_eio.Subscription.next subscription)
+              in
+              equal string "hello" (Nats.Message.payload received.message);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "request handles replies, no responders, and timeout" (fun () ->
           let response_one, response_one_u = Eio.Promise.create () in
           let response_two, response_two_u = Eio.Promise.create () in
