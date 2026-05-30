@@ -554,9 +554,9 @@ base; the opt-in real-server harness covers single-server Core NATS
 publish/subscribe, headers, queue groups, request/reply, no-responders,
 username/password authentication, server-required TLS, request timeout and
 cancellation cleanup, auto-unsubscribe, subscription drain, connection drain,
-reconnect recovery, and three-node cluster discovery/failover with subscription
-recovery. Advanced cluster failure scenarios and cross-SDK acceptance remain
-later work.
+bounded slow-consumer handling, reconnect recovery, and three-node cluster
+discovery/failover with subscription recovery. Advanced cluster failure
+scenarios and cross-SDK acceptance remain later work.
 
 The normal user operations should be direct-style and result-returning:
 
@@ -694,8 +694,8 @@ name/SNI policy is therefore part of that configuration. Multi-endpoint TCP
 dialing policy, server discovery, and explicit endpoint TLS are implemented in
 the Eio endpoint planner; peer identity/SNI selection remains caller-owned.
 The opt-in real-server harness now exercises username/password authentication,
-server-required TLS, reconnect recovery, and pending-request disconnect failure
-alongside single-server Core NATS
+server-required TLS, reconnect recovery, pending-request disconnect failure, and
+bounded slow-consumer handling alongside single-server Core NATS
 headers, queue groups, request/reply, and no-responders. NKey/JWT server
 acceptance remains a later Core milestone.
 

@@ -65,8 +65,9 @@ real-server acceptance harness now covers single-server pub/sub, headers, queue
 groups, request/reply, no-responders, flush, close, and optional
 username/password authentication, server-required TLS, request timeout and
 cancellation cleanup, auto-unsubscribe, subscription drain, connection drain,
-reconnect recovery, and three-node cluster discovery/failover with subscription
-recovery. Authentication capabilities now cover anonymous,
+slow-consumer handling, reconnect recovery, and three-node cluster
+discovery/failover with subscription recovery. Authentication capabilities now
+cover anonymous,
 token, username/password, NKey, and JWT credentials; nonce signing is repeated
 for every INFO, while private-key parsing and NKey/JWT server acceptance remain
 later work. The JetStream foundation now adds a typed, resource-free capability
@@ -397,8 +398,8 @@ The opt-in server harnesses currently cover single-server publish/subscribe,
 headers, queue groups, request/reply, no-responders, flush, close, optional
 username/password authentication, server-required TLS, two-server
 subscription recovery and pending-request disconnect failure, request
-timeout/cancellation cleanup, auto-unsubscribe, subscription drain, connection
-drain, and three-node cluster
+timeout/cancellation cleanup, auto-unsubscribe, bounded slow-consumer handling,
+subscription drain, connection drain, and three-node cluster
 discovery/failover. They use private executables and are not part of the
 default Dune test alias. The
 following matrix tracks the acceptance surface; the remaining scenarios
@@ -417,7 +418,8 @@ require additional server configuration or failure-injection control.
 - Subscription drain delivers already queued messages before termination.
 - Connection drain rejects new work, flushes, closes, and resolves all
   waiters.
-- Slow-consumer behavior is observable and never silently drops by default.
+- A full subscription reports structured slow-consumer failure and an event
+  rather than blocking the connection or silently dropping the burst.
 - Parent switch cleanup closes flows and does not leak fibers.
 
 ### Gate G2 — Core API stabilization
