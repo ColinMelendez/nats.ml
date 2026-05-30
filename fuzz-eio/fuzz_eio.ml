@@ -1,1 +1,1 @@
-let () = Alcobar.run "nats-eio" [ Fuzz_object_store.suite; Fuzz_service.suite ]
+let () = Alcobar.run "nats-eio-fuzz" [ Fuzz_object_store.suite; Fuzz_service.suite ]

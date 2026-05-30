@@ -1,5 +1,5 @@
 let () =
-  Alcobar.run "nats"
+  Alcobar.run "nats-fuzz"
     [
       Fuzz_packet.suite;
       Fuzz_codec.suite;
