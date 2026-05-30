@@ -62,7 +62,7 @@ peer identity and SNI; the existing server-required TLS upgrade path remains
 available through the same configuration. Reconnect jitter is configurable,
 zero by default, and applied only to delayed retries. An opt-in Docker-backed
 real-server acceptance harness now covers single-server pub/sub, headers, queue
-groups, request/reply, no-responders, flush, close, and optional
+groups, request/reply, no-responders, flush, close, and optional token or
 username/password authentication, server-required TLS, request timeout and
 cancellation cleanup, auto-unsubscribe, subscription drain, connection drain,
 slow-consumer handling, reconnect recovery, and three-node cluster

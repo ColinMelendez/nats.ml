@@ -55,10 +55,12 @@ The lame-duck runner signals a live server through the container and checks the
 dynamic `INFO` flag, typed `Lame_duck_mode` event, and continued use of the
 existing connection.
 The TLS runner generates an ephemeral CA and hostname-checked server
-certificate, then verifies a real TLS connection. To
-exercise username/password authentication, set both `NATS_TEST_USER` and
-`NATS_TEST_PASS` to non-empty ephemeral credentials before running the script;
-the credentials must use only ASCII letters, digits, underscores, and hyphens.
+certificate, then verifies a real TLS connection. To exercise token
+authentication, set `NATS_TEST_TOKEN`; to exercise username/password
+authentication, set both `NATS_TEST_USER` and `NATS_TEST_PASS` to non-empty
+ephemeral credentials before running the script. The credentials must use only
+ASCII letters, digits, underscores, and hyphens; choose exactly one
+authentication mode.
 The harness then requires anonymous connection rejection as well as successful
 authenticated traffic. To enable the JetStream acceptance slice, also set
 `NATS_TEST_JETSTREAM=1`; this starts the server with JetStream enabled and

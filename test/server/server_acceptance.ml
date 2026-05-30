@@ -40,17 +40,27 @@ let safe_credential value =
        value
 
 let auth () =
-  match (Sys.getenv_opt "NATS_TEST_USER", Sys.getenv_opt "NATS_TEST_PASS") with
-  | None, None -> None
-  | Some user, Some pass when safe_credential user && safe_credential pass ->
-      Some (Nats.Auth.user_pass ~user ~pass)
-  | Some _, Some _ ->
+  match
+    ( Sys.getenv_opt "NATS_TEST_USER",
+      Sys.getenv_opt "NATS_TEST_PASS",
+      Sys.getenv_opt "NATS_TEST_TOKEN" )
+  with
+  | None, None, None -> None
+  | None, None, Some token when safe_credential token ->
+      Some (Nats.Auth.token token)
+  | Some user, Some pass, None when safe_credential user && safe_credential pass
+    -> Some (Nats.Auth.user_pass ~user ~pass)
+  | Some _, Some _, None ->
       failf
         "NATS_TEST_USER and NATS_TEST_PASS must be non-empty ASCII letters, \
          digits, underscores, or hyphens"
+  | None, None, Some _ ->
+      failf
+        "NATS_TEST_TOKEN must be non-empty ASCII letters, digits, underscores, \
+         or hyphens"
   | _ ->
       failf
-        "NATS_TEST_USER and NATS_TEST_PASS must both be non-empty or both unset"
+        "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
 
 let next_with_timeout ~clock ~timeout subscription =
   let timeout = Mtime.Span.to_float_ns timeout /. 1e9 in
@@ -1033,7 +1043,12 @@ let run env =
   | None -> ()
   | Some _ ->
       expect_auth_required ~sw ~net ~clock endpoint;
-      print_endline "auth: user_pass"
+      let mode =
+        match Sys.getenv_opt "NATS_TEST_TOKEN" with
+        | Some _ -> "token"
+        | None -> "user_pass"
+      in
+      print_endline ("auth: " ^ mode)
 
 let () =
   try Eio_main.run run with

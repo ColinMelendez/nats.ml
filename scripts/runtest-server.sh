@@ -7,6 +7,7 @@ cd "$script_dir/.."
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
 auth_user=${NATS_TEST_USER-}
 auth_pass=${NATS_TEST_PASS-}
+auth_token=${NATS_TEST_TOKEN-}
 jetstream=${NATS_TEST_JETSTREAM-}
 jetstream_run_id=${NATS_TEST_JETSTREAM_RUN_ID:-$$}
 container=
@@ -38,7 +39,24 @@ case "$jetstream_run_id" in
     ;;
 esac
 
-if [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
+if [ -n "${NATS_TEST_TOKEN+x}" ]; then
+  if [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
+    echo "NATS_TEST_TOKEN cannot be combined with NATS_TEST_USER or NATS_TEST_PASS" >&2
+    exit 1
+  fi
+  if [ -z "$auth_token" ]; then
+    echo "NATS_TEST_TOKEN must be non-empty" >&2
+    exit 1
+  fi
+  case "$auth_token" in
+    *[!A-Za-z0-9_-]*)
+      echo "NATS_TEST_TOKEN may use only ASCII letters, digits, underscores, or hyphens" >&2
+      exit 1
+      ;;
+  esac
+  container=$(docker run --detach --rm --publish 127.0.0.1::4222 \
+    "$image" --auth "$auth_token" $jetstream_arg)
+elif [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
   if [ -z "$auth_user" ] || [ -z "$auth_pass" ]; then
     echo "NATS_TEST_USER and NATS_TEST_PASS must both be non-empty" >&2
     exit 1

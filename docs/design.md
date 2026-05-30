@@ -553,8 +553,8 @@ acceptance test also holds a request across active-server failure and verifies
 that it fails as `Disconnected` rather than being replayed. Delayed reconnects
 support bounded configurable jitter while retaining a deterministic backoff
 base; the opt-in real-server harness covers single-server Core NATS
-publish/subscribe, headers, queue groups, request/reply, no-responders,
-username/password authentication, server-required TLS, request timeout and
+publish/subscribe, headers, queue groups, request/reply, no-responders, token
+and username/password authentication, server-required TLS, request timeout and
 cancellation cleanup, auto-unsubscribe, subscription drain, connection drain,
 bounded slow-consumer handling, parent-switch cleanup, reconnect recovery,
 three-node cluster discovery/failover with subscription recovery, and lame-duck
@@ -696,7 +696,7 @@ caller supplies the TLS peer configuration and must install the TLS RNG; host
 name/SNI policy is therefore part of that configuration. Multi-endpoint TCP
 dialing policy, server discovery, and explicit endpoint TLS are implemented in
 the Eio endpoint planner; peer identity/SNI selection remains caller-owned.
-The opt-in real-server harness now exercises username/password authentication,
+The opt-in real-server harness now exercises token and username/password authentication,
 server-required TLS, reconnect recovery, pending-request disconnect failure,
 bounded slow-consumer handling, parent-switch cleanup, and lame-duck INFO/event
 handling alongside single-server Core NATS headers, queue groups, request/reply,

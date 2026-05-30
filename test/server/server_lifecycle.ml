@@ -18,22 +18,49 @@ let endpoint () =
   | Error error ->
       failf "invalid NATS_TEST_SERVER %S: %a" value Nats.Endpoint.pp_error error
 
+let safe_credential value =
+  String.length value > 0
+  && String.for_all
+       (fun character ->
+         let code = Char.code character in
+         (code >= Char.code 'A' && code <= Char.code 'Z')
+         || (code >= Char.code 'a' && code <= Char.code 'z')
+         || (code >= Char.code '0' && code <= Char.code '9')
+         || code = Char.code '_'
+         || code = Char.code '-')
+       value
+
+let authentication () =
+  match
+    ( Sys.getenv_opt "NATS_TEST_USER",
+      Sys.getenv_opt "NATS_TEST_PASS",
+      Sys.getenv_opt "NATS_TEST_TOKEN" )
+  with
+  | None, None, None -> None
+  | None, None, Some token when safe_credential token ->
+      Some (Nats.Auth.token token)
+  | Some user, Some pass, None when safe_credential user && safe_credential pass
+    -> Some (Nats.Auth.user_pass ~user ~pass)
+  | Some _, Some _, None ->
+      failf
+        "NATS_TEST_USER and NATS_TEST_PASS must be non-empty ASCII letters, \
+         digits, underscores, or hyphens"
+  | None, None, Some _ ->
+      failf
+        "NATS_TEST_TOKEN must be non-empty ASCII letters, digits, underscores, \
+         or hyphens"
+  | _ ->
+      failf
+        "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
+
 let connection_config ?subscription_capacity () =
-  match (Sys.getenv_opt "NATS_TEST_USER", Sys.getenv_opt "NATS_TEST_PASS") with
-  | None, None -> (
-      match subscription_capacity with
-      | None -> None
-      | Some _ ->
-          Some
-            (expect_ok "connection config"
-               (Nats_eio.Connection.Config.v ?subscription_capacity ())))
-  | Some user, Some pass ->
+  let auth = authentication () in
+  match (auth, subscription_capacity) with
+  | None, None -> None
+  | _ ->
       Some
-        (expect_ok "auth config"
-           (Nats_eio.Connection.Config.v ?subscription_capacity
-              ~auth:(Nats.Auth.user_pass ~user ~pass)
-              ()))
-  | _ -> failf "NATS_TEST_USER and NATS_TEST_PASS must both be set or unset"
+        (expect_ok "connection config"
+           (Nats_eio.Connection.Config.v ?subscription_capacity ?auth ()))
 
 let connect ~sw ~net ~clock ?config endpoint =
   expect_ok "connect"
