@@ -1,24 +1,30 @@
 (executable
  (name server_acceptance)
+ (modules server_acceptance)
  (libraries nats nats-eio eio eio_main))
 
 (executable
  (name server_reconnect)
+ (modules server_reconnect)
  (libraries nats nats-eio eio eio_main))
 
 (executable
  (name server_cluster)
+ (modules server_cluster)
  (libraries nats nats-eio eio eio_main))
 
 (executable
  (name server_lifecycle)
+ (modules server_lifecycle)
  (libraries nats nats-eio eio eio_main))
 
 (executable
  (name server_lameduck)
+ (modules server_lameduck)
  (libraries nats nats-eio eio eio_main))
 
 (executable
  (name server_tls)
+ (modules server_tls)
  (libraries nats nats-eio eio eio_main tls x509 domain-name
   mirage-crypto-rng.unix ptime))
