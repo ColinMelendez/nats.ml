@@ -1592,6 +1592,70 @@ let () =
               then fail "ordinary publish was written during reconnect";
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "rejects requests created during reconnect" (fun () ->
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let reconnect_info, reconnect_info_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_reconnecting_connection_traced
+            ~first_reads:[ `Return info_wire; `Await disconnect ]
+            ~second_reads:[ `Await reconnect_info; `Await hold ]
+            (fun ~sw:_ ~trace connection ->
+              let events = Nats_eio.Connection.events connection in
+              ignore (expect_core_event (Nats_eio.Event_stream.next events));
+              ignore (expect_core_event (Nats_eio.Event_stream.next events));
+              let trace_before_disconnect = Buffer.length trace in
+              Eio.Promise.resolve disconnect_u (Error End_of_file);
+              yield_n 5;
+              (match
+                 Nats_eio.Connection.request connection subject "during-reconnect"
+               with
+              | Error Nats_eio.Error.Disconnected -> ()
+              | Ok _ ->
+                  fail "request created during reconnect unexpectedly survived"
+              | Error error ->
+                  fail
+                    (Format.asprintf
+                       "expected request to fail as disconnected, got %a"
+                       Nats_eio.Error.pp error));
+              Eio.Promise.resolve reconnect_info_u (Ok info_wire);
+              ignore (expect_core_event (Nats_eio.Event_stream.next events));
+              (match Nats_eio.Event_stream.next events with
+              | Ok Nats_eio.Event.Disconnected -> ()
+              | Ok event ->
+                  fail
+                    (Format.asprintf "expected reconnect disconnect, got %a"
+                       Nats_eio.Event.pp event)
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected reconnect lifecycle, got %a"
+                       Nats_eio.Error.pp error));
+              ignore (expect_core_event (Nats_eio.Event_stream.next events));
+              ignore (expect_core_event (Nats_eio.Event_stream.next events));
+              (match Nats_eio.Event_stream.next events with
+              | Ok Nats_eio.Event.Reconnected -> ()
+              | Ok event ->
+                  fail
+                    (Format.asprintf "expected reconnected event, got %a"
+                       Nats_eio.Event.pp event)
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected reconnection, got %a"
+                       Nats_eio.Error.pp error));
+              let reconnect_trace =
+                let trace = Buffer.contents trace in
+                String.sub trace trace_before_disconnect
+                  (String.length trace - trace_before_disconnect)
+              in
+              if
+                contains_substring ~needle:"wrote \"SUB " reconnect_trace
+              then
+                fail "request subscription was written during reconnect";
+              if
+                contains_substring ~needle:"wrote \"PUB " reconnect_trace
+              then
+                fail "request publish was written during reconnect";
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "fails a pending flush during reconnect" (fun () ->
           let disconnect, disconnect_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
