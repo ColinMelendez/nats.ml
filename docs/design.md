@@ -168,8 +168,10 @@ Eio.Switch.run @@ fun child_sw ->
   Nats_eio.Connection.drain conn
 ```
 
-The exact integration with a parent switch is still open, but the ownership
-rule is not: the switch that creates a connection owns its termination.
+The switch that creates a connection owns its termination. Releasing or
+failing that switch cancels the connection fibers and performs an immediate
+`Closed` finish rather than a best-effort drain; blocked receives therefore
+end through cancellation or `Error Closed`.
 
 ### JetStream pull consumption
 
@@ -554,8 +556,8 @@ base; the opt-in real-server harness covers single-server Core NATS
 publish/subscribe, headers, queue groups, request/reply, no-responders,
 username/password authentication, server-required TLS, request timeout and
 cancellation cleanup, auto-unsubscribe, subscription drain, connection drain,
-bounded slow-consumer handling, reconnect recovery, and three-node cluster
-discovery/failover with subscription recovery. Advanced cluster failure
+bounded slow-consumer handling, parent-switch cleanup, reconnect recovery, and
+three-node cluster discovery/failover with subscription recovery. Advanced cluster failure
 scenarios and cross-SDK acceptance remain later work.
 
 The normal user operations should be direct-style and result-returning:
@@ -694,8 +696,8 @@ name/SNI policy is therefore part of that configuration. Multi-endpoint TCP
 dialing policy, server discovery, and explicit endpoint TLS are implemented in
 the Eio endpoint planner; peer identity/SNI selection remains caller-owned.
 The opt-in real-server harness now exercises username/password authentication,
-server-required TLS, reconnect recovery, pending-request disconnect failure, and
-bounded slow-consumer handling alongside single-server Core NATS
+server-required TLS, reconnect recovery, pending-request disconnect failure,
+bounded slow-consumer handling, and parent-switch cleanup alongside single-server Core NATS
 headers, queue groups, request/reply, and no-responders. NKey/JWT server
 acceptance remains a later Core milestone.
 

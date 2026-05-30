@@ -92,6 +92,39 @@ let subject name = Nats.Subject.literal ("ocaml.integration.lifecycle." ^ name)
 let filter name =
   Nats.Subject.Filter.literal ("ocaml.integration.lifecycle." ^ name)
 
+let expect_parent_switch_cleanup ~net ~clock ~endpoint ?config () =
+  let stopped, stopped_u = Eio.Promise.create () in
+  let switch_failed =
+    try
+      Eio.Switch.run @@ fun child_sw ->
+      let child_client = connect ~sw:child_sw ~net ~clock ?config endpoint in
+      let child_subscription =
+        expect_ok "parent cleanup subscribe"
+          (Nats_eio.Connection.subscribe child_client (filter "parent-cleanup"))
+      in
+      expect_ok "parent cleanup subscribe flush"
+        (Nats_eio.Connection.flush child_client);
+      Eio.Fiber.fork ~sw:child_sw (fun () ->
+          let stopped =
+            try
+              match Nats_eio.Subscription.next child_subscription with
+              | Ok _ -> false
+              | Error Nats_eio.Error.Closed -> true
+              | Error _ -> false
+            with Eio.Cancel.Cancelled _ -> true
+          in
+          Eio.Promise.resolve stopped_u stopped);
+      Eio.Fiber.fork ~sw:child_sw (fun () ->
+          Eio.Time.Mono.sleep clock 0.1;
+          Eio.Switch.fail child_sw (Failure "parent switch cleanup"));
+      false
+    with Failure message when String.equal message "parent switch cleanup" ->
+      true
+  in
+  if not switch_failed then failf "parent switch did not fail as expected";
+  if not (Eio.Promise.await stopped) then
+    failf "subscription read survived parent switch cleanup"
+
 let run env =
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
@@ -310,7 +343,9 @@ let run env =
       | Ok () -> failf "publish succeeded after connection drain"
       | Error error ->
           failf "publish after connection drain: %s" (error_message error));
-      print_endline "connection_drain: ok")
+      print_endline "connection_drain: ok";
+      expect_parent_switch_cleanup ~net ~clock ~endpoint ?config ();
+      print_endline "parent_switch_cleanup: ok")
 
 let () =
   try Eio_main.run run with

@@ -61,7 +61,7 @@ authenticated traffic. To enable the JetStream acceptance slice, also set
 exercises stream management, publish acknowledgements, duplicate message ids,
 and cleanup. The server runner also checks request timeout/cancellation
 cleanup, auto-unsubscribe limits, bounded subscription slow-consumer behavior,
-subscription drain, and connection drain.
+subscription drain, connection drain, and parent-switch cleanup.
 The JetStream test uses a per-run stream name; set
 `NATS_TEST_JETSTREAM_RUN_ID` only when a stable, safe identifier is useful for
 debugging.
