@@ -556,9 +556,10 @@ base; the opt-in real-server harness covers single-server Core NATS
 publish/subscribe, headers, queue groups, request/reply, no-responders,
 username/password authentication, server-required TLS, request timeout and
 cancellation cleanup, auto-unsubscribe, subscription drain, connection drain,
-bounded slow-consumer handling, parent-switch cleanup, reconnect recovery, and
-three-node cluster discovery/failover with subscription recovery. Advanced cluster failure
-scenarios and cross-SDK acceptance remain later work.
+bounded slow-consumer handling, parent-switch cleanup, reconnect recovery,
+three-node cluster discovery/failover with subscription recovery, and lame-duck
+INFO/event handling with continued use of the existing connection. Advanced
+cluster failure scenarios and cross-SDK acceptance remain later work.
 
 The normal user operations should be direct-style and result-returning:
 
@@ -697,8 +698,9 @@ dialing policy, server discovery, and explicit endpoint TLS are implemented in
 the Eio endpoint planner; peer identity/SNI selection remains caller-owned.
 The opt-in real-server harness now exercises username/password authentication,
 server-required TLS, reconnect recovery, pending-request disconnect failure,
-bounded slow-consumer handling, and parent-switch cleanup alongside single-server Core NATS
-headers, queue groups, request/reply, and no-responders. NKey/JWT server
+bounded slow-consumer handling, parent-switch cleanup, and lame-duck INFO/event
+handling alongside single-server Core NATS headers, queue groups, request/reply,
+and no-responders. NKey/JWT server
 acceptance remains a later Core milestone.
 
 ### JetStream, KV, Object Store, and Services
@@ -786,7 +788,7 @@ through individual helper functions:
   without a network;
 - run black-box integration tests against a real `nats-server` for reconnect,
   three-node cluster discovery/failover, TLS/authentication, queue groups, and
-  lifecycle/error behavior, and JetStream. The
+  lifecycle/error behavior, lame-duck INFO updates, and JetStream. The
   current opt-in Docker harness enables its JetStream slice with
   `NATS_TEST_JETSTREAM=1` and covers stream management, stream update/list,
   consumer inventory, unknown-config preservation, publish acknowledgements,

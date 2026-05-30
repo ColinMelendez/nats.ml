@@ -37,6 +37,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-reconnect.sh
 ./scripts/runtest-cluster.sh
 ./scripts/runtest-tls.sh
+./scripts/runtest-lameduck.sh
 ```
 
 The script requires Docker and is intentionally outside `dune runtest`; Docker
@@ -50,6 +51,9 @@ checks subscription recovery.
 The cluster runner starts a three-node route mesh, connects only to the seed,
 checks the advertised client URLs, kills the seed, and checks failover to a
 discovered peer with subscription recovery.
+The lame-duck runner signals a live server through the container and checks the
+dynamic `INFO` flag, typed `Lame_duck_mode` event, and continued use of the
+existing connection.
 The TLS runner generates an ephemeral CA and hostname-checked server
 certificate, then verifies a real TLS connection. To
 exercise username/password authentication, set both `NATS_TEST_USER` and

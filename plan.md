@@ -400,8 +400,9 @@ headers, queue groups, request/reply, no-responders, flush, close, optional
 username/password authentication, server-required TLS, two-server
 subscription recovery and pending-request disconnect failure, request
 timeout/cancellation cleanup, auto-unsubscribe, bounded slow-consumer handling,
-subscription drain, connection drain, parent-switch cleanup, and three-node cluster
-discovery/failover. They use private executables and are not part of the
+subscription drain, connection drain, parent-switch cleanup, lame-duck handling,
+and three-node cluster discovery/failover. They use private executables and are
+not part of the
 default Dune test alias. The
 following matrix tracks the acceptance surface; the remaining scenarios
 require additional server configuration or failure-injection control.
@@ -413,6 +414,8 @@ require additional server configuration or failure-injection control.
 - Reconnect restores subscriptions and remaining auto-unsubscribe counts.
 - A cluster seed advertises reachable peers, and reconnect fails over to a
   discovered peer while preserving subscription intent.
+- A live server's lame-duck `INFO` sets the typed mode flag, emits the
+  `Lame_duck_mode` event, and leaves the existing connection usable.
 - Dynamic `INFO` updates replace the discovered candidate set while retaining
   configured seeds; server discovery and endpoint rotation are observable.
 - No arbitrary Core publish is replayed after reconnect by default.
