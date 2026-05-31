@@ -10,6 +10,7 @@ auth_pass=${NATS_TEST_PASS-}
 auth_token=${NATS_TEST_TOKEN-}
 primary=
 secondary=
+tertiary=
 watcher=
 peer_pid=
 signal=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-reconnect.XXXXXX")
@@ -34,7 +35,10 @@ cleanup() {
   if [ -n "$secondary" ]; then
     docker rm -f "$secondary" >/dev/null 2>&1 || true
   fi
-  rm -f "$signal" "$peer_signal" "$peer_log" "$ocaml_log"
+  if [ -n "$tertiary" ]; then
+    docker rm -f "$tertiary" >/dev/null 2>&1 || true
+  fi
+  rm -f "$signal" "$signal.1" "$signal.2" "$peer_signal" "$peer_log" "$ocaml_log"
 }
 
 trap 'cleanup' EXIT INT TERM
@@ -109,17 +113,24 @@ run_server() {
 
 primary=$(run_server)
 secondary=$(run_server)
+tertiary=$(run_server)
 primary_port=$(wait_for_port "$primary")
 secondary_port=$(wait_for_port "$secondary")
+tertiary_port=$(wait_for_port "$tertiary")
 wait_until_ready "$primary"
 wait_until_ready "$secondary"
+wait_until_ready "$tertiary"
 
-servers="nats://127.0.0.1:$primary_port,nats://127.0.0.1:$secondary_port"
+servers="nats://127.0.0.1:$primary_port,nats://127.0.0.1:$secondary_port,nats://127.0.0.1:$tertiary_port"
 (
-  while [ ! -e "$signal" ]; do
+  while [ ! -e "$signal.1" ]; do
     sleep 0.05
   done
   docker kill "$primary" >/dev/null 2>&1 || true
+  while [ ! -e "$signal.2" ]; do
+    sleep 0.05
+  done
+  docker kill "$secondary" >/dev/null 2>&1 || true
 ) &
 watcher=$!
 

@@ -21,8 +21,9 @@ let endpoints () =
         List.filter (fun value -> not (String.equal (String.trim value) ""))
           (String.split_on_char ',' value)
       with
-      | [ first; second ] -> [ endpoint first; endpoint second ]
-      | _ -> failf "NATS_TEST_SERVERS must contain exactly two endpoints")
+      | first :: second :: rest ->
+          List.map endpoint (first :: second :: rest)
+      | _ -> failf "NATS_TEST_SERVERS must contain at least two endpoints")
 
 let auth () =
   match
@@ -85,7 +86,7 @@ let expect_payload label expected message =
   if not (String.equal actual expected) then
     failf "%s payload was %S, expected %S" label actual expected
 
-let expect_recovered ~timeout subscription initial =
+let expect_recovered ~timeout ~expected_generation subscription initial =
   let recovery = ref initial in
   let recovered = ref false in
   while not !recovered do
@@ -95,13 +96,17 @@ let expect_recovered ~timeout subscription initial =
            subscription)
     in
     match next with
-    | Nats_eio.Subscription.Attached 1 -> recovered := true
+    | Nats_eio.Subscription.Attached generation
+      when Int.equal generation expected_generation ->
+        recovered := true
     | Nats_eio.Subscription.Detached _ -> recovery := next
     | Nats_eio.Subscription.Attached generation ->
         failf "subscription attached at unexpected generation %d" generation
   done
 
-let await_go_ready ~clock ~timeout connection reconnect_ready =
+let await_go_ready ~clock ~timeout ~cycle connection reconnect_ready =
+  let request_payload = "ocaml-ready-" ^ string_of_int cycle in
+  let response_payload = "go-ready-" ^ string_of_int cycle in
   let deadline =
     match Mtime.add_span (Nats_eio.Connection.now connection) timeout with
     | Some deadline -> deadline
@@ -121,10 +126,10 @@ let await_go_ready ~clock ~timeout connection reconnect_ready =
       in
       match
         Nats_eio.Connection.request ~timeout:request_timeout connection
-          reconnect_ready "ocaml-ready"
+          reconnect_ready request_payload
       with
       | Ok response ->
-          expect_payload "Go recovery barrier" "go-ready" response;
+          expect_payload "Go recovery barrier" response_payload response;
           ready := true
       | Error Nats_eio.Error.Timeout | Error Nats_eio.Error.No_responders
       | Error Nats_eio.Error.Disconnected ->
@@ -137,11 +142,16 @@ let subject prefix suffix = Nats.Subject.literal (prefix ^ "." ^ suffix)
 let filter prefix suffix =
   Nats.Subject.Filter.literal (prefix ^ "." ^ suffix)
 
+let round_payload round = "round-" ^ string_of_int round
+
+let round_marker round = round_payload round ^ "-flushed"
+
 let run env =
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.mono_clock env in
   let endpoints = endpoints () in
+  let cycles = List.length endpoints - 1 in
   let prefix =
     match Sys.getenv_opt "NATS_TEST_INTEROP_PREFIX" with
     | Some value -> value
@@ -184,23 +194,28 @@ let run env =
           (Nats_eio.Connection.request ~timeout connection start "start")
       in
       expect_payload "start response" "started" start_response;
-      let before = next_message ~timeout "Go before reconnect" from_go in
-      expect_payload "Go before reconnect" "before" before;
-      expect_ok "publish before reconnect"
-        (Nats_eio.Connection.publish connection to_go "before");
-      expect_ok "flush before reconnect" (Nats_eio.Connection.flush connection);
-      expect_ok "publish baseline barrier"
-        (Nats_eio.Connection.publish connection to_go "before-flushed");
-      expect_disconnected ~clock ~timeout events;
-      expect_reconnected ~clock ~timeout events;
-      expect_recovered ~timeout from_go initial_recovery;
-      await_go_ready ~clock ~timeout connection
-        (subject prefix "reconnect-ready");
-      let after = next_message ~timeout "Go after reconnect" from_go in
-      expect_payload "Go after reconnect" "after" after;
-      expect_ok "publish after reconnect"
-        (Nats_eio.Connection.publish connection to_go "after");
-      expect_ok "flush after reconnect" (Nats_eio.Connection.flush connection);
+      let recovery = ref initial_recovery in
+      for round = 0 to cycles do
+        let payload = round_payload round in
+        let marker = round_marker round in
+        let from_go_message =
+          next_message ~timeout ("Go " ^ payload) from_go
+        in
+        expect_payload ("Go " ^ payload) payload from_go_message;
+        expect_ok ("publish " ^ payload)
+          (Nats_eio.Connection.publish connection to_go payload);
+        expect_ok ("flush " ^ payload) (Nats_eio.Connection.flush connection);
+        expect_ok ("publish " ^ marker)
+          (Nats_eio.Connection.publish connection to_go marker);
+        if round < cycles then (
+          expect_disconnected ~clock ~timeout events;
+          expect_reconnected ~clock ~timeout events;
+          expect_recovered ~timeout ~expected_generation:(round + 1) from_go
+            !recovery;
+          recovery := Nats_eio.Subscription.Attached (round + 1);
+          await_go_ready ~clock ~timeout ~cycle:(round + 1) connection
+            (subject prefix ("reconnect-ready." ^ string_of_int (round + 1))))
+      done;
       expect_ok "drain" (Nats_eio.Connection.drain connection);
       expect_ok "close after drain" (Nats_eio.Connection.close connection);
       print_endline "interop-reconnect: ok")

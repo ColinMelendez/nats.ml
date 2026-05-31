@@ -28,8 +28,95 @@ func expectPayload(label string, message *nats.Msg, expected string) error {
 	return nil
 }
 
+func reconnectCycles(server string) (int, error) {
+	servers := strings.Split(server, ",")
+	if len(servers) < 2 {
+		return 0, fmt.Errorf("reconnect mode requires at least two servers")
+	}
+	for _, server := range servers {
+		if strings.TrimSpace(server) == "" {
+			return 0, fmt.Errorf("reconnect server list contains an empty endpoint")
+		}
+	}
+	return len(servers) - 1, nil
+}
+
+func roundPayload(round int) string {
+	return fmt.Sprintf("round-%d", round)
+}
+
+func roundMarker(round int) string {
+	return fmt.Sprintf("%s-flushed", roundPayload(round))
+}
+
+func roundSignal(signal string, round int) string {
+	return fmt.Sprintf("%s.%d", signal, round)
+}
+
+func awaitRecoveryBarrier(connection *nats.Conn, prefix string, cycle int) error {
+	readySubject := fmt.Sprintf("%s.reconnect-ready.%d", prefix, cycle)
+	expected := fmt.Sprintf("ocaml-ready-%d", cycle)
+	responsePayload := []byte(fmt.Sprintf("go-ready-%d", cycle))
+	ready := make(chan struct{}, 1)
+	callbackErrors := make(chan error, 1)
+	_, err := connection.Subscribe(readySubject, func(message *nats.Msg) {
+		if string(message.Data) != expected {
+			select {
+			case callbackErrors <- fmt.Errorf(
+				"recovery barrier payload was %q, expected %q",
+				string(message.Data), expected):
+			default:
+			}
+			return
+		}
+		if message.Reply == "" {
+			select {
+			case callbackErrors <- fmt.Errorf("recovery barrier has no reply subject"):
+			default:
+			}
+			return
+		}
+		response := nats.NewMsg(message.Reply)
+		response.Data = responsePayload
+		if err := connection.PublishMsg(response); err != nil {
+			select {
+			case callbackErrors <- fmt.Errorf("publish recovery barrier response: %w", err):
+			default:
+			}
+			return
+		}
+		select {
+		case ready <- struct{}{}:
+		default:
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("subscribe recovery barrier %d: %w", cycle, err)
+	}
+	if err := connection.Flush(); err != nil {
+		return fmt.Errorf("flush recovery barrier %d: %w", cycle, err)
+	}
+	timer := time.NewTimer(waitTimeout)
+	defer timer.Stop()
+	select {
+	case <-ready:
+		if err := connection.Flush(); err != nil {
+			return fmt.Errorf("flush recovery barrier response %d: %w", cycle, err)
+		}
+		return nil
+	case err := <-callbackErrors:
+		return err
+	case <-timer.C:
+		return fmt.Errorf("timed out waiting for recovery barrier %d", cycle)
+	}
+}
+
 func runReconnectPeer(config options) error {
 	authOptions, err := connectOptions()
+	if err != nil {
+		return err
+	}
+	cycles, err := reconnectCycles(config.server)
 	if err != nil {
 		return err
 	}
@@ -55,7 +142,6 @@ func runReconnectPeer(config options) error {
 
 	startMessages := make(chan *nats.Msg, 1)
 	toGoMessages := make(chan *nats.Msg, 2)
-	reconnectReadyMessages := make(chan *nats.Msg, 1)
 	_, err = connection.Subscribe(config.prefix+".start", func(message *nats.Msg) {
 		startMessages <- message
 	})
@@ -67,12 +153,6 @@ func runReconnectPeer(config options) error {
 	})
 	if err != nil {
 		return fmt.Errorf("subscribe to-go: %w", err)
-	}
-	_, err = connection.Subscribe(config.prefix+".reconnect-ready", func(message *nats.Msg) {
-		reconnectReadyMessages <- message
-	})
-	if err != nil {
-		return fmt.Errorf("subscribe reconnect-ready: %w", err)
 	}
 	if err := connection.Flush(); err != nil {
 		return fmt.Errorf("flush subscriptions: %w", err)
@@ -89,63 +169,48 @@ func runReconnectPeer(config options) error {
 		return fmt.Errorf("respond to start: %w", err)
 	}
 
-	fromGo := nats.NewMsg(config.prefix + ".from-go")
-	fromGo.Data = []byte("before")
-	if err := connection.PublishMsg(fromGo); err != nil {
-		return fmt.Errorf("publish before reconnect: %w", err)
-	}
-	if err := connection.Flush(); err != nil {
-		return fmt.Errorf("flush before reconnect: %w", err)
-	}
+	for round := 0; round <= cycles; round++ {
+		payload := roundPayload(round)
+		fromGo := nats.NewMsg(config.prefix + ".from-go")
+		fromGo.Data = []byte(payload)
+		if err := connection.PublishMsg(fromGo); err != nil {
+			return fmt.Errorf("publish %s: %w", payload, err)
+		}
+		if err := connection.Flush(); err != nil {
+			return fmt.Errorf("flush %s: %w", payload, err)
+		}
 
-	toGo, err := waitMessage("OCaml publication before reconnect", toGoMessages)
-	if err != nil {
-		return err
-	}
-	if err := expectPayload("OCaml publication before reconnect", toGo, "before"); err != nil {
-		return err
-	}
-	baseline, err := waitMessage("OCaml baseline barrier", toGoMessages)
-	if err != nil {
-		return err
-	}
-	if err := expectPayload("OCaml baseline barrier", baseline, "before-flushed"); err != nil {
-		return err
-	}
-	if err := os.WriteFile(config.signal, []byte("kill-primary\n"), 0600); err != nil {
-		return fmt.Errorf("write reconnect signal: %w", err)
-	}
-	if err := waitReconnect(reconnected); err != nil {
-		return err
-	}
-	if err := connection.Flush(); err != nil {
-		return fmt.Errorf("flush after reconnect: %w", err)
-	}
-	ready, err := waitMessage("OCaml recovery barrier", reconnectReadyMessages)
-	if err != nil {
-		return err
-	}
-	if err := expectPayload("OCaml recovery barrier", ready, "ocaml-ready"); err != nil {
-		return err
-	}
-	if err := ready.Respond([]byte("go-ready")); err != nil {
-		return fmt.Errorf("respond to OCaml recovery barrier: %w", err)
-	}
+		toGo, err := waitMessage("OCaml publication "+payload, toGoMessages)
+		if err != nil {
+			return err
+		}
+		if err := expectPayload("OCaml publication "+payload, toGo, payload); err != nil {
+			return err
+		}
+		marker, err := waitMessage("OCaml flush marker "+payload, toGoMessages)
+		if err != nil {
+			return err
+		}
+		if err := expectPayload("OCaml flush marker "+payload, marker, roundMarker(round)); err != nil {
+			return err
+		}
 
-	fromGo = nats.NewMsg(config.prefix + ".from-go")
-	fromGo.Data = []byte("after")
-	if err := connection.PublishMsg(fromGo); err != nil {
-		return fmt.Errorf("publish after reconnect: %w", err)
-	}
-	if err := connection.Flush(); err != nil {
-		return fmt.Errorf("flush after reconnect: %w", err)
-	}
-	toGo, err = waitMessage("OCaml publication after reconnect", toGoMessages)
-	if err != nil {
-		return err
-	}
-	if err := expectPayload("OCaml publication after reconnect", toGo, "after"); err != nil {
-		return err
+		if round == cycles {
+			break
+		}
+		signal := roundSignal(config.signal, round+1)
+		if err := os.WriteFile(signal, []byte("kill\n"), 0600); err != nil {
+			return fmt.Errorf("write reconnect signal %d: %w", round+1, err)
+		}
+		if err := waitReconnect(reconnected); err != nil {
+			return fmt.Errorf("reconnect %d: %w", round+1, err)
+		}
+		if err := connection.Flush(); err != nil {
+			return fmt.Errorf("flush after reconnect %d: %w", round+1, err)
+		}
+		if err := awaitRecoveryBarrier(connection, config.prefix, round+1); err != nil {
+			return err
+		}
 	}
 	if err := connection.Drain(); err != nil {
 		return fmt.Errorf("drain: %w", err)

@@ -48,9 +48,9 @@ is the one integration dependency supplied by the host rather than Nix. The
 Colima helper creates or starts the `default` profile with a 10 GiB disk by
 default; set `COLIMA_DISK_GIB` only when a larger disk is actually needed. Set
 `NATS_SERVER_IMAGE` to try another server image. Cluster, TLS, and reconnect
-scenarios are split into focused runners; the reconnect runner starts two
-single-node servers, kills the active one, checks pending-request failure, and
-checks subscription recovery.
+scenarios are split into focused runners; the server reconnect runner starts
+two single-node servers, kills the active one, checks pending-request failure,
+and checks subscription recovery.
 The cluster runner starts a three-node route mesh, connects only to the seed,
 checks the advertised client URLs, kills the seed, and checks failover to a
 discovered peer with subscription recovery.
@@ -81,12 +81,12 @@ and username/password modes. The matrix runner executes the Core interop case
 for `nats:2.10.22` and `nats:2.14.3` by default; set `NATS_SERVER_IMAGES` to a
 comma-separated image list to choose another compatibility matrix.
 Broader server-version coverage and JetStream/KV/Object Store/Services
-interoperability remain later acceptance work. The reconnect runner starts two
-independent NATS servers, kills the first after the baseline exchange, and
-checks that the Go and OCaml clients recover to the second endpoint, replay
-their subscriptions, and exchange messages again. It accepts the same
-anonymous, token, and username/password modes; set `NATS_SERVER_IMAGE` to
-select the server image for this scenario.
+interoperability remain later acceptance work. The cross-SDK reconnect runner
+starts three independent NATS servers, kills the first and then the second
+after flushed exchanges, and checks that the Go and OCaml clients recover twice,
+replay their subscriptions, and exchange messages after each failover. It
+accepts the same anonymous, token, and username/password modes; set
+`NATS_SERVER_IMAGE` to select the server image for this scenario.
 
 The first JetStream layer is available through `Nats_eio.Jetstream`: typed
 stream and consumer configuration and management, including consumer metadata,
