@@ -458,6 +458,10 @@ headers, request/reply in both directions, no-responders, and clean drain and
 close. This proves the first cross-SDK seam; it does not satisfy the full
 server-version, reconnect, or product-surface matrix for G3.
 
+The interop matrix runner now executes that Core case against the baseline
+`nats:2.10.22` image and `nats:2.14.3`; `NATS_SERVER_IMAGES` supplies an
+explicit comma-separated image list for additional supported versions.
+
 ### Gate G3 — Core completeness
 
 The Core NATS feature matrix is signed off, the fuzz corpus is retained, and
