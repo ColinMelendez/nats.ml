@@ -458,9 +458,17 @@ headers, request/reply in both directions, no-responders, and clean drain and
 close. This proves the first cross-SDK seam; it does not satisfy the full
 server-version, reconnect, or product-surface matrix for G3.
 
-The interop matrix runner now executes that Core case against the baseline
-`nats:2.10.22` image and `nats:2.14.3`; `NATS_SERVER_IMAGES` supplies an
-explicit comma-separated image list for additional supported versions.
+The interop matrix runner now defines a bounded Core gate across the
+established `nats:2.10.22` compatibility floor, the `nats:2.12.15` older
+release line, and the current `nats:2.14.5` release. Each image runs the Core
+cross-SDK exchange, the repeated plaintext failover exchange, and the repeated
+TLS failover exchange, for nine sequential cases by default. `NATS_SERVER_IMAGES`
+selects another comma-separated image list and
+`NATS_INTEROP_MATRIX_SCENARIOS` selects a subset of `core`, `reconnect`, and
+`tls-reconnect`. The matrix defaults to anonymous authentication; setting the
+token or username/password variables repeats the selected matrix with that
+authentication mode. The version selection is deliberately bounded rather
+than an assertion that every historical patch release is covered.
 
 Initial reconnect slice: a two-endpoint black-box runner starts independent
 servers, asks the Go `nats.go` peer and OCaml client to establish subscriptions,
@@ -479,8 +487,12 @@ generate a short-lived CA and hostname-checked certificate, configures all
 three independent servers for TLS, and supplies the CA to both SDKs. Anonymous,
 token, and username/password modes have been exercised on `nats:2.10.22`, with
 anonymous coverage also exercised on `nats:2.14.3`.
-Pending G3 work now centers on the complete supported-version matrix and
-broader TLS policy combinations.
+The bounded version/scenario matrix is now in place. Pending G3 work is the
+remaining Core acceptance breadth: authentication permutations across the
+matrix, Core TLS without failover, and repeated cluster, lame-duck, drain, and
+slow-consumer failure cases. JetStream, Key-Value, Object Store, and Services
+interoperability remain later product-surface acceptance work rather than
+requirements of this Core gate.
 
 ### Gate G3 — Core completeness
 

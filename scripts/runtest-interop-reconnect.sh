@@ -142,19 +142,19 @@ run_server() {
         ;;
     esac
     # shellcheck disable=SC2086 # auth_options intentionally expands to option words.
-    docker run --detach $auth_options \
+    docker run --detach --rm $auth_options \
       --volume "$cert_dir:/etc/nats/certs:ro" \
       --volume "$config_file:/etc/nats/nats.conf:ro" \
       --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf
   elif [ "$auth_mode" = token ]; then
-    docker run --detach --publish 127.0.0.1::4222 "$image" --auth "$auth_token"
+    docker run --detach --rm --publish 127.0.0.1::4222 "$image" --auth "$auth_token"
   elif [ "$auth_mode" = user_pass ]; then
-    docker run --detach \
+    docker run --detach --rm \
       --env NATS_TEST_USER --env NATS_TEST_PASS \
       --volume "$script_dir/nats-server-auth.conf:/etc/nats/nats.conf:ro" \
       --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf
   else
-    docker run --detach --publish 127.0.0.1::4222 "$image"
+    docker run --detach --rm --publish 127.0.0.1::4222 "$image"
   fi
 }
 
@@ -191,11 +191,11 @@ else
 fi
 (
   while [ ! -e "$signal.1" ]; do
-    sleep 0.05
+    sleep 1
   done
   docker kill "$primary" >/dev/null 2>&1 || true
   while [ ! -e "$signal.2" ]; do
-    sleep 0.05
+    sleep 1
   done
   docker kill "$secondary" >/dev/null 2>&1 || true
 ) &
