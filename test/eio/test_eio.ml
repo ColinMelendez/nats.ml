@@ -1391,6 +1391,151 @@ let () =
               equal string "after" (Nats.Message.payload later_delivery.message);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "recovery-aware subscription reads expose detach and attach"
+        (fun () ->
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let reconnect_info, reconnect_info_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 1)
+                 ~reconnect_delay:Mtime.Span.(1 * ms)
+                 ~reconnect_max_delay:Mtime.Span.(1 * ms) ())
+          in
+          with_reconnecting_connection ~config
+            ~first_reads:[ `Return info_wire; `Await disconnect ]
+            ~second_reads:[ `Await reconnect_info; `Await hold ]
+            (fun ~sw connection ->
+              Eio.Switch.check sw;
+              let events = Nats_eio.Connection.events connection in
+              ignore (expect_core_event (Nats_eio.Event_stream.next events));
+              ignore (expect_core_event (Nats_eio.Event_stream.next events));
+              let subscription =
+                expect_ok (Nats_eio.Connection.subscribe connection filter)
+              in
+              (match
+                 Nats_eio.Subscription.next_or_recovery_nonblocking
+                   subscription
+               with
+              | None -> ()
+              | Some (Ok next) ->
+                  fail
+                    (Format.asprintf
+                       "new subscription unexpectedly returned %s"
+                       (match next with
+                       | Nats_eio.Subscription.Delivery _ -> "a delivery"
+                       | Nats_eio.Subscription.Recovery -> "a recovery"))
+              | Some (Error error) ->
+                  fail
+                    (Format.asprintf "new subscription returned %a"
+                       Nats_eio.Error.pp error));
+              (match
+                 Nats_eio.Subscription.next_or_recovery_with_timeout
+                   ~timeout:Mtime.Span.(1 * ms) subscription
+               with
+              | Error Nats_eio.Error.Timeout -> ()
+              | Ok _ -> fail "empty recovery-aware subscription did not time out"
+              | Error error ->
+                  fail
+                    (Format.asprintf "recovery-aware subscription: %a"
+                       Nats_eio.Error.pp error));
+              let initial_recovery =
+                Nats_eio.Subscription.recovery subscription
+              in
+              let detached_result, detached_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve detached_result_u
+                    (Nats_eio.Subscription.await_recovery
+                       ~from:initial_recovery subscription));
+              Eio.Promise.resolve disconnect_u (Error End_of_file);
+              let detached = Eio.Promise.await detached_result in
+              let detached = expect_ok detached in
+              (match detached with
+              | Nats_eio.Subscription.Detached 0 -> ()
+              | Nats_eio.Subscription.Detached generation ->
+                  fail
+                    (Format.asprintf
+                       "subscription detached at an unexpected generation %d"
+                       generation)
+              | Nats_eio.Subscription.Attached generation ->
+                  fail
+                    (Format.asprintf
+                       "subscription remained attached at generation %d"
+                       generation));
+              (match
+                 Nats_eio.Subscription.next_or_recovery_nonblocking
+                   subscription
+               with
+              | Some (Ok Nats_eio.Subscription.Recovery) -> ()
+              | Some (Ok (Nats_eio.Subscription.Delivery _)) ->
+                  fail "recovery wakeup was replaced by a delivery"
+              | Some (Error error) ->
+                  fail
+                    (Format.asprintf "recovery wakeup returned %a"
+                       Nats_eio.Error.pp error)
+              | None -> fail "detached subscription had no recovery wakeup");
+              (match
+                 Nats_eio.Subscription.next_or_recovery_nonblocking
+                   subscription
+               with
+              | None -> ()
+              | Some (Ok _) -> fail "recovery wakeup was delivered twice"
+              | Some (Error error) ->
+                  fail
+                    (Format.asprintf "recovery queue returned %a"
+                       Nats_eio.Error.pp error));
+              (match
+                 Nats_eio.Subscription.await_recovery ~timeout:Mtime.Span.(1 * ms)
+                   ~from:detached subscription
+               with
+              | Error Nats_eio.Error.Timeout -> ()
+              | Ok _ -> fail "detached recovery wait completed too early"
+              | Error error ->
+                  fail
+                    (Format.asprintf "detached recovery wait: %a"
+                       Nats_eio.Error.pp error));
+              let attached_result, attached_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve attached_result_u
+                    (Nats_eio.Subscription.await_recovery ~from:detached
+                       subscription));
+              Eio.Promise.resolve reconnect_info_u (Ok info_wire);
+              let attached = expect_ok (Eio.Promise.await attached_result) in
+              (match attached with
+              | Nats_eio.Subscription.Attached 1 -> ()
+              | Nats_eio.Subscription.Attached generation ->
+                  fail
+                    (Format.asprintf
+                       "subscription attached at an unexpected generation %d"
+                       generation)
+              | Nats_eio.Subscription.Detached generation ->
+                  fail
+                    (Format.asprintf
+                       "subscription remained detached at generation %d"
+                       generation));
+              (match
+                 Nats_eio.Subscription.next_or_recovery_with_timeout
+                   ~timeout:Mtime.Span.(1 * ms) subscription
+               with
+              | Error Nats_eio.Error.Timeout -> ()
+              | Ok _ -> fail "attached subscription unexpectedly returned data"
+              | Error error ->
+                  fail
+                    (Format.asprintf "attached recovery-aware subscription: %a"
+                       Nats_eio.Error.pp error));
+              expect_ok (Nats_eio.Connection.close connection);
+              (match
+                 Nats_eio.Subscription.next_or_recovery_nonblocking
+                   subscription
+               with
+              | Some (Error Nats_eio.Error.Closed) -> ()
+              | Some (Ok _) -> fail "closed subscription returned data"
+              | Some (Error error) ->
+                  fail
+                    (Format.asprintf "closed subscription returned %a"
+                       Nats_eio.Error.pp error)
+              | None -> fail "closed subscription had no terminal result");
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "does not replay subscriptions that opt out of reconnect" (fun () ->
           let queued, queued_u = Eio.Promise.create () in
           let disconnect, disconnect_u = Eio.Promise.create () in
