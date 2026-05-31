@@ -38,6 +38,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-cluster.sh
 ./scripts/runtest-tls.sh
 ./scripts/runtest-lameduck.sh
+./scripts/runtest-interop.sh
 ```
 
 The script requires Docker and is intentionally outside `dune runtest`; Docker
@@ -70,7 +71,13 @@ cleanup, auto-unsubscribe limits, bounded subscription slow-consumer behavior,
 subscription drain, connection drain, and parent-switch cleanup.
 The JetStream test uses a per-run stream name; set
 `NATS_TEST_JETSTREAM_RUN_ID` only when a stable, safe identifier is useful for
-debugging.
+debugging. The interoperability runner starts the same pinned server image,
+builds an official Go `nats.go` peer through the separate Nix integration
+shell, and checks Core pub/sub, repeated headers, bidirectional request/reply,
+no-responders, and clean drain/close. It supports the same anonymous, token,
+and username/password modes. The current cross-SDK slice covers Core only;
+server-version matrices and JetStream/KV/Object Store/Services interop remain
+later acceptance work.
 
 The first JetStream layer is available through `Nats_eio.Jetstream`: typed
 stream and consumer configuration and management, including consumer metadata,

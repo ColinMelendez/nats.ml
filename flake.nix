@@ -29,6 +29,13 @@
             ocaml
             dune_3
           ];
+          interop_peer = pkgs.buildGoModule {
+            pname = "nats-ocaml-interop-peer";
+            version = "0.1.0";
+            src = ./interop/nats-ocaml-interop-peer;
+            vendorHash = "sha256-642/GXc90xVafKJ62minBhp6ZB7eULH9vvj1dQ2NqeM=";
+            ldflags = [ "-s" "-w" ];
+          };
           shell_hook = ''
             export LC_ALL=C
           '';
@@ -41,6 +48,7 @@
               ++ (with pkgs; [
                 openssl
                 shellcheck
+                interop_peer
               ])
               ++ ocaml_packages;
             shellHook = shell_hook;

@@ -102,8 +102,8 @@ deletion, replacement cleanup, bucket policy projection and updates, and
 structured timeout and cleanup errors. Push reconnect restoration is
 implemented through replayable subscription
 recovery, including durable confirmation and ephemeral recreation. Advanced
-cluster failure scenarios and cross-SDK acceptance coverage are deliberately
-deferred to the final acceptance phase; current consumer confidence comes from
+cluster failure scenarios and the broader cross-SDK acceptance matrix are
+deliberately deferred to the final acceptance phase; current consumer confidence comes from
 local mock transport and pure-boundary tests. Priority-group pull consumers are
 now modeled locally:
 validated single-group policy configuration, per-request thresholds and
@@ -450,6 +450,13 @@ operational conditions before adding JSON-heavy APIs.
   for each of pub/sub, request/reply, reconnect, drain, and headers.
 - Retain raw-frame and fuzz corpora as regression fixtures.
 - Document the supported server-version and feature matrix.
+
+Completed initial slice: a Nix-built Go `nats.go` v1.52.0 peer and a pinned
+`nats-server` 2.10.22 runner cover anonymous, token, and username/password
+Core traffic. The black-box exchange checks bidirectional pub/sub, repeated
+headers, request/reply in both directions, no-responders, and clean drain and
+close. This proves the first cross-SDK seam; it does not satisfy the full
+server-version, reconnect, or product-surface matrix for G3.
 
 ### Gate G3 — Core completeness
 

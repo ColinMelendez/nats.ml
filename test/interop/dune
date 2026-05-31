@@ -1,0 +1,4 @@
+(executable
+ (name interop_acceptance)
+ (modules interop_acceptance)
+ (libraries nats nats-eio eio eio_main))
