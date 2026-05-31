@@ -41,6 +41,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-interop.sh
 ./scripts/runtest-interop-matrix.sh
 ./scripts/runtest-interop-reconnect.sh
+NATS_TEST_TLS=1 ./scripts/runtest-interop-reconnect.sh
 ```
 
 The script requires Docker and is intentionally outside `dune runtest`; Docker
@@ -86,7 +87,10 @@ starts three independent NATS servers, kills the first and then the second
 after flushed exchanges, and checks that the Go and OCaml clients recover twice,
 replay their subscriptions, and exchange messages after each failover. It
 accepts the same anonymous, token, and username/password modes; set
-`NATS_SERVER_IMAGE` to select the server image for this scenario.
+`NATS_SERVER_IMAGE` to select the server image for this scenario. Set
+`NATS_TEST_TLS=1` to generate an ephemeral CA and run the same two-failover
+scenario through the server-required TLS upgrade; the CA and hostname policy
+are supplied to both SDKs.
 
 The first JetStream layer is available through `Nats_eio.Jetstream`: typed
 stream and consumer configuration and management, including consumer metadata,

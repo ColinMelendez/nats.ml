@@ -37,6 +37,29 @@ let auth () =
   | _ ->
       failf "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
 
+let read_file path = In_channel.with_open_bin path In_channel.input_all
+
+let tls_config () =
+  match Sys.getenv_opt "NATS_TEST_TLS_CA" with
+  | None -> None
+  | Some ca_file ->
+      let ca =
+        match X509.Certificate.decode_pem (read_file ca_file) with
+        | Ok value -> value
+        | Error (`Msg message) ->
+            failf "invalid test CA certificate: %s" message
+      in
+      let authenticator =
+        X509.Authenticator.chain_of_trust
+          ~time:(fun () -> Some (Ptime_clock.now ())) [ ca ]
+      in
+      let peer_name =
+        Domain_name.host_exn (Domain_name.of_string_exn "localhost")
+      in
+      match Tls.Config.client ~authenticator ~peer_name () with
+      | Ok value -> Some value
+      | Error (`Msg message) -> failf "TLS client configuration: %s" message
+
 let next_event ~clock ~timeout events =
   let seconds = Mtime.Span.to_float_ns timeout /. 1e9 in
   match
@@ -147,6 +170,7 @@ let round_payload round = "round-" ^ string_of_int round
 let round_marker round = round_payload round ^ "-flushed"
 
 let run env =
+  Mirage_crypto_rng_unix.use_default ();
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.mono_clock env in
@@ -158,9 +182,10 @@ let run env =
     | None -> failf "NATS_TEST_INTEROP_PREFIX is required"
   in
   let auth = auth () in
+  let tls = tls_config () in
   let config =
     expect_ok "connection config"
-      (Nats_eio.Connection.Config.v ?auth
+      (Nats_eio.Connection.Config.v ?auth ?tls
          ~max_reconnect_attempts:(Some 20)
          ~reconnect_delay:Mtime.Span.(50 * ms)
          ~reconnect_max_delay:Mtime.Span.(100 * ms) ())

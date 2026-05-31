@@ -4,21 +4,69 @@ set -eu
 script_dir=$(CDPATH=; export CDPATH; cd "$(dirname "$0")" && pwd)
 cd "$script_dir/.."
 
+if [ "${NATS_INTEGRATION_SHELL-}" != 1 ]; then
+  LC_ALL=C
+  export LC_ALL
+  exec nix develop .#integration -c env \
+    NATS_INTEGRATION_SHELL=1 "$script_dir/runtest-interop-reconnect.sh" "$@"
+fi
+
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
+tls_enabled=${NATS_TEST_TLS-0}
 auth_user=${NATS_TEST_USER-}
 auth_pass=${NATS_TEST_PASS-}
 auth_token=${NATS_TEST_TOKEN-}
+auth_mode=anonymous
 primary=
 secondary=
 tertiary=
 watcher=
 peer_pid=
+cert_dir=
 signal=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-reconnect.XXXXXX")
 peer_signal="$signal.peer"
 peer_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-reconnect-peer.XXXXXX")
 ocaml_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-reconnect-ocaml.XXXXXX")
 rm -f "$signal"
 prefix="ocaml.interop.reconnect.$$"
+
+case "$tls_enabled" in
+  0|1) ;;
+  *)
+    echo "NATS_TEST_TLS must be 0 or 1" >&2
+    exit 1
+    ;;
+esac
+
+if [ -n "${NATS_TEST_TOKEN+x}" ]; then
+  if [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
+    echo "NATS_TEST_TOKEN cannot be combined with NATS_TEST_USER or NATS_TEST_PASS" >&2
+    exit 1
+  fi
+  if [ -z "$auth_token" ]; then
+    echo "NATS_TEST_TOKEN must be non-empty" >&2
+    exit 1
+  fi
+  case "$auth_token" in
+    *[!A-Za-z0-9_-]*)
+      echo "NATS_TEST_TOKEN may use only ASCII letters, digits, underscores, or hyphens" >&2
+      exit 1
+      ;;
+  esac
+  auth_mode=token
+elif [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
+  if [ -z "$auth_user" ] || [ -z "$auth_pass" ]; then
+    echo "NATS_TEST_USER and NATS_TEST_PASS must both be non-empty" >&2
+    exit 1
+  fi
+  case "$auth_user$auth_pass" in
+    *[!A-Za-z0-9_-]*)
+      echo "NATS_TEST_USER and NATS_TEST_PASS may use only ASCII letters, digits, underscores, or hyphens" >&2
+      exit 1
+      ;;
+  esac
+  auth_mode=user_pass
+fi
 
 cleanup() {
   if [ -n "$watcher" ]; then
@@ -37,6 +85,9 @@ cleanup() {
   fi
   if [ -n "$tertiary" ]; then
     docker rm -f "$tertiary" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$cert_dir" ]; then
+    rm -rf "$cert_dir"
   fi
   rm -f "$signal" "$signal.1" "$signal.2" "$peer_signal" "$peer_log" "$ocaml_log"
 }
@@ -75,33 +126,29 @@ wait_until_ready() {
 }
 
 run_server() {
-  if [ -n "${NATS_TEST_TOKEN+x}" ]; then
-    if [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
-      echo "NATS_TEST_TOKEN cannot be combined with NATS_TEST_USER or NATS_TEST_PASS" >&2
-      exit 1
-    fi
-    if [ -z "$auth_token" ]; then
-      echo "NATS_TEST_TOKEN must be non-empty" >&2
-      exit 1
-    fi
-    case "$auth_token" in
-      *[!A-Za-z0-9_-]*)
-        echo "NATS_TEST_TOKEN may use only ASCII letters, digits, underscores, or hyphens" >&2
-        exit 1
+  if [ "$tls_enabled" -eq 1 ]; then
+    case "$auth_mode" in
+      anonymous)
+        config_file="$script_dir/nats-server-tls.conf"
+        auth_options=
+        ;;
+      token)
+        config_file="$script_dir/nats-server-token-tls.conf"
+        auth_options="--env NATS_TEST_TOKEN"
+        ;;
+      user_pass)
+        config_file="$script_dir/nats-server-auth-tls.conf"
+        auth_options="--env NATS_TEST_USER --env NATS_TEST_PASS"
         ;;
     esac
+    # shellcheck disable=SC2086 # auth_options intentionally expands to option words.
+    docker run --detach $auth_options \
+      --volume "$cert_dir:/etc/nats/certs:ro" \
+      --volume "$config_file:/etc/nats/nats.conf:ro" \
+      --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf
+  elif [ "$auth_mode" = token ]; then
     docker run --detach --publish 127.0.0.1::4222 "$image" --auth "$auth_token"
-  elif [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
-    if [ -z "$auth_user" ] || [ -z "$auth_pass" ]; then
-      echo "NATS_TEST_USER and NATS_TEST_PASS must both be non-empty" >&2
-      exit 1
-    fi
-    case "$auth_user$auth_pass" in
-      *[!A-Za-z0-9_-]*)
-        echo "NATS_TEST_USER and NATS_TEST_PASS may use only ASCII letters, digits, underscores, or hyphens" >&2
-        exit 1
-        ;;
-    esac
+  elif [ "$auth_mode" = user_pass ]; then
     docker run --detach \
       --env NATS_TEST_USER --env NATS_TEST_PASS \
       --volume "$script_dir/nats-server-auth.conf:/etc/nats/nats.conf:ro" \
@@ -110,6 +157,22 @@ run_server() {
     docker run --detach --publish 127.0.0.1::4222 "$image"
   fi
 }
+
+if [ "$tls_enabled" -eq 1 ]; then
+  cert_dir=$(mktemp -d "$script_dir/.nats-interop-tls.XXXXXX")
+  openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \
+    -keyout "$cert_dir/ca-key.pem" -out "$cert_dir/ca.pem" \
+    -subj "/CN=ocaml-nats-interop-test-ca" >/dev/null
+  openssl req -newkey rsa:2048 -nodes \
+    -keyout "$cert_dir/server-key.pem" -out "$cert_dir/server.csr" \
+    -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost" \
+    >/dev/null
+  openssl x509 -req -in "$cert_dir/server.csr" \
+    -CA "$cert_dir/ca.pem" -CAkey "$cert_dir/ca-key.pem" \
+    -CAcreateserial -out "$cert_dir/server.pem" -days 1 -sha256 \
+    -copy_extensions copy >/dev/null
+  export NATS_TEST_TLS_CA="$cert_dir/ca.pem"
+fi
 
 primary=$(run_server)
 secondary=$(run_server)
@@ -121,7 +184,11 @@ wait_until_ready "$primary"
 wait_until_ready "$secondary"
 wait_until_ready "$tertiary"
 
-servers="nats://127.0.0.1:$primary_port,nats://127.0.0.1:$secondary_port,nats://127.0.0.1:$tertiary_port"
+if [ "$tls_enabled" -eq 1 ]; then
+  servers="nats://localhost:$primary_port,nats://localhost:$secondary_port,nats://localhost:$tertiary_port"
+else
+  servers="nats://127.0.0.1:$primary_port,nats://127.0.0.1:$secondary_port,nats://127.0.0.1:$tertiary_port"
+fi
 (
   while [ ! -e "$signal.1" ]; do
     sleep 0.05

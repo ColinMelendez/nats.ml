@@ -62,6 +62,7 @@ func connectOptions() ([]nats.Option, error) {
 	token, tokenSet := os.LookupEnv("NATS_TEST_TOKEN")
 	user, userSet := os.LookupEnv("NATS_TEST_USER")
 	password, passwordSet := os.LookupEnv("NATS_TEST_PASS")
+	var options []nats.Option
 	switch {
 	case tokenSet && (userSet || passwordSet):
 		return nil, errors.New("NATS_TEST_TOKEN cannot be combined with username/password")
@@ -69,15 +70,20 @@ func connectOptions() ([]nats.Option, error) {
 		if token == "" {
 			return nil, errors.New("NATS_TEST_TOKEN must be non-empty")
 		}
-		return []nats.Option{nats.Token(token)}, nil
+		options = append(options, nats.Token(token))
 	case userSet || passwordSet:
 		if user == "" || password == "" {
 			return nil, errors.New("NATS_TEST_USER and NATS_TEST_PASS must both be non-empty")
 		}
-		return []nats.Option{nats.UserInfo(user, password)}, nil
-	default:
-		return nil, nil
+		options = append(options, nats.UserInfo(user, password))
 	}
+	if caFile, caSet := os.LookupEnv("NATS_TEST_TLS_CA"); caSet {
+		if caFile == "" {
+			return nil, errors.New("NATS_TEST_TLS_CA must be non-empty")
+		}
+		options = append(options, nats.RootCAs(caFile))
+	}
+	return options, nil
 }
 
 func runPeer(config options) error {

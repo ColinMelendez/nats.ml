@@ -473,8 +473,14 @@ independent servers, arms each kill only after a flushed exchange, and requires
 both clients to replay the subscription and complete a two-sided recovery
 barrier after each of the first two endpoints fails. The same anonymous,
 token, username/password, and `nats:2.14.3` modes have been exercised.
-Pending G3 work still includes TLS/reconnect combinations and the complete
-supported-version matrix.
+
+Completed TLS/reconnect slice: setting `NATS_TEST_TLS=1` makes the same runner
+generate a short-lived CA and hostname-checked certificate, configures all
+three independent servers for TLS, and supplies the CA to both SDKs. Anonymous,
+token, and username/password modes have been exercised on `nats:2.10.22`, with
+anonymous coverage also exercised on `nats:2.14.3`.
+Pending G3 work now centers on the complete supported-version matrix and
+broader TLS policy combinations.
 
 ### Gate G3 — Core completeness
 
