@@ -462,6 +462,14 @@ The interop matrix runner now executes that Core case against the baseline
 `nats:2.10.22` image and `nats:2.14.3`; `NATS_SERVER_IMAGES` supplies an
 explicit comma-separated image list for additional supported versions.
 
+Completed reconnect slice: a two-endpoint black-box runner starts independent
+servers, asks the Go `nats.go` peer and OCaml client to establish subscriptions,
+kills the first endpoint after a baseline exchange, and requires both clients
+to recover to the second endpoint before exchanging messages again. Anonymous,
+token, username/password, and the `nats:2.14.3` image have been exercised.
+Pending G3 work still includes repeated failure cycles, TLS/reconnect
+combinations, and the complete supported-version matrix.
+
 ### Gate G3 — Core completeness
 
 The Core NATS feature matrix is signed off, the fuzz corpus is retained, and

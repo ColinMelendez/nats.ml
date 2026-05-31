@@ -40,6 +40,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-lameduck.sh
 ./scripts/runtest-interop.sh
 ./scripts/runtest-interop-matrix.sh
+./scripts/runtest-interop-reconnect.sh
 ```
 
 The script requires Docker and is intentionally outside `dune runtest`; Docker
@@ -80,7 +81,12 @@ and username/password modes. The matrix runner executes the Core interop case
 for `nats:2.10.22` and `nats:2.14.3` by default; set `NATS_SERVER_IMAGES` to a
 comma-separated image list to choose another compatibility matrix.
 Broader server-version coverage and JetStream/KV/Object Store/Services
-interoperability remain later acceptance work.
+interoperability remain later acceptance work. The reconnect runner starts two
+independent NATS servers, kills the first after the baseline exchange, and
+checks that the Go and OCaml clients recover to the second endpoint, replay
+their subscriptions, and exchange messages again. It accepts the same
+anonymous, token, and username/password modes; set `NATS_SERVER_IMAGE` to
+select the server image for this scenario.
 
 The first JetStream layer is available through `Nats_eio.Jetstream`: typed
 stream and consumer configuration and management, including consumer metadata,

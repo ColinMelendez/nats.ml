@@ -2,3 +2,8 @@
  (name interop_acceptance)
  (modules interop_acceptance)
  (libraries nats nats-eio eio eio_main))
+
+(executable
+ (name interop_reconnect_acceptance)
+ (modules interop_reconnect_acceptance)
+ (libraries nats nats-eio eio eio_main))

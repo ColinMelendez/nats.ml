@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -17,6 +16,8 @@ type options struct {
 	server string
 	prefix string
 	ready  string
+	signal string
+	mode   string
 }
 
 func waitMessage(label string, messages <-chan *nats.Msg) (*nats.Msg, error) {
@@ -209,12 +210,14 @@ func main() {
 	flag.StringVar(&config.server, "server", "", "NATS server URL")
 	flag.StringVar(&config.prefix, "prefix", "", "unique subject prefix")
 	flag.StringVar(&config.ready, "ready-file", "", "file created after subscriptions are ready")
+	flag.StringVar(&config.signal, "signal-file", "", "file written to trigger reconnect in reconnect mode")
+	flag.StringVar(&config.mode, "mode", "core", "interop mode: core or reconnect")
 	flag.Parse()
-	if config.server == "" || config.prefix == "" || config.ready == "" || strings.ContainsAny(config.prefix, " \r\n") {
-		fmt.Fprintln(os.Stderr, "server, prefix, and ready-file are required; prefix may not contain whitespace")
+	if err := validateOptions(config); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	if err := runPeer(config); err != nil {
+	if err := runMode(config); err != nil {
 		fmt.Fprintf(os.Stderr, "interop peer: %s\n", err)
 		os.Exit(1)
 	}
