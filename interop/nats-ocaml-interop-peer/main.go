@@ -15,6 +15,7 @@ const waitTimeout = 10 * time.Second
 type options struct {
 	server string
 	prefix string
+	stream string
 	ready  string
 	signal string
 	mode   string
@@ -215,9 +216,10 @@ func main() {
 	config := options{}
 	flag.StringVar(&config.server, "server", "", "NATS server URL")
 	flag.StringVar(&config.prefix, "prefix", "", "unique subject prefix")
+	flag.StringVar(&config.stream, "stream", "", "JetStream stream name")
 	flag.StringVar(&config.ready, "ready-file", "", "file created after subscriptions are ready")
 	flag.StringVar(&config.signal, "signal-file", "", "file written to trigger reconnect in reconnect mode")
-	flag.StringVar(&config.mode, "mode", "core", "interop mode: core or reconnect")
+	flag.StringVar(&config.mode, "mode", "core", "interop mode: core, reconnect, or jetstream")
 	flag.Parse()
 	if err := validateOptions(config); err != nil {
 		fmt.Fprintln(os.Stderr, err)

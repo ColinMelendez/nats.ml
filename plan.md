@@ -647,8 +647,16 @@ request/reply and subscription primitives.
 - Completed locally: cover Push durable restoration, ephemeral recreation,
   heartbeat suspension, timeout preservation, and independent lifecycle-event
   delivery across reconnect through the Eio mock transport.
-- Remaining: real cluster and cross-SDK interop coverage for consumer behavior,
-  server-version feature gates, and the broader ordered/push reconnect matrix.
+- Completed cross-SDK slice: a separate Nix-built official Go `nats.go` peer
+  creates a unique memory stream and durable pull consumers, while the OCaml
+  client binds the consumers and exchanges messages in both directions. The
+  exchange checks stream/consumer metadata, explicit acknowledgements, headers,
+  publish acknowledgements, and duplicate message ids on all three pinned
+  server releases. It is anonymous plaintext only; cluster, TLS/authentication,
+  Push, Ordered, and reconnect interop remain separate acceptance work.
+- Remaining: real cluster consumer behavior, cross-SDK Push/Ordered and
+  reconnect behavior, server-version feature gates, and the broader
+  ordered/push reconnect matrix.
 
 ### Gate G4 — JetStream API stabilization
 

@@ -227,6 +227,11 @@ func runMode(config options) error {
 			return fmt.Errorf("signal-file is required in reconnect mode")
 		}
 		return runReconnectPeer(config)
+	case "jetstream":
+		if config.stream == "" {
+			return fmt.Errorf("stream is required in jetstream mode")
+		}
+		return runJetStreamPeer(config)
 	default:
 		return fmt.Errorf("unknown mode %q", config.mode)
 	}

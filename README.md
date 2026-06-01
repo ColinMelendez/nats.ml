@@ -39,6 +39,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-tls.sh
 ./scripts/runtest-lameduck.sh
 ./scripts/runtest-interop.sh
+./scripts/runtest-interop-jetstream.sh
 NATS_TEST_TLS=1 ./scripts/runtest-interop.sh
 ./scripts/runtest-interop-matrix.sh
 ./scripts/runtest-server-matrix.sh
@@ -95,7 +96,14 @@ debugging. The interoperability runner starts the same pinned server image,
 builds an official Go `nats.go` peer through the separate Nix integration
 shell, and checks Core pub/sub, repeated headers, bidirectional request/reply,
 no-responders, and clean drain/close. It supports the same anonymous, token,
-and username/password modes. The matrix runner is a bounded Core gate: by
+and username/password modes.
+The separate JetStream interop runner is an anonymous plaintext slice: an
+official Go `nats.go` peer creates a unique stream and durable pull consumers,
+then the OCaml client and Go peer exchange, acknowledge, and deduplicate
+JetStream messages. Set `NATS_SERVER_IMAGE` to try another pinned release;
+authentication, TLS, cluster, Push, Ordered, and reconnect interop remain
+separate work.
+The matrix runner is a bounded Core gate: by
 default it spans the established `nats:2.10.22` floor, `nats:2.12.15`, and the
 current `nats:2.14.5` release, and runs Core traffic, repeated plaintext
 reconnect, single-server TLS Core traffic, and repeated TLS reconnect for each
@@ -106,8 +114,8 @@ sequentially; set `NATS_SERVER_IMAGES` to a comma-separated image list or
 authentication; set the token or username/password variables described above
 to repeat the selected matrix with that authentication mode. It does not
 claim full server conformance: broader failure-injection matrices, plus
-JetStream/KV/Object Store/Services interoperability, remain separate acceptance
-work. The cross-SDK reconnect runner
+broader JetStream/KV/Object Store/Services interoperability, remain separate
+acceptance work. The cross-SDK reconnect runner
 starts three independent NATS servers, kills the first and then the second
 after flushed exchanges, and checks that the Go and OCaml clients recover twice,
 replay their subscriptions, and exchange messages after each failover. It
