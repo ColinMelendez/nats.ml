@@ -423,7 +423,10 @@ fresh-container cycles; those repeats pass on all three images. The lifecycle
 executable now performs two fresh slow-consumer cycles and two fresh
 subscription/connection drain cycles per server cell; those repeats pass on all
 three images, under both authentication modes. The anonymous repeats also pass
-with JetStream enabled.
+with JetStream enabled. A separate real-server consumer executable also passes
+on all three images, under anonymous, token, and username/password
+authentication, covering durable configured Push, owned Push, Ordered subject
+filtering, and Ordered recovery after deleting an outstanding consumer.
 
 - Core publish/subscribe, queue-group load balancing, headers, and replies.
 - Request success, timeout, no responders, cancellation, and a pending-request
@@ -632,6 +635,11 @@ request/reply and subscription primitives.
   pin-header capture, explicit-unpin cache clearing, 423 stale-pin recovery,
   and subsequent requests without the stale id through the Eio mock transport.
 - Completed: heartbeat liveness and local/server timeout interaction.
+- Completed real-server slice: the Docker harness exercises durable configured
+  Push delivery and acknowledgement, owned Push creation/deletion, Ordered
+  subject filtering, and Ordered consumer recreation after a server-side
+  deletion across the three pinned releases in anonymous, token, and
+  username/password modes.
 - Completed locally: cover ordered consumer creation, filtered stream-sequence
   gaps, consumer-sequence recovery, missing-heartbeat recovery, deletion
   recovery, timeout preservation, and switch/explicit cleanup through the Eio
@@ -640,7 +648,7 @@ request/reply and subscription primitives.
   heartbeat suspension, timeout preservation, and independent lifecycle-event
   delivery across reconnect through the Eio mock transport.
 - Remaining: real cluster and cross-SDK interop coverage for consumer behavior,
-  server-version gates, and the final ordered/push acceptance matrix.
+  server-version feature gates, and the broader ordered/push reconnect matrix.
 
 ### Gate G4 — JetStream API stabilization
 

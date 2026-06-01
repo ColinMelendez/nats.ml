@@ -75,6 +75,9 @@ exercises stream management, publish acknowledgements, duplicate message ids,
 and cleanup. The server runner also checks request timeout/cancellation
 cleanup, auto-unsubscribe limits, bounded subscription slow-consumer behavior,
 subscription drain, connection drain, and parent-switch cleanup.
+With `NATS_TEST_JETSTREAM=1`, it also runs a separate consumer acceptance
+executable covering durable and owned Push consumers, Ordered filtering, and
+Ordered consumer deletion/recreation against the live server.
 The server matrix runner repeats the server, cluster, and lame-duck runners for
 `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` (nine sequential cases by
 default); set `NATS_SERVER_IMAGES` or `NATS_SERVER_MATRIX_SCENARIOS` to select
