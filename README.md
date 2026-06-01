@@ -39,6 +39,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-tls.sh
 ./scripts/runtest-lameduck.sh
 ./scripts/runtest-interop.sh
+NATS_TEST_TLS=1 ./scripts/runtest-interop.sh
 ./scripts/runtest-interop-matrix.sh
 ./scripts/runtest-interop-reconnect.sh
 NATS_TEST_TLS=1 ./scripts/runtest-interop-reconnect.sh
@@ -81,15 +82,16 @@ no-responders, and clean drain/close. It supports the same anonymous, token,
 and username/password modes. The matrix runner is a bounded Core gate: by
 default it spans the established `nats:2.10.22` floor, `nats:2.12.15`, and the
 current `nats:2.14.5` release, and runs Core traffic, repeated plaintext
-reconnect, and repeated TLS reconnect for each image. The nine cases run
+reconnect, single-server TLS Core traffic, and repeated TLS reconnect for each
+image. The twelve cases run
 sequentially; set `NATS_SERVER_IMAGES` to a comma-separated image list or
 `NATS_INTEROP_MATRIX_SCENARIOS` to a comma-separated subset of `core`,
-`reconnect`, and `tls-reconnect`. The matrix defaults to anonymous
+`reconnect`, `tls-core`, and `tls-reconnect`. The matrix defaults to anonymous
 authentication; set the token or username/password variables described above
 to repeat the selected matrix with that authentication mode. It does not
-claim full server conformance: cluster/lame-duck and non-reconnect TLS policy
-matrices, plus JetStream/KV/Object Store/Services interoperability, remain
-separate acceptance work. The cross-SDK reconnect runner
+claim full server conformance: repeated cluster, lame-duck, drain, and
+slow-consumer failure matrices, plus JetStream/KV/Object Store/Services
+interoperability, remain separate acceptance work. The cross-SDK reconnect runner
 starts three independent NATS servers, kills the first and then the second
 after flushed exchanges, and checks that the Go and OCaml clients recover twice,
 replay their subscriptions, and exchange messages after each failover. It

@@ -461,14 +461,15 @@ server-version, reconnect, or product-surface matrix for G3.
 The interop matrix runner now defines a bounded Core gate across the
 established `nats:2.10.22` compatibility floor, the `nats:2.12.15` older
 release line, and the current `nats:2.14.5` release. Each image runs the Core
-cross-SDK exchange, the repeated plaintext failover exchange, and the repeated
-TLS failover exchange, for nine sequential cases by default. `NATS_SERVER_IMAGES`
-selects another comma-separated image list and
-`NATS_INTEROP_MATRIX_SCENARIOS` selects a subset of `core`, `reconnect`, and
-`tls-reconnect`. The matrix defaults to anonymous authentication; setting the
-token or username/password variables repeats the selected matrix with that
-authentication mode. The version selection is deliberately bounded rather
-than an assertion that every historical patch release is covered.
+cross-SDK exchange, single-server TLS Core traffic, the repeated plaintext
+failover exchange, and the repeated TLS failover exchange, for twelve
+sequential cases by default. `NATS_SERVER_IMAGES` selects another
+comma-separated image list and `NATS_INTEROP_MATRIX_SCENARIOS` selects a
+subset of `core`, `reconnect`, `tls-core`, and `tls-reconnect`. The matrix
+defaults to anonymous authentication; setting the token or username/password
+variables repeats the selected matrix with that authentication mode. The
+version selection is deliberately bounded rather than an assertion that every
+historical patch release is covered.
 
 Initial reconnect slice: a two-endpoint black-box runner starts independent
 servers, asks the Go `nats.go` peer and OCaml client to establish subscriptions,
@@ -487,13 +488,16 @@ generate a short-lived CA and hostname-checked certificate, configures all
 three independent servers for TLS, and supplies the CA to both SDKs. Anonymous,
 token, and username/password authentication have been exercised on that TLS
 reconnect scenario for all three matrix images.
+Completed Core TLS slice: the single-server cross-SDK exchange now uses the
+same generated CA and hostname policy, with anonymous, token, and
+username/password authentication exercised for all three matrix images.
 Completed authentication matrix: those three CONNECT authentication modes have
-each been exercised across all nine image/scenario cells, for 27 cross-SDK
+each been exercised across all twelve image/scenario cells, for 36 cross-SDK
 acceptance combinations. Server authentication here is orthogonal to TLS
 transport policy.
 The bounded version/scenario matrix is now in place. Pending G3 work is the
-remaining Core acceptance breadth: Core TLS without failover, and repeated
-cluster, lame-duck, drain, and slow-consumer failure cases. JetStream,
+remaining Core acceptance breadth: repeated cluster, lame-duck, drain, and
+slow-consumer failure cases. JetStream,
 Key-Value, Object Store, and Services interoperability remain later
 product-surface acceptance work rather than requirements of this Core gate.
 

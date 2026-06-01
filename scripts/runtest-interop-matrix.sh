@@ -5,11 +5,11 @@ script_dir=$(CDPATH=; export CDPATH; cd "$(dirname "$0")" && pwd)
 cd "$script_dir/.."
 
 images=${NATS_SERVER_IMAGES:-nats:2.10.22,nats:2.12.15,nats:2.14.5}
-scenarios=${NATS_INTEROP_MATRIX_SCENARIOS:-core,reconnect,tls-reconnect}
+scenarios=${NATS_INTEROP_MATRIX_SCENARIOS:-core,reconnect,tls-core,tls-reconnect}
 
 case "$scenarios" in
   ""|,*|*,|*,,*)
-    echo "NATS_INTEROP_MATRIX_SCENARIOS must contain core, reconnect, and/or tls-reconnect with no empty entries" >&2
+    echo "NATS_INTEROP_MATRIX_SCENARIOS must contain core, reconnect, tls-core, and/or tls-reconnect with no empty entries" >&2
     exit 1
     ;;
 esac
@@ -28,10 +28,10 @@ fi
 scenario_list=
 for scenario do
   case "$scenario" in
-    core|reconnect|tls-reconnect)
+    core|reconnect|tls-core|tls-reconnect)
       ;;
     *)
-      echo "unknown interop matrix scenario: $scenario (expected core, reconnect, or tls-reconnect)" >&2
+      echo "unknown interop matrix scenario: $scenario (expected core, reconnect, tls-core, or tls-reconnect)" >&2
       exit 1
       ;;
   esac
@@ -59,6 +59,12 @@ run_case() {
       (
         unset NATS_TEST_TLS_CA
         NATS_TEST_TLS=0 NATS_SERVER_IMAGE="$run_image" ./scripts/runtest-interop.sh
+      )
+      ;;
+    tls-core)
+      (
+        unset NATS_TEST_TLS_CA
+        NATS_TEST_TLS=1 NATS_SERVER_IMAGE="$run_image" ./scripts/runtest-interop.sh
       )
       ;;
     reconnect)

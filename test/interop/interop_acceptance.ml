@@ -33,6 +33,29 @@ let auth () =
   | _ ->
       failf "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
 
+let read_file path = In_channel.with_open_bin path In_channel.input_all
+
+let tls_config () =
+  match Sys.getenv_opt "NATS_TEST_TLS_CA" with
+  | None -> None
+  | Some ca_file ->
+      let ca =
+        match X509.Certificate.decode_pem (read_file ca_file) with
+        | Ok value -> value
+        | Error (`Msg message) ->
+            failf "invalid test CA certificate: %s" message
+      in
+      let authenticator =
+        X509.Authenticator.chain_of_trust
+          ~time:(fun () -> Some (Ptime_clock.now ())) [ ca ]
+      in
+      let peer_name =
+        Domain_name.host_exn (Domain_name.of_string_exn "localhost")
+      in
+      match Tls.Config.client ~authenticator ~peer_name () with
+      | Ok value -> Some value
+      | Error (`Msg message) -> failf "TLS client configuration: %s" message
+
 let subject prefix suffix = Nats.Subject.literal (prefix ^ "." ^ suffix)
 
 let filter prefix suffix =
@@ -102,18 +125,21 @@ let start_responder ~sw ~clock ~timeout ~connection subscription =
   result
 
 let run env =
+  Mirage_crypto_rng_unix.use_default ();
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.mono_clock env in
   let endpoint = endpoint () in
   let prefix = prefix () in
+  let auth = auth () in
+  let tls = tls_config () in
   let config =
-    match auth () with
-    | None -> None
-    | Some auth ->
+    match (auth, tls) with
+    | None, None -> None
+    | _ ->
         Some
           (expect_ok "connection config"
-             (Nats_eio.Connection.Config.v ~auth ()))
+             (Nats_eio.Connection.Config.v ?auth ?tls ()))
   in
   let connection =
     expect_ok "connect"
