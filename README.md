@@ -41,6 +41,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-lameduck.sh
 ./scripts/runtest-interop.sh
 ./scripts/runtest-interop-jetstream.sh
+./scripts/runtest-interop-jetstream-matrix.sh
 NATS_TEST_INTEROP_JETSTREAM_MODE=push ./scripts/runtest-interop-jetstream.sh
 NATS_TEST_TLS=1 ./scripts/runtest-interop.sh
 ./scripts/runtest-interop-matrix.sh
@@ -110,15 +111,22 @@ official Go `nats.go` peer creates a unique stream and durable pull consumers,
 then the OCaml client and Go peer exchange, acknowledge, and deduplicate
 JetStream messages. It supports the same anonymous, token, username/password,
 and server-required TLS modes as the Core runner; set `NATS_SERVER_IMAGE` to
-try another pinned release. The six connection modes have been exercised on
-each of the three pinned releases. Cluster, Ordered, and reconnect interop
-remain separate work. Set
+try another pinned release. The JetStream interop matrix runner defaults to
+pull and Push in anonymous plaintext/TLS modes across the three pinned
+releases; set `NATS_INTEROP_JETSTREAM_MATRIX_MODES` to a comma-separated
+subset of `anonymous`, `anonymous-tls`, `token`, `token-tls`, `user-pass`, and
+`user-pass-tls` for a broader sweep. The full six-mode sweep has passed for
+both pull and Push on each pinned release. Cluster, Ordered, and reconnect
+interop remain separate work. The optional `NATS_TEST_TOKEN` or paired
+`NATS_TEST_USER`/`NATS_TEST_PASS` values only replace the built-in credentials
+for their selected modes; they do not select modes. Set
 `NATS_TEST_INTEROP_JETSTREAM_MODE=push` to run the separate durable Push slice:
 the Go and OCaml clients bind opposite durable push consumers, exchange one
 message each way, and synchronously acknowledge the deliveries. Anonymous
-plaintext Push passes on all three pinned releases, with a token/TLS floor
-smoke pass; Push does not yet claim the full connection-mode matrix.
-The matrix runner is a bounded Core gate: by
+plaintext and TLS Push pass on all three pinned releases; token and
+username/password plaintext and TLS Push also pass on all three releases.
+The Core interop matrix runner (`./scripts/runtest-interop-matrix.sh`) is a
+bounded Core gate: by
 default it spans the established `nats:2.10.22` floor, `nats:2.12.15`, and the
 current `nats:2.14.5` release, and runs Core traffic, repeated plaintext
 reconnect, single-server TLS Core traffic, and repeated TLS reconnect for each

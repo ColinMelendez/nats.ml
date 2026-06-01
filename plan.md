@@ -437,6 +437,10 @@ with JetStream enabled. A separate real-server consumer executable also passes
 on all three images, under anonymous, token, and username/password
 authentication, covering durable configured Push, owned Push, Ordered subject
 filtering, and Ordered recovery after deleting an outstanding consumer.
+The dedicated JetStream interop matrix runner now defaults to pull and Push
+anonymous plaintext/TLS cells across the three pinned releases. Its explicit
+six-mode sweep—anonymous, token, and username/password, each plaintext and
+server-required TLS—passes for both pull and Push on all three releases.
 
 - Core publish/subscribe, queue-group load balancing, headers, and replies.
 - Request success, timeout, no responders, cancellation, and a pending-request
@@ -669,9 +673,12 @@ request/reply and subscription primitives.
   the OCaml and Go clients bind opposite delivery legs. The exchange validates
   consumer delivery/filter configuration, push metadata and sequences,
   synchronous acknowledgements, and cleanup ordering. Anonymous plaintext
-  passes on all three pinned releases; a token/TLS floor smoke cell also
-  passes. The full Push connection-mode matrix, flow control, heartbeats,
-  cluster, Ordered, and reconnect interop remain separate acceptance work.
+  and TLS pass on all three pinned releases. The dedicated matrix runner
+  defaults to anonymous plaintext/TLS pull and Push cells across all three
+  pinned releases; its explicit token and username/password plaintext/TLS
+  sweep also passes for Push on all three.
+  Flow control, heartbeats, cluster, Ordered, and reconnect interop remain
+  separate acceptance work.
 - Completed real-server cluster slice: the dedicated Docker harness forms a
   full three-node JetStream route mesh, verifies file-backed three-replica
   stream and durable explicit-ack Push consumer state, survives one seed-node
@@ -681,8 +688,8 @@ request/reply and subscription primitives.
   JetStream-leader targeting, multi-node loss, or a version/authentication/TLS
   matrix.
 - Remaining: additional real cluster failure scenarios, cross-SDK Ordered and
-  reconnect behavior, the broader Push connection-mode matrix, server-version
-  feature gates, and the ordered/push reconnect matrix.
+  reconnect behavior, server-version feature gates, and the ordered/push
+  reconnect matrix.
 
 ### Gate G4 — JetStream API stabilization
 
