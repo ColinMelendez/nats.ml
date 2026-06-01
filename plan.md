@@ -375,10 +375,10 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
   `Disconnected`/`Reconnected` events, and defer unsubscribe/auto-unsubscribe
   commands until reconnection completes.
 - The opt-in cluster runner starts a three-node route mesh, checks that the
-  seed advertises the other client endpoints, kills the seed, and verifies
-  failover to a discovered peer plus subscription replay. Expand this harness
-  for additional failure injection as the Core acceptance matrix grows. Do not
-  add silent Core publish replay or pending-request replay.
+  seed advertises the other client endpoints, kills the seed, verifies
+  subscription recovery to a discovered peer, then kills that active peer and
+  verifies a second recovery to the last node. Do not add silent Core publish
+  replay or pending-request replay.
 - The two-server reconnect runner now holds a request across the active-server
   failure and verifies that it fails as `Disconnected` before subscription
   recovery continues.
@@ -401,8 +401,8 @@ token or username/password authentication, server-required TLS, two-server
 subscription recovery and pending-request disconnect failure, request
 timeout/cancellation cleanup, auto-unsubscribe, bounded slow-consumer handling,
 subscription drain, connection drain, parent-switch cleanup, lame-duck handling,
-and three-node cluster discovery/failover. They use private executables and are
-not part of the
+and repeated three-node cluster discovery/failover. These private executables
+are not part of the
 default Dune test alias. The
 following matrix tracks the acceptance surface; the remaining scenarios
 require additional server configuration or failure-injection control.
@@ -505,8 +505,8 @@ each been exercised across all twelve image/scenario cells, for 36 cross-SDK
 acceptance combinations. Server authentication here is orthogonal to TLS
 transport policy.
 The bounded version/scenario matrix is now in place. Pending G3 work is the
-remaining Core acceptance breadth: repeated cluster, lame-duck, drain, and
-slow-consumer failure cases. JetStream,
+remaining Core acceptance breadth: repeated lame-duck, drain, and slow-consumer
+failure cases. JetStream,
 Key-Value, Object Store, and Services interoperability remain later
 product-surface acceptance work rather than requirements of this Core gate.
 

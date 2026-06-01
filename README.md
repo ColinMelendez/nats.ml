@@ -55,8 +55,9 @@ scenarios are split into focused runners; the server reconnect runner starts
 two single-node servers, kills the active one, checks pending-request failure,
 and checks subscription recovery.
 The cluster runner starts a three-node route mesh, connects only to the seed,
-checks the advertised client URLs, kills the seed, and checks failover to a
-discovered peer with subscription recovery.
+checks the advertised client URLs, kills the seed, verifies recovery to a
+discovered peer, then kills that active peer and verifies recovery to the last
+node with subscription replay.
 The lame-duck runner signals a live server through the container and checks the
 dynamic `INFO` flag, typed `Lame_duck_mode` event, and continued use of the
 existing connection.

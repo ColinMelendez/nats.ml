@@ -41,7 +41,8 @@ cleanup() {
     docker rm -f "$tertiary" >/dev/null 2>&1 || true
   fi
   docker network rm "$network" >/dev/null 2>&1 || true
-  rm -f "$signal" "$log"
+  rm -f "$signal" "$signal.1" "$signal.2.cluster-b" \
+    "$signal.2.cluster-c" "$log"
 }
 
 trap cleanup EXIT INT TERM
@@ -125,10 +126,19 @@ wait_for_routes "$tertiary"
 sleep 1
 
 (
-  while [ ! -e "$signal" ]; do
-    sleep 0.05
+  while [ ! -e "$signal.1" ]; do
+    sleep 1
   done
   docker kill "$primary" >/dev/null 2>&1 || true
+  while [ ! -e "$signal.2.cluster-b" ] &&
+    [ ! -e "$signal.2.cluster-c" ]; do
+    sleep 1
+  done
+  if [ -e "$signal.2.cluster-b" ]; then
+    docker kill "$secondary" >/dev/null 2>&1 || true
+  else
+    docker kill "$tertiary" >/dev/null 2>&1 || true
+  fi
 ) &
 watcher=$!
 

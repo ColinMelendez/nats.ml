@@ -20,7 +20,7 @@ let required name =
 
 let timeout = Mtime.Span.(5 * s)
 
-let next_event ~clock events =
+let next_event ~clock ~label events =
   let seconds = Mtime.Span.to_float_ns timeout /. 1e9 in
   match
     Eio.Fiber.first
@@ -30,12 +30,12 @@ let next_event ~clock events =
         Error Nats_eio.Error.Timeout)
   with
   | Ok event -> event
-  | Error error -> failf "lifecycle event: %s" (error_message error)
+  | Error error -> failf "%s: %s" label (error_message error)
 
 let rec wait_for_event ~clock ~label ~remaining predicate events =
   if Int.equal remaining 0 then failf "timed out waiting for %s" label
   else
-    let event = next_event ~clock events in
+    let event = next_event ~clock ~label events in
     if predicate event then event
     else
       wait_for_event ~clock ~label ~remaining:(remaining - 1) predicate events
@@ -88,29 +88,20 @@ let touch path =
   let output = open_out path in
   close_out output
 
-let expect_recovered ~clock subscription initial =
-  let recovery =
-    expect_ok "subscription recovery"
-      (Nats_eio.Subscription.await_recovery ~timeout ~from:initial subscription)
+let expect_recovered ~generation subscription initial =
+  let rec await from =
+    let recovery =
+      expect_ok "subscription recovery"
+        (Nats_eio.Subscription.await_recovery ~timeout ~from subscription)
+    in
+    match recovery with
+    | Nats_eio.Subscription.Attached actual when Int.equal actual generation ->
+        recovery
+    | Nats_eio.Subscription.Detached _ -> await recovery
+    | Nats_eio.Subscription.Attached actual ->
+        failf "subscription attached at unexpected generation %d" actual
   in
-  match recovery with
-  | Nats_eio.Subscription.Attached generation when Int.equal generation 1 -> ()
-  | Nats_eio.Subscription.Detached generation -> (
-      let recovered =
-        expect_ok "subscription reattachment"
-          (Nats_eio.Subscription.await_recovery ~timeout ~from:recovery
-             subscription)
-      in
-      match recovered with
-      | Nats_eio.Subscription.Attached next_generation
-        when Int.equal next_generation 1 -> ()
-      | Nats_eio.Subscription.Attached next_generation ->
-          failf "subscription attached at unexpected generation %d"
-            next_generation
-      | Nats_eio.Subscription.Detached next_generation ->
-          failf "subscription remained detached at generation %d" next_generation)
-  | Nats_eio.Subscription.Attached generation ->
-      failf "subscription attached at unexpected generation %d" generation
+  await initial
 
 let run env =
   let server = required "NATS_TEST_CLUSTER_SERVER" in
@@ -132,6 +123,8 @@ let run env =
   in
   if List.length discovered < 2 then
     failf "NATS_TEST_CLUSTER_DISCOVERED must contain at least two servers";
+  if List.length recovered_servers < 2 then
+    failf "NATS_TEST_CLUSTER_RECOVERED_SERVERS must contain at least two servers";
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.mono_clock env in
@@ -175,7 +168,7 @@ let run env =
       in
       if not (String.equal (Nats.Message.payload baseline.message) "before") then
         failf "baseline payload was %S" (Nats.Message.payload baseline.message);
-      touch signal;
+      touch (signal ^ ".1");
       expect_disconnected ~clock events;
       let recovered_info =
         expect_server_info ~clock ~names:recovered_servers events
@@ -186,7 +179,8 @@ let run env =
       | _ ->
           failf "reconnect INFO server was not one of %s"
             (String.concat "," recovered_servers));
-      expect_recovered ~clock subscription initial_recovery;
+      ignore
+        (expect_recovered ~generation:1 subscription initial_recovery);
       expect_ok "post-reconnect publish"
         (Nats_eio.Connection.publish connection subject "after");
       expect_ok "post-reconnect flush" (Nats_eio.Connection.flush connection);
@@ -197,6 +191,52 @@ let run env =
       if not (String.equal (Nats.Message.payload recovered.message) "after") then
         failf "post-reconnect payload was %S"
           (Nats.Message.payload recovered.message);
+      let active_server =
+        match Nats.Info.server_name recovered_info with
+        | Some value -> value
+        | None -> failf "reconnect INFO did not contain a server name"
+      in
+      let remaining_servers =
+        List.filter
+          (fun value -> not (String.equal value active_server))
+          recovered_servers
+      in
+      let remaining_server =
+        match remaining_servers with
+        | value :: _ -> value
+        | [] -> failf "no remaining cluster server after %s" active_server
+      in
+      let second_initial_recovery =
+        Nats_eio.Subscription.recovery subscription
+      in
+      touch (signal ^ ".2." ^ active_server);
+      expect_disconnected ~clock events;
+      let second_recovered_info =
+        expect_server_info ~clock ~names:[ remaining_server ] events
+      in
+      expect_reconnected ~clock events;
+      (match Nats.Info.server_name second_recovered_info with
+      | Some value when String.equal value remaining_server -> ()
+      | _ ->
+          failf "second reconnect INFO server was not %s" remaining_server);
+      ignore
+        (expect_recovered ~generation:2 subscription second_initial_recovery);
+      expect_ok "second post-reconnect publish"
+        (Nats_eio.Connection.publish connection subject "after-second");
+      expect_ok "second post-reconnect flush"
+        (Nats_eio.Connection.flush connection);
+      let second_recovered =
+        expect_ok "second post-reconnect delivery"
+          (Nats_eio.Subscription.next_with_timeout ~timeout subscription)
+      in
+      if
+        not
+          (String.equal
+             (Nats.Message.payload second_recovered.message)
+             "after-second")
+      then
+        failf "second post-reconnect payload was %S"
+          (Nats.Message.payload second_recovered.message);
       print_endline "cluster: ok")
 
 let () =
