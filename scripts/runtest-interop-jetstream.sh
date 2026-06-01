@@ -12,6 +12,7 @@ if [ "${NATS_INTEGRATION_SHELL-}" != 1 ]; then
 fi
 
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
+jetstream_mode=${NATS_TEST_INTEROP_JETSTREAM_MODE:-pull}
 tls_enabled=${NATS_TEST_TLS-0}
 auth_user=${NATS_TEST_USER-}
 auth_pass=${NATS_TEST_PASS-}
@@ -25,6 +26,15 @@ ocaml_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-jetstream-ocaml.XXXXXX")
 rm -f "$ready"
 prefix="ocaml.interop.jetstream.$$"
 stream="OCAML_INTEROP_JS_$$"
+
+case "$jetstream_mode" in
+  pull) peer_mode=jetstream ;;
+  push) peer_mode=jetstream-push ;;
+  *)
+    echo "NATS_TEST_INTEROP_JETSTREAM_MODE must be pull or push" >&2
+    exit 1
+    ;;
+esac
 
 cleanup() {
   if [ -n "$peer_pid" ]; then
@@ -174,7 +184,8 @@ fi
 NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
   NATS_TEST_INTEROP_STREAM="$stream" \
   nix develop .#integration -c nats-ocaml-interop-peer \
-  --mode jetstream --server "$server" --prefix "$prefix" --stream "$stream" \
+  --mode "$peer_mode" --server "$server" --prefix "$prefix" \
+  --stream "$stream" \
   --ready-file "$ready" >"$peer_log" 2>&1 &
 peer_pid=$!
 
@@ -196,9 +207,13 @@ if [ ! -e "$ready" ]; then
 fi
 
 status=0
+case "$jetstream_mode" in
+  pull) acceptance_executable=test/interop/interop_jetstream_acceptance.exe ;;
+  push) acceptance_executable=test/interop/interop_jetstream_push_acceptance.exe ;;
+esac
 if NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" nix develop .#integration -c dune exec \
-    test/interop/interop_jetstream_acceptance.exe >"$ocaml_log" 2>&1
+    "$acceptance_executable" >"$ocaml_log" 2>&1
 then
   :
 else

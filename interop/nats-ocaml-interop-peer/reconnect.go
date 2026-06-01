@@ -232,6 +232,11 @@ func runMode(config options) error {
 			return fmt.Errorf("stream is required in jetstream mode")
 		}
 		return runJetStreamPeer(config)
+	case "jetstream-push":
+		if config.stream == "" {
+			return fmt.Errorf("stream is required in jetstream-push mode")
+		}
+		return runJetStreamPushPeer(config)
 	default:
 		return fmt.Errorf("unknown mode %q", config.mode)
 	}

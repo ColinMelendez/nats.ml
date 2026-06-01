@@ -15,3 +15,9 @@
  (modules interop_jetstream_acceptance)
  (libraries nats nats-eio eio eio_main tls x509 domain-name
    mirage-crypto-rng.unix ptime))
+
+(executable
+ (name interop_jetstream_push_acceptance)
+ (modules interop_jetstream_push_acceptance)
+ (libraries nats nats-eio eio eio_main tls x509 domain-name
+   mirage-crypto-rng.unix ptime))

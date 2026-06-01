@@ -40,6 +40,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-lameduck.sh
 ./scripts/runtest-interop.sh
 ./scripts/runtest-interop-jetstream.sh
+NATS_TEST_INTEROP_JETSTREAM_MODE=push ./scripts/runtest-interop-jetstream.sh
 NATS_TEST_TLS=1 ./scripts/runtest-interop.sh
 ./scripts/runtest-interop-matrix.sh
 ./scripts/runtest-server-matrix.sh
@@ -103,8 +104,13 @@ then the OCaml client and Go peer exchange, acknowledge, and deduplicate
 JetStream messages. It supports the same anonymous, token, username/password,
 and server-required TLS modes as the Core runner; set `NATS_SERVER_IMAGE` to
 try another pinned release. The six connection modes have been exercised on
-each of the three pinned releases. Cluster, Push, Ordered, and reconnect
-interop remain separate work.
+each of the three pinned releases. Cluster, Ordered, and reconnect interop
+remain separate work. Set
+`NATS_TEST_INTEROP_JETSTREAM_MODE=push` to run the separate durable Push slice:
+the Go and OCaml clients bind opposite durable push consumers, exchange one
+message each way, and synchronously acknowledge the deliveries. Anonymous
+plaintext Push passes on all three pinned releases, with a token/TLS floor
+smoke pass; Push does not yet claim the full connection-mode matrix.
 The matrix runner is a bounded Core gate: by
 default it spans the established `nats:2.10.22` floor, `nats:2.12.15`, and the
 current `nats:2.14.5` release, and runs Core traffic, repeated plaintext

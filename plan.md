@@ -654,11 +654,17 @@ request/reply and subscription primitives.
   publish acknowledgements, and duplicate message ids. The dedicated runner
   covers anonymous, token, username/password, and server-required TLS
   connections; all six modes have passed on the three pinned server releases.
-  Cluster, Push, Ordered, and reconnect interop remain separate acceptance
-  work.
-- Remaining: real cluster consumer behavior, cross-SDK Push/Ordered and
-  reconnect behavior, server-version feature gates, and the broader
-  ordered/push reconnect matrix.
+- Completed cross-SDK Push slice: the same official Go peer creates two durable
+  explicit-ack push consumers with delivery subjects outside the stream, and
+  the OCaml and Go clients bind opposite delivery legs. The exchange validates
+  consumer delivery/filter configuration, push metadata and sequences,
+  synchronous acknowledgements, and cleanup ordering. Anonymous plaintext
+  passes on all three pinned releases; a token/TLS floor smoke cell also
+  passes. The full Push connection-mode matrix, flow control, heartbeats,
+  cluster, Ordered, and reconnect interop remain separate acceptance work.
+- Remaining: real cluster consumer behavior, cross-SDK Ordered and reconnect
+  behavior, the broader Push connection-mode matrix, server-version feature
+  gates, and the ordered/push reconnect matrix.
 
 ### Gate G4 — JetStream API stabilization
 
