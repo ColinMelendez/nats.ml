@@ -414,7 +414,11 @@ authentication and JetStream variables apply only to the server lifecycle
 cell, while cluster and lame-duck cells intentionally remain anonymous. It
 does not replace the pending repeated failure-injection work. The anonymous
 nine-cell sweep passed, and the server lifecycle cells also passed with token
-and username/password authentication on all three images.
+and username/password authentication on all three images. Enabling
+`NATS_TEST_JETSTREAM=1` completed the same nine-cell matrix; JetStream stream
+and consumer acceptance ran only in the three server lifecycle cells, which
+also passed with both authentication modes on all three images. Cluster and
+lame-duck remained anonymous Core-only.
 
 - Core publish/subscribe, queue-group load balancing, headers, and replies.
 - Request success, timeout, no responders, cancellation, and a pending-request
@@ -608,7 +612,7 @@ request/reply and subscription primitives.
 - The opt-in Docker harness covers stream create/update/info/list/delete,
   filtered stream and consumer inventory, publish ack, duplicate message ids,
   message counts, unknown-config preservation, and cleanup; it runs in
-  anonymous and username/password modes.
+  anonymous, token, and username/password modes.
 - Completed locally: add typed server-error assertions, consumer management,
   consumer create/update scalar configuration coverage, update action envelopes
   and unknown-field preservation, pull backpressure, server-expiry behavior,
