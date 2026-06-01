@@ -97,12 +97,14 @@ builds an official Go `nats.go` peer through the separate Nix integration
 shell, and checks Core pub/sub, repeated headers, bidirectional request/reply,
 no-responders, and clean drain/close. It supports the same anonymous, token,
 and username/password modes.
-The separate JetStream interop runner is an anonymous plaintext slice: an
+The separate JetStream interop runner is a single-server durable-pull slice: an
 official Go `nats.go` peer creates a unique stream and durable pull consumers,
 then the OCaml client and Go peer exchange, acknowledge, and deduplicate
-JetStream messages. Set `NATS_SERVER_IMAGE` to try another pinned release;
-authentication, TLS, cluster, Push, Ordered, and reconnect interop remain
-separate work.
+JetStream messages. It supports the same anonymous, token, username/password,
+and server-required TLS modes as the Core runner; set `NATS_SERVER_IMAGE` to
+try another pinned release. The six connection modes have been exercised on
+each of the three pinned releases. Cluster, Push, Ordered, and reconnect
+interop remain separate work.
 The matrix runner is a bounded Core gate: by
 default it spans the established `nats:2.10.22` floor, `nats:2.12.15`, and the
 current `nats:2.14.5` release, and runs Core traffic, repeated plaintext

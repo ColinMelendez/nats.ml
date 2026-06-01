@@ -12,20 +12,19 @@ if [ "${NATS_INTEGRATION_SHELL-}" != 1 ]; then
 fi
 
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
+tls_enabled=${NATS_TEST_TLS-0}
+auth_user=${NATS_TEST_USER-}
+auth_pass=${NATS_TEST_PASS-}
+auth_token=${NATS_TEST_TOKEN-}
 container=
 peer_pid=
+cert_dir=
 ready=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-jetstream-ready.XXXXXX")
 peer_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-jetstream-peer.XXXXXX")
 ocaml_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-jetstream-ocaml.XXXXXX")
 rm -f "$ready"
 prefix="ocaml.interop.jetstream.$$"
 stream="OCAML_INTEROP_JS_$$"
-
-if [ -n "${NATS_TEST_TLS_CA+x}" ] || [ -n "${NATS_TEST_TOKEN+x}" ] ||
-  [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
-  echo "JetStream interop currently supports anonymous plaintext connections only" >&2
-  exit 1
-fi
 
 cleanup() {
   if [ -n "$peer_pid" ]; then
@@ -35,12 +34,107 @@ cleanup() {
   if [ -n "$container" ]; then
     docker rm -f "$container" >/dev/null 2>&1 || true
   fi
+  if [ -n "$cert_dir" ]; then
+    rm -rf "$cert_dir"
+  fi
   rm -f "$ready" "$peer_log" "$ocaml_log"
 }
 
 trap cleanup EXIT INT TERM
 
-container=$(docker run --detach --rm --publish 127.0.0.1::4222 "$image" -js)
+case "$tls_enabled" in
+  0|1) ;;
+  *)
+    echo "NATS_TEST_TLS must be 0 or 1" >&2
+    exit 1
+    ;;
+esac
+
+if [ -n "${NATS_TEST_TOKEN+x}" ]; then
+  if [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
+    echo "NATS_TEST_TOKEN cannot be combined with NATS_TEST_USER or NATS_TEST_PASS" >&2
+    exit 1
+  fi
+  if [ -z "$auth_token" ]; then
+    echo "NATS_TEST_TOKEN must be non-empty" >&2
+    exit 1
+  fi
+  case "$auth_token" in
+    *[!A-Za-z0-9_-]*)
+      echo "NATS_TEST_TOKEN may use only ASCII letters, digits, underscores, or hyphens" >&2
+      exit 1
+      ;;
+  esac
+  auth_mode=token
+elif [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
+  if [ -z "$auth_user" ] || [ -z "$auth_pass" ]; then
+    echo "NATS_TEST_USER and NATS_TEST_PASS must both be non-empty" >&2
+    exit 1
+  fi
+  case "$auth_user$auth_pass" in
+    *[!A-Za-z0-9_-]*)
+      echo "NATS_TEST_USER and NATS_TEST_PASS may use only ASCII letters, digits, underscores, or hyphens" >&2
+      exit 1
+      ;;
+  esac
+  auth_mode=user_pass
+else
+  auth_mode=anonymous
+fi
+
+run_server() {
+  if [ "$tls_enabled" -eq 1 ]; then
+    case "$auth_mode" in
+      anonymous)
+        config_file="$script_dir/nats-server-tls.conf"
+        auth_options=
+        ;;
+      token)
+        config_file="$script_dir/nats-server-token-tls.conf"
+        auth_options="--env NATS_TEST_TOKEN"
+        ;;
+      user_pass)
+        config_file="$script_dir/nats-server-auth-tls.conf"
+        auth_options="--env NATS_TEST_USER --env NATS_TEST_PASS"
+        ;;
+    esac
+    # shellcheck disable=SC2086 # auth_options intentionally expands to option words.
+    docker run --detach --rm $auth_options \
+      --volume "$cert_dir:/etc/nats/certs:ro" \
+      --volume "$config_file:/etc/nats/nats.conf:ro" \
+      --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf -js
+  elif [ "$auth_mode" = token ]; then
+    docker run --detach --rm --publish 127.0.0.1::4222 \
+      "$image" --auth "$auth_token" -js
+  elif [ "$auth_mode" = user_pass ]; then
+    docker run --detach --rm \
+      --env NATS_TEST_USER --env NATS_TEST_PASS \
+      --volume "$script_dir/nats-server-auth.conf:/etc/nats/nats.conf:ro" \
+      --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf -js
+  else
+    docker run --detach --rm --publish 127.0.0.1::4222 "$image" -js
+  fi
+}
+
+if [ "$tls_enabled" -eq 1 ]; then
+  cert_dir=$(mktemp -d "$script_dir/.nats-interop-tls.XXXXXX")
+  openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \
+    -keyout "$cert_dir/ca-key.pem" -out "$cert_dir/ca.pem" \
+    -subj "/CN=ocaml-nats-interop-test-ca" >/dev/null
+  openssl req -newkey rsa:2048 -nodes \
+    -keyout "$cert_dir/server-key.pem" -out "$cert_dir/server.csr" \
+    -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost" \
+    >/dev/null
+  openssl x509 -req -in "$cert_dir/server.csr" \
+    -CA "$cert_dir/ca.pem" -CAkey "$cert_dir/ca-key.pem" \
+    -CAcreateserial -out "$cert_dir/server.pem" -days 1 -sha256 \
+    -copy_extensions copy >/dev/null
+  export NATS_TEST_TLS_CA="$cert_dir/ca.pem"
+else
+  unset NATS_TEST_TLS_CA
+fi
+
+container=$(run_server)
 port=
 attempt=0
 while [ "$attempt" -lt 30 ]; do
@@ -72,7 +166,11 @@ if ! docker logs "$container" 2>&1 | grep -q "Server is ready"; then
   exit 1
 fi
 
-server="nats://127.0.0.1:$port"
+if [ "$tls_enabled" -eq 1 ]; then
+  server="nats://localhost:$port"
+else
+  server="nats://127.0.0.1:$port"
+fi
 NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
   NATS_TEST_INTEROP_STREAM="$stream" \
   nix develop .#integration -c nats-ocaml-interop-peer \

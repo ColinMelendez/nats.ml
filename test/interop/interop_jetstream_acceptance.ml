@@ -26,6 +26,41 @@ let endpoint () =
   | Error error ->
       failf "invalid NATS_TEST_SERVER %S: %a" value Nats.Endpoint.pp_error error
 
+let auth () =
+  match
+    ( Sys.getenv_opt "NATS_TEST_USER",
+      Sys.getenv_opt "NATS_TEST_PASS",
+      Sys.getenv_opt "NATS_TEST_TOKEN" )
+  with
+  | None, None, None -> None
+  | None, None, Some token -> Some (Nats.Auth.token token)
+  | Some user, Some pass, None -> Some (Nats.Auth.user_pass ~user ~pass)
+  | _ ->
+      failf "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
+
+let read_file path = In_channel.with_open_bin path In_channel.input_all
+
+let tls_config () =
+  match Sys.getenv_opt "NATS_TEST_TLS_CA" with
+  | None -> None
+  | Some ca_file ->
+      let ca =
+        match X509.Certificate.decode_pem (read_file ca_file) with
+        | Ok value -> value
+        | Error (`Msg message) ->
+            failf "invalid test CA certificate: %s" message
+      in
+      let authenticator =
+        X509.Authenticator.chain_of_trust
+          ~time:(fun () -> Some (Ptime_clock.now ())) [ ca ]
+      in
+      let peer_name =
+        Domain_name.host_exn (Domain_name.of_string_exn "localhost")
+      in
+      match Tls.Config.client ~authenticator ~peer_name () with
+      | Ok value -> Some value
+      | Error (`Msg message) -> failf "TLS client configuration: %s" message
+
 let next_message ~timeout label subscription =
   match Nats_eio.Subscription.next_with_timeout ~timeout subscription with
   | Ok delivery -> delivery.Nats_eio.Subscription.message
@@ -54,6 +89,7 @@ let expect_publish_ack label ~stream ~duplicate ~sequence ack =
     failf "%s sequence=%Ld, expected %Ld" label actual_sequence sequence
 
 let run env =
+  Mirage_crypto_rng_unix.use_default ();
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.mono_clock env in
@@ -61,9 +97,19 @@ let run env =
   let prefix = required "NATS_TEST_INTEROP_PREFIX" in
   let stream_name = required "NATS_TEST_INTEROP_STREAM" in
   let endpoint = endpoint () in
+  let auth = auth () in
+  let tls = tls_config () in
+  let config =
+    match (auth, tls) with
+    | None, None -> None
+    | _ ->
+        Some
+          (expect_ok "connection config"
+             (Nats_eio.Connection.Config.v ?auth ?tls ()))
+  in
   let connection =
     expect_ok "connect"
-      (Nats_eio.Connection.connect ~sw ~net ~clock [ endpoint ])
+      (Nats_eio.Connection.connect ~sw ~net ~clock ?config [ endpoint ])
   in
   Fun.protect
     ~finally:(fun () -> ignore (Nats_eio.Connection.close connection))

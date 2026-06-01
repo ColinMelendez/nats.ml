@@ -651,9 +651,11 @@ request/reply and subscription primitives.
   creates a unique memory stream and durable pull consumers, while the OCaml
   client binds the consumers and exchanges messages in both directions. The
   exchange checks stream/consumer metadata, explicit acknowledgements, headers,
-  publish acknowledgements, and duplicate message ids on all three pinned
-  server releases. It is anonymous plaintext only; cluster, TLS/authentication,
-  Push, Ordered, and reconnect interop remain separate acceptance work.
+  publish acknowledgements, and duplicate message ids. The dedicated runner
+  covers anonymous, token, username/password, and server-required TLS
+  connections; all six modes have passed on the three pinned server releases.
+  Cluster, Push, Ordered, and reconnect interop remain separate acceptance
+  work.
 - Remaining: real cluster consumer behavior, cross-SDK Push/Ordered and
   reconnect behavior, server-version feature gates, and the broader
   ordered/push reconnect matrix.
