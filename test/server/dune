@@ -29,6 +29,11 @@
  (libraries nats nats-eio eio eio_main))
 
 (executable
+ (name server_jetstream_cluster)
+ (modules server_jetstream_cluster)
+ (libraries nats nats-eio eio eio_main unix))
+
+(executable
  (name server_tls)
  (modules server_tls)
  (libraries nats nats-eio eio eio_main tls x509 domain-name

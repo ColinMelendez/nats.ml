@@ -103,14 +103,24 @@ structured timeout and cleanup errors. Push reconnect restoration is
 implemented through replayable subscription
 recovery, including durable confirmation and ephemeral recreation. Advanced
 cluster failure scenarios and the broader cross-SDK acceptance matrix are
-deliberately deferred to the final acceptance phase; current consumer confidence comes from
-local mock transport and pure-boundary tests. Priority-group pull consumers are
+deliberately deferred to the final acceptance phase; current consumer
+confidence combines local mock transport and pure-boundary tests with the
+passing single-server and bounded cluster acceptance slices. Priority-group
+pull consumers are
 now modeled locally:
 validated single-group policy configuration, per-request thresholds and
 priorities, INFO pin state, explicit unpin, pinned-client request echoing, and
 423 retry behavior are covered by the Eio mock transport. Future multi-group
 consumer support and real priority-group interoperability remain acceptance
 work.
+An additional opt-in `scripts/runtest-jetstream-cluster.sh` harness passes on
+the pinned `nats:2.10.22` image: it forms a full three-node route mesh, creates
+file-backed three-replica stream and durable explicit-ack Push consumer state,
+acknowledges a baseline delivery, kills the seed, verifies reconnect to a
+surviving node and replicated state, then publishes, delivers, acknowledges,
+and cleans up after recovery. Its scope is anonymous connected-node loss;
+leader-targeted failure, additional node loss, server-version/authentication/
+TLS matrices, and cross-SDK cluster behavior remain deferred.
 The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
@@ -662,9 +672,17 @@ request/reply and subscription primitives.
   passes on all three pinned releases; a token/TLS floor smoke cell also
   passes. The full Push connection-mode matrix, flow control, heartbeats,
   cluster, Ordered, and reconnect interop remain separate acceptance work.
-- Remaining: real cluster consumer behavior, cross-SDK Ordered and reconnect
-  behavior, the broader Push connection-mode matrix, server-version feature
-  gates, and the ordered/push reconnect matrix.
+- Completed real-server cluster slice: the dedicated Docker harness forms a
+  full three-node JetStream route mesh, verifies file-backed three-replica
+  stream and durable explicit-ack Push consumer state, survives one seed-node
+  kill with reconnect to a surviving node, and checks post-failover publish,
+  delivery, acknowledgement floors, replicated stream state, and cleanup on
+  the pinned `nats:2.10.22` image. It intentionally does not claim
+  JetStream-leader targeting, multi-node loss, or a version/authentication/TLS
+  matrix.
+- Remaining: additional real cluster failure scenarios, cross-SDK Ordered and
+  reconnect behavior, the broader Push connection-mode matrix, server-version
+  feature gates, and the ordered/push reconnect matrix.
 
 ### Gate G4 — JetStream API stabilization
 

@@ -36,6 +36,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-server.sh
 ./scripts/runtest-reconnect.sh
 ./scripts/runtest-cluster.sh
+./scripts/runtest-jetstream-cluster.sh
 ./scripts/runtest-tls.sh
 ./scripts/runtest-lameduck.sh
 ./scripts/runtest-interop.sh
@@ -60,6 +61,12 @@ The cluster runner starts a three-node route mesh, connects only to the seed,
 checks the advertised client URLs, kills the seed, verifies recovery to a
 discovered peer, then kills that active peer and verifies recovery to the last
 node with subscription replay.
+The JetStream cluster runner starts a separate three-node full route mesh with
+file-backed, three-replica JetStream state, verifies durable Push delivery and
+acknowledgement before killing the seed, then verifies reconnect, replicated
+stream/consumer state, and a second publish/delivery on a surviving node. It
+is an anonymous single-image failover slice; leader-targeted failures, extra
+node loss, and version/authentication/TLS matrices remain separate work.
 The lame-duck runner starts two fresh server containers, signals each live
 server through its container, and checks the dynamic `INFO` flag, typed
 `Lame_duck_mode` event, and continued use of each connection.
@@ -153,9 +160,10 @@ compression, and stream metadata. `Nats_eio.Key_value` provides revisioned
 values, compare-and-set mutations, finite scans, history, and cancellable
 watches. `Nats_eio.Service` provides typed endpoint workers, queue groups,
 `$SRV.*` monitoring and fan-out discovery, request/service-error replies,
-statistics, replayable subscriptions, and service-local draining. Advanced
-cluster failure scenarios and cross-SDK interoperability coverage remain in
-the final acceptance phase.
+statistics, replayable subscriptions, and service-local draining. The
+dedicated JetStream cluster slice is intentionally narrower than a full
+failure matrix; advanced cluster scenarios and cross-SDK interoperability
+coverage remain in the final acceptance phase.
 
 The project uses Dune package management. No compatibility layer for NATS
 Streaming is planned.
