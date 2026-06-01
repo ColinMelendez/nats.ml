@@ -119,6 +119,8 @@ let subject name = Nats.Subject.literal ("ocaml.integration.lifecycle." ^ name)
 let filter name =
   Nats.Subject.Filter.literal ("ocaml.integration.lifecycle." ^ name)
 
+let cycle_name name cycle = name ^ "-" ^ string_of_int cycle
+
 let expect_parent_switch_cleanup ~net ~clock ~endpoint ?config () =
   let stopped, stopped_u = Eio.Promise.create () in
   let switch_failed =
@@ -152,6 +154,114 @@ let expect_parent_switch_cleanup ~net ~clock ~endpoint ?config () =
   if not (Eio.Promise.await stopped) then
     failf "subscription read survived parent switch cleanup"
 
+let run_slow_consumer_cycle ~sw ~net ~clock ~endpoint ~config ~responder ~timeout
+    ~cycle =
+  let slow_client = connect ~sw ~net ~clock ?config endpoint in
+  Fun.protect
+    ~finally:(fun () -> ignore (Nats_eio.Connection.close slow_client))
+    (fun () ->
+      let slow_events = Nats_eio.Connection.events slow_client in
+      let slow_subscription =
+        expect_ok "slow-consumer subscribe"
+          (Nats_eio.Connection.subscribe slow_client
+             (filter (cycle_name "slow" cycle)))
+      in
+      let slow_ready_subscription =
+        expect_ok "slow-consumer readiness subscribe"
+          (Nats_eio.Connection.subscribe slow_client
+             (filter (cycle_name "slow-ready" cycle)))
+      in
+      expect_ok "slow-consumer subscribe flush"
+        (Nats_eio.Connection.flush slow_client);
+      let slow_subject = subject (cycle_name "slow" cycle) in
+      List.iter
+        (fun payload ->
+          expect_ok "slow-consumer publish"
+            (Nats_eio.Connection.publish responder slow_subject payload))
+        [ "first"; "second" ];
+      expect_ok "slow-consumer readiness publish"
+        (Nats_eio.Connection.publish responder
+           (subject (cycle_name "slow-ready" cycle)) "ready");
+      expect_ok "slow-consumer publish flush"
+        (Nats_eio.Connection.flush responder);
+      expect_payload "slow-consumer readiness" "ready"
+        (expect_ok "slow-consumer readiness delivery"
+           (Nats_eio.Subscription.next_with_timeout ~timeout
+              slow_ready_subscription));
+      expect_ok "slow-consumer readiness unsubscribe"
+        (Nats_eio.Subscription.unsubscribe slow_ready_subscription);
+      expect_payload "slow-consumer first" "first"
+        (expect_ok "slow-consumer first delivery"
+           (Nats_eio.Subscription.next_with_timeout ~timeout slow_subscription));
+      let slow_sid = Nats_eio.Subscription.sid slow_subscription in
+      (match
+         Nats_eio.Subscription.next_with_timeout ~timeout slow_subscription
+       with
+      | Error
+          (Nats_eio.Error.Slow_consumer (Nats_eio.Error.Subscription { sid }))
+        when Int.equal sid slow_sid ->
+          ()
+      | Ok delivery ->
+          failf "slow-consumer delivered %S after its queue filled"
+            (Nats.Message.payload delivery.message)
+      | Error error ->
+          failf "slow-consumer subscription: %s" (error_message error));
+      expect_slow_consumer_event ~clock ~timeout ~sid:slow_sid slow_events;
+      print_endline ("slow_consumer_cycle_" ^ string_of_int cycle ^ ": ok"))
+
+let run_drain_cycle ~sw ~net ~clock ~endpoint ~config ~responder ~timeout ~cycle =
+  let client = connect ~sw ~net ~clock ?config endpoint in
+  Fun.protect
+    ~finally:(fun () -> ignore (Nats_eio.Connection.close client))
+    (fun () ->
+      let drain_subscription =
+        expect_ok "subscription drain subscribe"
+          (Nats_eio.Connection.subscribe client
+             (filter (cycle_name "drain" cycle)))
+      in
+      let drain_ready_subscription =
+        expect_ok "subscription drain readiness subscribe"
+          (Nats_eio.Connection.subscribe client
+             (filter (cycle_name "drain-ready" cycle)))
+      in
+      expect_ok "subscription drain flush" (Nats_eio.Connection.flush client);
+      let drain_subject = subject (cycle_name "drain" cycle) in
+      List.iter
+        (fun payload ->
+          expect_ok "subscription drain publish"
+            (Nats_eio.Connection.publish responder drain_subject payload))
+        [ "first"; "second" ];
+      expect_ok "subscription drain readiness publish"
+        (Nats_eio.Connection.publish responder
+           (subject (cycle_name "drain-ready" cycle)) "ready");
+      expect_ok "subscription drain publish flush"
+        (Nats_eio.Connection.flush responder);
+      expect_payload "subscription drain readiness" "ready"
+        (expect_ok "subscription drain readiness delivery"
+           (Nats_eio.Subscription.next_with_timeout ~timeout
+              drain_ready_subscription));
+      expect_ok "subscription drain readiness unsubscribe"
+        (Nats_eio.Subscription.unsubscribe drain_ready_subscription);
+      expect_ok "subscription drain"
+        (Nats_eio.Subscription.drain drain_subscription);
+      expect_payload "subscription drain first" "first"
+        (expect_ok "subscription drain first delivery"
+           (Nats_eio.Subscription.next drain_subscription));
+      expect_payload "subscription drain second" "second"
+        (expect_ok "subscription drain second delivery"
+           (Nats_eio.Subscription.next drain_subscription));
+      expect_closed "subscription drain terminal"
+        (Nats_eio.Subscription.next drain_subscription);
+      print_endline ("subscription_drain_cycle_" ^ string_of_int cycle ^ ": ok");
+      expect_ok "connection drain" (Nats_eio.Connection.drain client);
+      (match Nats_eio.Connection.publish client (subject "closed") "closed" with
+      | Error Nats_eio.Error.Closed -> ()
+      | Error Nats_eio.Error.Draining -> ()
+      | Ok () -> failf "publish succeeded after connection drain"
+      | Error error ->
+          failf "publish after connection drain: %s" (error_message error));
+      print_endline ("connection_drain_cycle_" ^ string_of_int cycle ^ ": ok"))
+
 let run env =
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
@@ -161,11 +271,8 @@ let run env =
   let timeout = Mtime.Span.(2 * s) in
   let client = connect ~sw ~net ~clock ?config endpoint in
   let responder = connect ~sw ~net ~clock ?config endpoint in
-  let slow_config = connection_config ~subscription_capacity:1 () in
-  let slow_client = connect ~sw ~net ~clock ?config:slow_config endpoint in
   Fun.protect
     ~finally:(fun () ->
-      ignore (Nats_eio.Connection.close slow_client);
       ignore (Nats_eio.Connection.close responder);
       ignore (Nats_eio.Connection.close client))
     (fun () ->
@@ -281,96 +388,16 @@ let run env =
            ~timeout:Mtime.Span.(500 * ms)
            auto_subscription);
       print_endline "auto_unsubscribe: ok";
-      let slow_events = Nats_eio.Connection.events slow_client in
-      let slow_subscription =
-        expect_ok "slow-consumer subscribe"
-          (Nats_eio.Connection.subscribe slow_client (filter "slow"))
-      in
-      let slow_ready_subscription =
-        expect_ok "slow-consumer readiness subscribe"
-          (Nats_eio.Connection.subscribe slow_client (filter "slow-ready"))
-      in
-      expect_ok "slow-consumer subscribe flush"
-        (Nats_eio.Connection.flush slow_client);
-      let slow_subject = subject "slow" in
-      List.iter
-        (fun payload ->
-          expect_ok "slow-consumer publish"
-            (Nats_eio.Connection.publish responder slow_subject payload))
-        [ "first"; "second" ];
-      expect_ok "slow-consumer readiness publish"
-        (Nats_eio.Connection.publish responder (subject "slow-ready") "ready");
-      expect_ok "slow-consumer publish flush"
-        (Nats_eio.Connection.flush responder);
-      expect_payload "slow-consumer readiness" "ready"
-        (expect_ok "slow-consumer readiness delivery"
-           (Nats_eio.Subscription.next_with_timeout ~timeout
-              slow_ready_subscription));
-      expect_ok "slow-consumer readiness unsubscribe"
-        (Nats_eio.Subscription.unsubscribe slow_ready_subscription);
-      expect_payload "slow-consumer first" "first"
-        (expect_ok "slow-consumer first delivery"
-           (Nats_eio.Subscription.next_with_timeout ~timeout slow_subscription));
-      let slow_sid = Nats_eio.Subscription.sid slow_subscription in
-      (match
-         Nats_eio.Subscription.next_with_timeout ~timeout slow_subscription
-       with
-      | Error
-          (Nats_eio.Error.Slow_consumer (Nats_eio.Error.Subscription { sid }))
-        when Int.equal sid slow_sid ->
-          ()
-      | Ok delivery ->
-          failf "slow-consumer delivered %S after its queue filled"
-            (Nats.Message.payload delivery.message)
-      | Error error ->
-          failf "slow-consumer subscription: %s" (error_message error));
-      expect_slow_consumer_event ~clock ~timeout ~sid:slow_sid slow_events;
-      expect_ok "slow-consumer close" (Nats_eio.Connection.close slow_client);
-      print_endline "slow_consumer: ok";
-      let drain_subscription =
-        expect_ok "subscription drain subscribe"
-          (Nats_eio.Connection.subscribe client (filter "drain"))
-      in
-      let drain_ready_subscription =
-        expect_ok "subscription drain readiness subscribe"
-          (Nats_eio.Connection.subscribe client (filter "drain-ready"))
-      in
-      expect_ok "subscription drain flush" (Nats_eio.Connection.flush client);
-      let drain_subject = subject "drain" in
-      List.iter
-        (fun payload ->
-          expect_ok "subscription drain publish"
-            (Nats_eio.Connection.publish responder drain_subject payload))
-        [ "first"; "second" ];
-      expect_ok "subscription drain readiness publish"
-        (Nats_eio.Connection.publish responder (subject "drain-ready") "ready");
-      expect_ok "subscription drain publish flush"
-        (Nats_eio.Connection.flush responder);
-      expect_payload "subscription drain readiness" "ready"
-        (expect_ok "subscription drain readiness delivery"
-           (Nats_eio.Subscription.next_with_timeout ~timeout
-              drain_ready_subscription));
-      expect_ok "subscription drain readiness unsubscribe"
-        (Nats_eio.Subscription.unsubscribe drain_ready_subscription);
-      expect_ok "subscription drain"
-        (Nats_eio.Subscription.drain drain_subscription);
-      expect_payload "subscription drain first" "first"
-        (expect_ok "subscription drain first delivery"
-           (Nats_eio.Subscription.next drain_subscription));
-      expect_payload "subscription drain second" "second"
-        (expect_ok "subscription drain second delivery"
-           (Nats_eio.Subscription.next drain_subscription));
-      expect_closed "subscription drain terminal"
-        (Nats_eio.Subscription.next drain_subscription);
-      print_endline "subscription_drain: ok";
-      expect_ok "connection drain" (Nats_eio.Connection.drain client);
-      (match Nats_eio.Connection.publish client (subject "closed") "closed" with
-      | Error Nats_eio.Error.Closed -> ()
-      | Error Nats_eio.Error.Draining -> ()
-      | Ok () -> failf "publish succeeded after connection drain"
-      | Error error ->
-          failf "publish after connection drain: %s" (error_message error));
-      print_endline "connection_drain: ok";
+      let slow_config = connection_config ~subscription_capacity:1 () in
+      for cycle = 1 to 2 do
+        run_slow_consumer_cycle ~sw ~net ~clock ~endpoint ~config:slow_config
+          ~responder ~timeout ~cycle
+      done;
+      let drain_config = config in
+      for cycle = 1 to 2 do
+        run_drain_cycle ~sw ~net ~clock ~endpoint ~config:drain_config
+          ~responder ~timeout ~cycle
+      done;
       expect_parent_switch_cleanup ~net ~clock ~endpoint ?config ();
       print_endline "parent_switch_cleanup: ok")
 

@@ -83,6 +83,9 @@ variables apply only to its `server` scenario; cluster and lame-duck cases
 deliberately clear them and remain anonymous. This is a version sweep of the
 existing live-server contracts, not a claim of full NATS conformance or
 repeated failure injection.
+Within each `server` case, lifecycle acceptance runs two fresh slow-consumer
+cycles and two fresh subscription/connection drain cycles before the final
+parent-switch check.
 The JetStream test uses a per-run stream name; set
 `NATS_TEST_JETSTREAM_RUN_ID` only when a stable, safe identifier is useful for
 debugging. The interoperability runner starts the same pinned server image,
