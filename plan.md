@@ -400,7 +400,7 @@ headers, queue groups, request/reply, no-responders, flush, close, optional
 token or username/password authentication, server-required TLS, two-server
 subscription recovery and pending-request disconnect failure, request
 timeout/cancellation cleanup, auto-unsubscribe, repeated slow-consumer and
-drain handling, parent-switch cleanup, lame-duck handling,
+drain handling, parent-switch cleanup, repeated lame-duck handling,
 and repeated three-node cluster discovery/failover. These private executables
 are not part of the
 default Dune test alias. The
@@ -412,18 +412,18 @@ lame-duck harnesses across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`.
 It is a bounded nine-cell version sweep of the existing live-server contracts;
 authentication and JetStream variables apply only to the server lifecycle
 cell, while cluster and lame-duck cells intentionally remain anonymous. It
-does not replace the pending repeated failure-injection work. The anonymous
+does not replace broader failure-injection work. The anonymous
 nine-cell sweep passed, and the server lifecycle cells also passed with token
 and username/password authentication on all three images. Enabling
 `NATS_TEST_JETSTREAM=1` completed the same nine-cell matrix; JetStream stream
 and consumer acceptance ran only in the three server lifecycle cells, which
 also passed with both authentication modes on all three images. Cluster and
-lame-duck remained anonymous Core-only. The lifecycle executable now performs
-two fresh slow-consumer cycles and two fresh subscription/connection drain
-cycles per server cell; those repeats pass on all three images, under both
-authentication modes. The anonymous repeats also pass with JetStream enabled.
-Repeated lame-duck remains separate because its server signal is one-shot per
-process and requires fresh-container cycling.
+lame-duck remained anonymous Core-only. Each lame-duck cell now performs two
+fresh-container cycles; those repeats pass on all three images. The lifecycle
+executable now performs two fresh slow-consumer cycles and two fresh
+subscription/connection drain cycles per server cell; those repeats pass on all
+three images, under both authentication modes. The anonymous repeats also pass
+with JetStream enabled.
 
 - Core publish/subscribe, queue-group load balancing, headers, and replies.
 - Request success, timeout, no responders, cancellation, and a pending-request
@@ -513,10 +513,11 @@ Completed authentication matrix: those three CONNECT authentication modes have
 each been exercised across all twelve image/scenario cells, for 36 cross-SDK
 acceptance combinations. Server authentication here is orthogonal to TLS
 transport policy.
-The bounded version/scenario matrix is now in place. Pending G3 work is the
-remaining Core acceptance breadth: repeated lame-duck failure cases. JetStream,
-Key-Value, Object Store, and Services interoperability remain later
-product-surface acceptance work rather than requirements of this Core gate.
+The bounded version/scenario matrix and repeated failure cases for the
+documented Core contracts are now in place. Broader failure-injection campaigns
+and JetStream, Key-Value, Object Store, and Services interoperability remain
+later product-surface acceptance work rather than requirements of this Core
+gate.
 
 ### Gate G3 — Core completeness
 

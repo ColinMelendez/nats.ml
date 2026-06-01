@@ -58,9 +58,9 @@ The cluster runner starts a three-node route mesh, connects only to the seed,
 checks the advertised client URLs, kills the seed, verifies recovery to a
 discovered peer, then kills that active peer and verifies recovery to the last
 node with subscription replay.
-The lame-duck runner signals a live server through the container and checks the
-dynamic `INFO` flag, typed `Lame_duck_mode` event, and continued use of the
-existing connection.
+The lame-duck runner starts two fresh server containers, signals each live
+server through its container, and checks the dynamic `INFO` flag, typed
+`Lame_duck_mode` event, and continued use of each connection.
 The TLS runner generates an ephemeral CA and hostname-checked server
 certificate, then verifies a real TLS connection. To exercise token
 authentication, set `NATS_TEST_TOKEN`; to exercise username/password
@@ -81,11 +81,11 @@ default); set `NATS_SERVER_IMAGES` or `NATS_SERVER_MATRIX_SCENARIOS` to select
 another bounded version sweep. Token, username/password, and JetStream
 variables apply only to its `server` scenario; cluster and lame-duck cases
 deliberately clear them and remain anonymous. This is a version sweep of the
-existing live-server contracts, not a claim of full NATS conformance or
-repeated failure injection.
+existing live-server contracts, not a claim of full NATS conformance or broad
+failure injection.
 Within each `server` case, lifecycle acceptance runs two fresh slow-consumer
 cycles and two fresh subscription/connection drain cycles before the final
-parent-switch check.
+parent-switch check. Each lame-duck case also runs two fresh-container cycles.
 The JetStream test uses a per-run stream name; set
 `NATS_TEST_JETSTREAM_RUN_ID` only when a stable, safe identifier is useful for
 debugging. The interoperability runner starts the same pinned server image,
@@ -102,9 +102,9 @@ sequentially; set `NATS_SERVER_IMAGES` to a comma-separated image list or
 `reconnect`, `tls-core`, and `tls-reconnect`. The matrix defaults to anonymous
 authentication; set the token or username/password variables described above
 to repeat the selected matrix with that authentication mode. It does not
-claim full server conformance: repeated cluster, lame-duck, drain, and
-slow-consumer failure matrices, plus JetStream/KV/Object Store/Services
-interoperability, remain separate acceptance work. The cross-SDK reconnect runner
+claim full server conformance: broader failure-injection matrices, plus
+JetStream/KV/Object Store/Services interoperability, remain separate acceptance
+work. The cross-SDK reconnect runner
 starts three independent NATS servers, kills the first and then the second
 after flushed exchanges, and checks that the Go and OCaml clients recover twice,
 replay their subscriptions, and exchange messages after each failover. It
