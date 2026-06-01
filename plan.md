@@ -407,6 +407,15 @@ default Dune test alias. The
 following matrix tracks the acceptance surface; the remaining scenarios
 require additional server configuration or failure-injection control.
 
+The server matrix runner repeats the server lifecycle, cluster discovery, and
+lame-duck harnesses across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`.
+It is a bounded nine-cell version sweep of the existing live-server contracts;
+authentication and JetStream variables apply only to the server lifecycle
+cell, while cluster and lame-duck cells intentionally remain anonymous. It
+does not replace the pending repeated failure-injection work. The anonymous
+nine-cell sweep passed, and the server lifecycle cells also passed with token
+and username/password authentication on all three images.
+
 - Core publish/subscribe, queue-group load balancing, headers, and replies.
 - Request success, timeout, no responders, cancellation, and a pending-request
   disconnect race are live-server covered; broader failure injection remains.

@@ -41,6 +41,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-interop.sh
 NATS_TEST_TLS=1 ./scripts/runtest-interop.sh
 ./scripts/runtest-interop-matrix.sh
+./scripts/runtest-server-matrix.sh
 ./scripts/runtest-interop-reconnect.sh
 NATS_TEST_TLS=1 ./scripts/runtest-interop-reconnect.sh
 ```
@@ -73,6 +74,14 @@ exercises stream management, publish acknowledgements, duplicate message ids,
 and cleanup. The server runner also checks request timeout/cancellation
 cleanup, auto-unsubscribe limits, bounded subscription slow-consumer behavior,
 subscription drain, connection drain, and parent-switch cleanup.
+The server matrix runner repeats the server, cluster, and lame-duck runners for
+`nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` (nine sequential cases by
+default); set `NATS_SERVER_IMAGES` or `NATS_SERVER_MATRIX_SCENARIOS` to select
+another bounded version sweep. Token, username/password, and JetStream
+variables apply only to its `server` scenario; cluster and lame-duck cases
+deliberately clear them and remain anonymous. This is a version sweep of the
+existing live-server contracts, not a claim of full NATS conformance or
+repeated failure injection.
 The JetStream test uses a per-run stream name; set
 `NATS_TEST_JETSTREAM_RUN_ID` only when a stable, safe identifier is useful for
 debugging. The interoperability runner starts the same pinned server image,
