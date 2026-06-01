@@ -485,14 +485,17 @@ token, username/password, and `nats:2.14.3` modes have been exercised.
 Completed TLS/reconnect slice: setting `NATS_TEST_TLS=1` makes the same runner
 generate a short-lived CA and hostname-checked certificate, configures all
 three independent servers for TLS, and supplies the CA to both SDKs. Anonymous,
-token, and username/password modes have been exercised on `nats:2.10.22`, with
-anonymous coverage also exercised on `nats:2.14.3`.
+token, and username/password authentication have been exercised on that TLS
+reconnect scenario for all three matrix images.
+Completed authentication matrix: those three CONNECT authentication modes have
+each been exercised across all nine image/scenario cells, for 27 cross-SDK
+acceptance combinations. Server authentication here is orthogonal to TLS
+transport policy.
 The bounded version/scenario matrix is now in place. Pending G3 work is the
-remaining Core acceptance breadth: authentication permutations across the
-matrix, Core TLS without failover, and repeated cluster, lame-duck, drain, and
-slow-consumer failure cases. JetStream, Key-Value, Object Store, and Services
-interoperability remain later product-surface acceptance work rather than
-requirements of this Core gate.
+remaining Core acceptance breadth: Core TLS without failover, and repeated
+cluster, lame-duck, drain, and slow-consumer failure cases. JetStream,
+Key-Value, Object Store, and Services interoperability remain later
+product-surface acceptance work rather than requirements of this Core gate.
 
 ### Gate G3 — Core completeness
 
