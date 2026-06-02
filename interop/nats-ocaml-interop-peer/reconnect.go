@@ -254,6 +254,14 @@ func runMode(config options) error {
 			return fmt.Errorf("stream is required in jetstream-push-reconnect mode")
 		}
 		return runJetStreamPushReconnectPeer(config)
+	case "jetstream-ordered-reconnect":
+		if config.signal == "" {
+			return fmt.Errorf("signal-file is required in jetstream-ordered-reconnect mode")
+		}
+		if config.stream == "" {
+			return fmt.Errorf("stream is required in jetstream-ordered-reconnect mode")
+		}
+		return runJetStreamOrderedReconnectPeer(config)
 	default:
 		return fmt.Errorf("unknown mode %q", config.mode)
 	}
