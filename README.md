@@ -44,6 +44,8 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-interop-jetstream-matrix.sh
 ./scripts/runtest-interop-jetstream-reconnect.sh
 NATS_TEST_INTEROP_JETSTREAM_MODE=push ./scripts/runtest-interop-jetstream.sh
+NATS_TEST_INTEROP_JETSTREAM_MODE=ordered ./scripts/runtest-interop-jetstream.sh
+NATS_INTEROP_JETSTREAM_MATRIX_SCENARIOS=ordered ./scripts/runtest-interop-jetstream-matrix.sh
 NATS_TEST_TLS=1 ./scripts/runtest-interop.sh
 ./scripts/runtest-interop-matrix.sh
 ./scripts/runtest-server-matrix.sh
@@ -117,8 +119,11 @@ pull and Push in anonymous plaintext/TLS modes across the three pinned
 releases; set `NATS_INTEROP_JETSTREAM_MATRIX_MODES` to a comma-separated
 subset of `anonymous`, `anonymous-tls`, `token`, `token-tls`, `user-pass`, and
 `user-pass-tls` for a broader sweep. The full six-mode sweep has passed for
-both pull and Push on each pinned release. Cluster and Ordered interop remain
-separate work for the matrix runner. The optional `NATS_TEST_TOKEN` or paired
+both pull and Push on each pinned release. Ordered is an opt-in matrix scenario:
+set `NATS_INTEROP_JETSTREAM_MATRIX_SCENARIOS=ordered` (or include `ordered` in
+the comma-separated scenario list). Its full six-mode sweep also passes on all
+three pinned releases. Cluster interop and Ordered reconnect remain separate
+work for the matrix runner. The optional `NATS_TEST_TOKEN` or paired
 `NATS_TEST_USER`/`NATS_TEST_PASS` values only replace the built-in credentials
 for their selected modes; they do not select modes. Set
 `NATS_TEST_INTEROP_JETSTREAM_MODE=push` to run the separate durable Push slice:
@@ -126,6 +131,12 @@ the Go and OCaml clients bind opposite durable push consumers, exchange one
 message each way, and synchronously acknowledge the deliveries. Anonymous
 plaintext and TLS Push pass on all three pinned releases; token and
 username/password plaintext and TLS Push also pass on all three releases.
+Set `NATS_TEST_INTEROP_JETSTREAM_MODE=ordered` to run the cross-SDK Ordered
+slice: two independent Ordered sessions consume a filtered stream with
+interleaved non-matching messages, verify AckNone configuration and exact
+stream/consumer sequences, and coordinate cleanup. The anonymous, token, and
+username/password plaintext/TLS Ordered modes pass on all three pinned
+releases.
 The separate JetStream reconnect runner uses a file-backed stream and durable
 Push consumers on one persistent server container, kills and restarts that
 container, and verifies both the OCaml and Go Push legs recover and exchange

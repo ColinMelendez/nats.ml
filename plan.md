@@ -441,6 +441,10 @@ The dedicated JetStream interop matrix runner now defaults to pull and Push
 anonymous plaintext/TLS cells across the three pinned releases. Its explicit
 six-mode sweep—anonymous, token, and username/password, each plaintext and
 server-required TLS—passes for both pull and Push on all three releases.
+Ordered is an opt-in matrix scenario; its six-mode sweep also passes on all
+three pinned releases, checking two independent filtered sessions, interleaved
+stream gaps, AckNone/memory-backed consumer configuration, exact stream and
+consumer sequences, and coordinated cleanup.
 The separate JetStream Push reconnect runner uses a file-backed stream and
 durable consumers on one persistent server container, restarts that container,
 and checks both the Go and OCaml Push legs after reconnect. Anonymous
@@ -682,7 +686,14 @@ request/reply and subscription primitives.
   defaults to anonymous plaintext/TLS pull and Push cells across all three
   pinned releases; its explicit token and username/password plaintext/TLS
   sweep also passes for Push on all three.
-  Flow control, heartbeats, cluster, and Ordered interop remain
+- Completed cross-SDK Ordered slice: the official Go `nats.go` peer and OCaml
+  client each create independent ephemeral Ordered sessions over a shared
+  memory stream. Interleaved matching and non-matching publications verify
+  filtered stream-sequence gaps, consecutive consumer sequences, exact
+  delivery metadata and headers, AckNone/memory-backed consumer configuration,
+  publish acknowledgements, and coordinated unsubscribe/deletion cleanup. The
+  dedicated matrix scenario passes in anonymous, token, and username/password
+  plaintext/TLS modes on all three pinned releases. Ordered reconnect remains
   separate acceptance work.
 - Completed cross-SDK Push reconnect floor: a dedicated runner keeps the same
   Go and OCaml durable Push sessions across a persistent file-backed
@@ -699,9 +710,9 @@ request/reply and subscription primitives.
   the pinned `nats:2.10.22` image. It intentionally does not claim
   JetStream-leader targeting, multi-node loss, or a version/authentication/TLS
   matrix.
-- Remaining: additional real cluster failure scenarios, cross-SDK Ordered
-  behavior, authenticated/TLS and cluster reconnect matrices, server-version
-  feature gates, and Ordered reconnect.
+- Remaining: additional real cluster failure scenarios, authenticated/TLS and
+  cluster reconnect matrices, server-version feature gates, and Ordered
+  reconnect.
 
 ### Gate G4 — JetStream API stabilization
 
