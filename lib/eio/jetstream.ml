@@ -4895,6 +4895,7 @@ module Consumer = struct
     let default_idle_heartbeat = Mtime.Span.(5 * s)
     let inactive_threshold = Mtime.Span.(5 * min)
     let cleanup_timeout = Mtime.Span.(1 * s)
+    let recreate_attempt_timeout = Mtime.Span.(5 * s)
     let timeout_error = Error.Connection Core_error.Timeout
 
     let fail ordered error =
@@ -4950,6 +4951,17 @@ module Consumer = struct
           | Ok () -> Ok ()
           | Error error -> Error (Error.Connection error))
 
+    let generation_timeout ordered ~deadline =
+      match remaining_timeout ordered deadline with
+      | Error error -> Error error
+      | Ok None -> Ok None
+      | Ok (Some timeout) ->
+          Ok
+            (Some
+               (if Mtime.Span.compare timeout recreate_attempt_timeout < 0 then
+                  timeout
+                else recreate_attempt_timeout))
+
     let next_stream_sequence sequence =
       if Int64.equal sequence Int64.max_int then Int64.max_int
       else Int64.add sequence 1L
@@ -4977,7 +4989,7 @@ module Consumer = struct
           match consumer_config ordered with
           | Error error -> Error error
           | Ok config -> (
-              match remaining_timeout ordered deadline with
+              match generation_timeout ordered ~deadline with
               | Error error -> Error error
               | Ok timeout -> (
                   match create ?timeout ordered.stream config with
