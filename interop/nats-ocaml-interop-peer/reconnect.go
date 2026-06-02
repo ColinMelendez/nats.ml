@@ -241,6 +241,11 @@ func runMode(config options) error {
 			return fmt.Errorf("stream is required in jetstream-push mode")
 		}
 		return runJetStreamPushPeer(config)
+	case "jetstream-ordered":
+		if config.stream == "" {
+			return fmt.Errorf("stream is required in jetstream-ordered mode")
+		}
+		return runJetStreamOrderedPeer(config)
 	case "jetstream-push-reconnect":
 		if config.signal == "" {
 			return fmt.Errorf("signal-file is required in jetstream-push-reconnect mode")

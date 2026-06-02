@@ -30,8 +30,9 @@ stream="OCAML_INTEROP_JS_$$"
 case "$jetstream_mode" in
   pull) peer_mode=jetstream ;;
   push) peer_mode=jetstream-push ;;
+  ordered) peer_mode=jetstream-ordered ;;
   *)
-    echo "NATS_TEST_INTEROP_JETSTREAM_MODE must be pull or push" >&2
+    echo "NATS_TEST_INTEROP_JETSTREAM_MODE must be pull, push, or ordered" >&2
     exit 1
     ;;
 esac
@@ -210,6 +211,7 @@ status=0
 case "$jetstream_mode" in
   pull) acceptance_executable=test/interop/interop_jetstream_acceptance.exe ;;
   push) acceptance_executable=test/interop/interop_jetstream_push_acceptance.exe ;;
+  ordered) acceptance_executable=test/interop/interop_jetstream_ordered_acceptance.exe ;;
 esac
 if NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" nix develop .#integration -c dune exec \
