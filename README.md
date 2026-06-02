@@ -42,6 +42,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-interop.sh
 ./scripts/runtest-interop-jetstream.sh
 ./scripts/runtest-interop-jetstream-matrix.sh
+./scripts/runtest-interop-jetstream-reconnect.sh
 NATS_TEST_INTEROP_JETSTREAM_MODE=push ./scripts/runtest-interop-jetstream.sh
 NATS_TEST_TLS=1 ./scripts/runtest-interop.sh
 ./scripts/runtest-interop-matrix.sh
@@ -116,8 +117,8 @@ pull and Push in anonymous plaintext/TLS modes across the three pinned
 releases; set `NATS_INTEROP_JETSTREAM_MATRIX_MODES` to a comma-separated
 subset of `anonymous`, `anonymous-tls`, `token`, `token-tls`, `user-pass`, and
 `user-pass-tls` for a broader sweep. The full six-mode sweep has passed for
-both pull and Push on each pinned release. Cluster, Ordered, and reconnect
-interop remain separate work. The optional `NATS_TEST_TOKEN` or paired
+both pull and Push on each pinned release. Cluster and Ordered interop remain
+separate work for the matrix runner. The optional `NATS_TEST_TOKEN` or paired
 `NATS_TEST_USER`/`NATS_TEST_PASS` values only replace the built-in credentials
 for their selected modes; they do not select modes. Set
 `NATS_TEST_INTEROP_JETSTREAM_MODE=push` to run the separate durable Push slice:
@@ -125,6 +126,12 @@ the Go and OCaml clients bind opposite durable push consumers, exchange one
 message each way, and synchronously acknowledge the deliveries. Anonymous
 plaintext and TLS Push pass on all three pinned releases; token and
 username/password plaintext and TLS Push also pass on all three releases.
+The separate JetStream reconnect runner uses a file-backed stream and durable
+Push consumers on one persistent server container, kills and restarts that
+container, and verifies both the OCaml and Go Push legs recover and exchange
+new messages without recreating their sessions. Anonymous plaintext passes on
+all three pinned releases; the runner currently rejects authentication and TLS
+variables, and cluster/Ordered reconnect remain separate work.
 The Core interop matrix runner (`./scripts/runtest-interop-matrix.sh`) is a
 bounded Core gate: by
 default it spans the established `nats:2.10.22` floor, `nats:2.12.15`, and the

@@ -54,6 +54,10 @@ func roundSignal(signal string, round int) string {
 }
 
 func awaitRecoveryBarrier(connection *nats.Conn, prefix string, cycle int) error {
+	return awaitRecoveryBarrierWithTimeout(connection, prefix, cycle, waitTimeout)
+}
+
+func awaitRecoveryBarrierWithTimeout(connection *nats.Conn, prefix string, cycle int, timeout time.Duration) error {
 	readySubject := fmt.Sprintf("%s.reconnect-ready.%d", prefix, cycle)
 	expected := fmt.Sprintf("ocaml-ready-%d", cycle)
 	responsePayload := []byte(fmt.Sprintf("go-ready-%d", cycle))
@@ -96,7 +100,7 @@ func awaitRecoveryBarrier(connection *nats.Conn, prefix string, cycle int) error
 	if err := connection.Flush(); err != nil {
 		return fmt.Errorf("flush recovery barrier %d: %w", cycle, err)
 	}
-	timer := time.NewTimer(waitTimeout)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-ready:
@@ -237,6 +241,14 @@ func runMode(config options) error {
 			return fmt.Errorf("stream is required in jetstream-push mode")
 		}
 		return runJetStreamPushPeer(config)
+	case "jetstream-push-reconnect":
+		if config.signal == "" {
+			return fmt.Errorf("signal-file is required in jetstream-push-reconnect mode")
+		}
+		if config.stream == "" {
+			return fmt.Errorf("stream is required in jetstream-push-reconnect mode")
+		}
+		return runJetStreamPushReconnectPeer(config)
 	default:
 		return fmt.Errorf("unknown mode %q", config.mode)
 	}
