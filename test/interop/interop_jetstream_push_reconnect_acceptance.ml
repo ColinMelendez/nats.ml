@@ -36,7 +36,8 @@ let auth () =
   | None, None, Some token -> Some (Nats.Auth.token token)
   | Some user, Some pass, None -> Some (Nats.Auth.user_pass ~user ~pass)
   | _ ->
-      failf "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
+      failf
+        "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
 
 let transient_jetstream_api { Nats_eio.Jetstream.Error.code; _ } =
   Int.equal code 408 || Int.equal code 500 || Int.equal code 502
@@ -45,12 +46,13 @@ let transient_jetstream_api { Nats_eio.Jetstream.Error.code; _ } =
 let transient_jetstream_error = function
   | Nats_eio.Jetstream.Error.Api api -> transient_jetstream_api api
   | Nats_eio.Jetstream.Error.Connection
-      ( Nats_eio.Error.Timeout
-      | Nats_eio.Error.No_responders
-      | Nats_eio.Error.Disconnected ) -> true
+      ( Nats_eio.Error.Timeout | Nats_eio.Error.No_responders
+      | Nats_eio.Error.Disconnected ) ->
+      true
   | _ -> false
 
-let retry_jetstream ~clock ~connection ~deadline ~failure_file ~label operation =
+let retry_jetstream ~clock ~connection ~deadline ~failure_file ~label operation
+    =
   let last_error = ref None in
   let result = ref None in
   while Option.is_none !result do
@@ -61,8 +63,8 @@ let retry_jetstream ~clock ~connection ~deadline ~failure_file ~label operation 
       | Ok value -> result := Some (Ok value)
       | Error error when transient_jetstream_error error ->
           last_error := Some error;
-          if Mtime.compare (Nats_eio.Connection.now connection) deadline >= 0 then
-            result := Some (Error error)
+          if Mtime.compare (Nats_eio.Connection.now connection) deadline >= 0
+          then result := Some (Error error)
           else Eio.Time.Mono.sleep clock 0.2
       | Error error -> result := Some (Error error)
   done;
@@ -169,14 +171,17 @@ let expect_push_consumer_config label info ~name ~delivery ~filter =
       ()
   | Some subject ->
       failf "%s delivered to %S, expected %S" label
-        (Nats.Subject.to_string subject) delivery
+        (Nats.Subject.to_string subject)
+        delivery
   | None -> failf "%s had no delivery subject" label);
   (match Nats_eio.Jetstream.Consumer.Config.filter_subject config with
-  | Some subject when String.equal (Nats.Subject.Filter.to_string subject) filter
-    -> ()
+  | Some subject
+    when String.equal (Nats.Subject.Filter.to_string subject) filter ->
+      ()
   | Some subject ->
       failf "%s filtered %S, expected %S" label
-        (Nats.Subject.Filter.to_string subject) filter
+        (Nats.Subject.Filter.to_string subject)
+        filter
   | None -> failf "%s had no filter subject" label);
   match Nats_eio.Jetstream.Consumer.Config.ack_policy config with
   | Nats_eio.Jetstream.Consumer.Config.Explicit -> ()
@@ -206,8 +211,10 @@ let expect_stream_state label info ~messages ~last_sequence =
   | Nats_eio.Jetstream.Stream.Config.Memory ->
       failf "%s was not file-backed" label);
   if not (Int64.equal (Nats_eio.Jetstream.Stream.Info.messages info) messages)
-  then failf "%s messages=%Ld, expected %Ld" label
-      (Nats_eio.Jetstream.Stream.Info.messages info) messages;
+  then
+    failf "%s messages=%Ld, expected %Ld" label
+      (Nats_eio.Jetstream.Stream.Info.messages info)
+      messages;
   if
     not
       (Int64.equal
@@ -215,15 +222,18 @@ let expect_stream_state label info ~messages ~last_sequence =
          last_sequence)
   then
     failf "%s last sequence=%Ld, expected %Ld" label
-      (Nats_eio.Jetstream.Stream.Info.last_sequence info) last_sequence
+      (Nats_eio.Jetstream.Stream.Info.last_sequence info)
+      last_sequence
 
 let expect_push_delivery label ~stream ~consumer ~payload ~interop ~trace
     ~stream_sequence ~consumer_sequence message =
   expect_payload label payload (Nats_eio.Jetstream.Msg.message message);
   expect_header (label ^ " X-Interop") interop
-    (Nats_eio.Jetstream.Msg.headers message) "X-Interop";
+    (Nats_eio.Jetstream.Msg.headers message)
+    "X-Interop";
   expect_header (label ^ " X-Trace") trace
-    (Nats_eio.Jetstream.Msg.headers message) "X-Trace";
+    (Nats_eio.Jetstream.Msg.headers message)
+    "X-Trace";
   if not (String.equal (Nats_eio.Jetstream.Msg.stream message) stream) then
     failf "%s named the wrong stream" label;
   if not (String.equal (Nats_eio.Jetstream.Msg.consumer message) consumer) then
@@ -263,7 +273,7 @@ let await_go_ready ~clock ~timeout ~failure_file connection prefix =
     else
       let now = Nats_eio.Connection.now connection in
       if Mtime.compare now deadline >= 0 then
-      failf "timed out waiting for Go JetStream reconnect barrier"
+        failf "timed out waiting for Go JetStream reconnect barrier"
       else
         let remaining = Mtime.span now deadline in
         let request_timeout =
@@ -271,14 +281,15 @@ let await_go_ready ~clock ~timeout ~failure_file connection prefix =
           else attempt_timeout
         in
         match
-          Nats_eio.Connection.request ~timeout:request_timeout connection subject
-            request_payload
+          Nats_eio.Connection.request ~timeout:request_timeout connection
+            subject request_payload
         with
         | Ok response ->
             expect_payload "Go JetStream reconnect barrier" response_payload
               response;
             ready := true
-        | Error Nats_eio.Error.Timeout | Error Nats_eio.Error.No_responders
+        | Error Nats_eio.Error.Timeout
+        | Error Nats_eio.Error.No_responders
         | Error Nats_eio.Error.Disconnected ->
             Eio.Time.Mono.sleep clock 0.01
         | Error error ->
@@ -304,7 +315,8 @@ let run env =
     expect_ok "connection config"
       (Nats_eio.Connection.Config.v ?auth ~max_reconnect_attempts:None
          ~reconnect_delay:Mtime.Span.(500 * ms)
-         ~reconnect_max_delay:Mtime.Span.(2 * s) ())
+         ~reconnect_max_delay:Mtime.Span.(2 * s)
+         ())
   in
   let connection =
     expect_ok "connect"
@@ -340,7 +352,8 @@ let run env =
           (Nats_eio.Jetstream.Consumer.info ocaml_consumer)
       in
       expect_push_consumer_config "initial OCaml push consumer" ocaml_info
-        ~name:"OCAML_PUSH" ~delivery:(prefix ^ ".deliver.ocaml")
+        ~name:"OCAML_PUSH"
+        ~delivery:(prefix ^ ".deliver.ocaml")
         ~filter:(prefix ^ ".go");
       let go_info =
         expect_jetstream_ok "initial Go push consumer info"
@@ -377,7 +390,8 @@ let run env =
           let start_response =
             expect_ok "start Go push reconnect peer"
               (Nats_eio.Connection.request ~timeout connection
-                 (Nats.Subject.literal (prefix ^ ".start")) "start")
+                 (Nats.Subject.literal (prefix ^ ".start"))
+                 "start")
           in
           expect_payload "start response" "started" start_response;
           let before_go =
@@ -402,8 +416,10 @@ let run env =
           let headers =
             match
               Nats.Header.of_list
-                [ ("X-Interop", "ocaml-jetstream-push-reconnect");
-                  ("X-Trace", "ocaml-before") ]
+                [
+                  ("X-Interop", "ocaml-jetstream-push-reconnect");
+                  ("X-Trace", "ocaml-before");
+                ]
             with
             | Ok headers -> headers
             | Error error ->
@@ -411,8 +427,8 @@ let run env =
           in
           let before_ocaml =
             expect_jetstream_ok "publish baseline OCaml message"
-              (Nats_eio.Jetstream.publish ~timeout ~headers jetstream ocaml_subject
-                 "before-ocaml")
+              (Nats_eio.Jetstream.publish ~timeout ~headers jetstream
+                 ocaml_subject "before-ocaml")
           in
           expect_publish_ack "baseline OCaml publish" ~stream:stream_name
             ~sequence:2L before_ocaml;
@@ -427,11 +443,12 @@ let run env =
             events;
           expect_reconnected ~clock ~timeout:reconnect_timeout ~failure_file
             events;
-          await_go_ready ~clock ~timeout:reconnect_timeout
-            ~failure_file connection prefix;
+          await_go_ready ~clock ~timeout:reconnect_timeout ~failure_file
+            connection prefix;
           let recovery_deadline =
             match
-              Mtime.add_span (Nats_eio.Connection.now connection)
+              Mtime.add_span
+                (Nats_eio.Connection.now connection)
                 reconnect_timeout
             with
             | Some value -> value
@@ -440,30 +457,28 @@ let run env =
           let stream_info =
             expect_jetstream_ok "stream after reconnect"
               (retry_jetstream ~clock ~connection ~deadline:recovery_deadline
-                 ~failure_file
-                 ~label:"stream after reconnect"
-                 (fun () -> Nats_eio.Jetstream.Stream.info stream))
+                 ~failure_file ~label:"stream after reconnect" (fun () ->
+                   Nats_eio.Jetstream.Stream.info stream))
           in
           expect_stream_state "stream after reconnect" stream_info ~messages:2L
             ~last_sequence:2L;
           let ocaml_info =
             expect_jetstream_ok "OCaml consumer after reconnect"
               (retry_jetstream ~clock ~connection ~deadline:recovery_deadline
-                 ~failure_file
-                 ~label:"OCaml consumer after reconnect"
+                 ~failure_file ~label:"OCaml consumer after reconnect"
                  (fun () -> Nats_eio.Jetstream.Consumer.info ocaml_consumer))
           in
-          expect_push_consumer_config "OCaml consumer after reconnect" ocaml_info
-            ~name:"OCAML_PUSH" ~delivery:(prefix ^ ".deliver.ocaml")
+          expect_push_consumer_config "OCaml consumer after reconnect"
+            ocaml_info ~name:"OCAML_PUSH"
+            ~delivery:(prefix ^ ".deliver.ocaml")
             ~filter:(prefix ^ ".go");
           expect_consumer_state "OCaml consumer after reconnect" ocaml_info
             ~stream_sequence:1L ~consumer_sequence:1L;
           let go_info =
             expect_jetstream_ok "Go consumer after reconnect"
               (retry_jetstream ~clock ~connection ~deadline:recovery_deadline
-                 ~failure_file
-                 ~label:"Go consumer after reconnect"
-                 (fun () -> Nats_eio.Jetstream.Consumer.info go_consumer))
+                 ~failure_file ~label:"Go consumer after reconnect" (fun () ->
+                   Nats_eio.Jetstream.Consumer.info go_consumer))
           in
           expect_push_consumer_config "Go consumer after reconnect" go_info
             ~name:"GO_PUSH" ~delivery:(prefix ^ ".deliver.go")
@@ -476,8 +491,8 @@ let run env =
                  (Nats.Subject.literal (prefix ^ ".recovery-verified"))
                  "ocaml-recovery-verified")
           in
-          expect_payload "JetStream recovery confirmation" "go-recovery-verified"
-            recovery_verified;
+          expect_payload "JetStream recovery confirmation"
+            "go-recovery-verified" recovery_verified;
           let after_go =
             next_push_message ~clock ~failure_file ~timeout
               "receive post-reconnect Go message" push
@@ -499,8 +514,10 @@ let run env =
           let headers =
             match
               Nats.Header.of_list
-                [ ("X-Interop", "ocaml-jetstream-push-reconnect");
-                  ("X-Trace", "ocaml-after") ]
+                [
+                  ("X-Interop", "ocaml-jetstream-push-reconnect");
+                  ("X-Trace", "ocaml-after");
+                ]
             with
             | Ok headers -> headers
             | Error error ->
@@ -508,8 +525,8 @@ let run env =
           in
           let after_ocaml =
             expect_jetstream_ok "publish post-reconnect OCaml message"
-              (Nats_eio.Jetstream.publish ~timeout ~headers jetstream ocaml_subject
-                 "after-ocaml")
+              (Nats_eio.Jetstream.publish ~timeout ~headers jetstream
+                 ocaml_subject "after-ocaml")
           in
           expect_publish_ack "post-reconnect OCaml publish" ~stream:stream_name
             ~sequence:4L after_ocaml;
@@ -538,7 +555,8 @@ let run env =
           let cleanup =
             expect_ok "request peer cleanup"
               (Nats_eio.Connection.request ~timeout connection
-                 (Nats.Subject.literal (prefix ^ ".cleanup")) "cleanup")
+                 (Nats.Subject.literal (prefix ^ ".cleanup"))
+                 "cleanup")
           in
           expect_payload "peer cleanup" "cleaned" cleanup;
           print_endline "interop-jetstream-push-reconnect: ok"))
@@ -546,8 +564,7 @@ let run env =
 let () =
   try Eio_main.run run with
   | Failure message ->
-      prerr_endline
-        ("JetStream push reconnect acceptance failed: " ^ message);
+      prerr_endline ("JetStream push reconnect acceptance failed: " ^ message);
       exit 1
   | error ->
       prerr_endline

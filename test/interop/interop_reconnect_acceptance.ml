@@ -18,11 +18,11 @@ let endpoints () =
   | None -> failf "NATS_TEST_SERVERS is required"
   | Some value -> (
       match
-        List.filter (fun value -> not (String.equal (String.trim value) ""))
+        List.filter
+          (fun value -> not (String.equal (String.trim value) ""))
           (String.split_on_char ',' value)
       with
-      | first :: second :: rest ->
-          List.map endpoint (first :: second :: rest)
+      | first :: second :: rest -> List.map endpoint (first :: second :: rest)
       | _ -> failf "NATS_TEST_SERVERS must contain at least two endpoints")
 
 let auth () =
@@ -35,14 +35,15 @@ let auth () =
   | None, None, Some token -> Some (Nats.Auth.token token)
   | Some user, Some pass, None -> Some (Nats.Auth.user_pass ~user ~pass)
   | _ ->
-      failf "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
+      failf
+        "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
 
 let read_file path = In_channel.with_open_bin path In_channel.input_all
 
 let tls_config () =
   match Sys.getenv_opt "NATS_TEST_TLS_CA" with
   | None -> None
-  | Some ca_file ->
+  | Some ca_file -> (
       let ca =
         match X509.Certificate.decode_pem (read_file ca_file) with
         | Ok value -> value
@@ -51,14 +52,15 @@ let tls_config () =
       in
       let authenticator =
         X509.Authenticator.chain_of_trust
-          ~time:(fun () -> Some (Ptime_clock.now ())) [ ca ]
+          ~time:(fun () -> Some (Ptime_clock.now ()))
+          [ ca ]
       in
       let peer_name =
         Domain_name.host_exn (Domain_name.of_string_exn "localhost")
       in
       match Tls.Config.client ~authenticator ~peer_name () with
       | Ok value -> Some value
-      | Error (`Msg message) -> failf "TLS client configuration: %s" message
+      | Error (`Msg message) -> failf "TLS client configuration: %s" message)
 
 let next_event ~clock ~timeout events =
   let seconds = Mtime.Span.to_float_ns timeout /. 1e9 in
@@ -78,13 +80,12 @@ let rec wait_for_event ~clock ~timeout ~label ~remaining predicate events =
     let event = next_event ~clock ~timeout events in
     if predicate event then ()
     else
-      wait_for_event ~clock ~timeout ~label ~remaining:(remaining - 1)
-        predicate events
+      wait_for_event ~clock ~timeout ~label ~remaining:(remaining - 1) predicate
+        events
 
 let expect_initial_connection ~clock ~timeout events =
   wait_for_event ~clock ~timeout ~label:"initial connection" ~remaining:8
-    (function
-      | Nats_eio.Event.Core Nats.Event.Connected -> true | _ -> false)
+    (function Nats_eio.Event.Core Nats.Event.Connected -> true | _ -> false)
     events
 
 let expect_disconnected ~clock ~timeout events =
@@ -98,9 +99,7 @@ let expect_reconnected ~clock ~timeout events =
     events
 
 let next_message ~timeout label subscription =
-  match
-    Nats_eio.Subscription.next_with_timeout ~timeout subscription
-  with
+  match Nats_eio.Subscription.next_with_timeout ~timeout subscription with
   | Ok delivery -> delivery.Nats_eio.Subscription.message
   | Error error -> failf "%s: %s" label (error_message error)
 
@@ -154,19 +153,16 @@ let await_go_ready ~clock ~timeout ~cycle connection reconnect_ready =
       | Ok response ->
           expect_payload "Go recovery barrier" response_payload response;
           ready := true
-      | Error Nats_eio.Error.Timeout | Error Nats_eio.Error.No_responders
+      | Error Nats_eio.Error.Timeout
+      | Error Nats_eio.Error.No_responders
       | Error Nats_eio.Error.Disconnected ->
           Eio.Time.Mono.sleep clock 0.01
       | Error error -> failf "Go recovery barrier: %s" (error_message error)
   done
 
 let subject prefix suffix = Nats.Subject.literal (prefix ^ "." ^ suffix)
-
-let filter prefix suffix =
-  Nats.Subject.Filter.literal (prefix ^ "." ^ suffix)
-
+let filter prefix suffix = Nats.Subject.Filter.literal (prefix ^ "." ^ suffix)
 let round_payload round = "round-" ^ string_of_int round
-
 let round_marker round = round_payload round ^ "-flushed"
 
 let run env =
@@ -185,10 +181,10 @@ let run env =
   let tls = tls_config () in
   let config =
     expect_ok "connection config"
-      (Nats_eio.Connection.Config.v ?auth ?tls
-         ~max_reconnect_attempts:(Some 20)
+      (Nats_eio.Connection.Config.v ?auth ?tls ~max_reconnect_attempts:(Some 20)
          ~reconnect_delay:Mtime.Span.(50 * ms)
-         ~reconnect_max_delay:Mtime.Span.(100 * ms) ())
+         ~reconnect_max_delay:Mtime.Span.(100 * ms)
+         ())
   in
   let connection =
     expect_ok "connect"
@@ -223,9 +219,7 @@ let run env =
       for round = 0 to cycles do
         let payload = round_payload round in
         let marker = round_marker round in
-        let from_go_message =
-          next_message ~timeout ("Go " ^ payload) from_go
-        in
+        let from_go_message = next_message ~timeout ("Go " ^ payload) from_go in
         expect_payload ("Go " ^ payload) payload from_go_message;
         expect_ok ("publish " ^ payload)
           (Nats_eio.Connection.publish connection to_go payload);

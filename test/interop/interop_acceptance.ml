@@ -1,4 +1,5 @@
-let failf format = Format.kasprintf (fun message -> raise (Failure message)) format
+let failf format =
+  Format.kasprintf (fun message -> raise (Failure message)) format
 
 let error_message error = Format.asprintf "%a" Nats_eio.Error.pp error
 
@@ -31,14 +32,15 @@ let auth () =
   | None, None, Some token -> Some (Nats.Auth.token token)
   | Some user, Some pass, None -> Some (Nats.Auth.user_pass ~user ~pass)
   | _ ->
-      failf "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
+      failf
+        "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
 
 let read_file path = In_channel.with_open_bin path In_channel.input_all
 
 let tls_config () =
   match Sys.getenv_opt "NATS_TEST_TLS_CA" with
   | None -> None
-  | Some ca_file ->
+  | Some ca_file -> (
       let ca =
         match X509.Certificate.decode_pem (read_file ca_file) with
         | Ok value -> value
@@ -47,29 +49,30 @@ let tls_config () =
       in
       let authenticator =
         X509.Authenticator.chain_of_trust
-          ~time:(fun () -> Some (Ptime_clock.now ())) [ ca ]
+          ~time:(fun () -> Some (Ptime_clock.now ()))
+          [ ca ]
       in
       let peer_name =
         Domain_name.host_exn (Domain_name.of_string_exn "localhost")
       in
       match Tls.Config.client ~authenticator ~peer_name () with
       | Ok value -> Some value
-      | Error (`Msg message) -> failf "TLS client configuration: %s" message
+      | Error (`Msg message) -> failf "TLS client configuration: %s" message)
 
 let subject prefix suffix = Nats.Subject.literal (prefix ^ "." ^ suffix)
-
-let filter prefix suffix =
-  Nats.Subject.Filter.literal (prefix ^ "." ^ suffix)
+let filter prefix suffix = Nats.Subject.Filter.literal (prefix ^ "." ^ suffix)
 
 let headers entries =
   match Nats.Header.of_list entries with
   | Ok value -> value
-  | Error error -> failf "invalid interop headers: %a" Nats.Header.pp_error error
+  | Error error ->
+      failf "invalid interop headers: %a" Nats.Header.pp_error error
 
 let expect_header_values message expected =
   let actual = Nats.Header.find_all "x-trace" (Nats.Message.headers message) in
   if not (List.equal String.equal actual expected) then
-    failf "header values were [%s], expected [%s]" (String.concat ", " actual)
+    failf "header values were [%s], expected [%s]"
+      (String.concat ", " actual)
       (String.concat ", " expected)
 
 let expect_core_event events expected =
@@ -105,8 +108,8 @@ let start_responder ~sw ~clock ~timeout ~connection subscription =
       let message =
         expect_message ~clock ~timeout "OCaml responder" subscription
       in
-      if not (String.equal (Nats.Message.payload message) "request-from-go") then
-        failf "Go request payload was %S" (Nats.Message.payload message);
+      if not (String.equal (Nats.Message.payload message) "request-from-go")
+      then failf "Go request payload was %S" (Nats.Message.payload message);
       if
         not
           (String.equal
@@ -175,8 +178,8 @@ let run env =
       let from_go_message =
         expect_message ~clock ~timeout "Go publication" from_go
       in
-      if not (String.equal (Nats.Message.payload from_go_message) "from-go") then
-        failf "Go payload was %S" (Nats.Message.payload from_go_message);
+      if not (String.equal (Nats.Message.payload from_go_message) "from-go")
+      then failf "Go payload was %S" (Nats.Message.payload from_go_message);
       if
         not
           (String.equal
@@ -189,8 +192,7 @@ let run env =
       expect_header_values from_go_message [ "one"; "two" ];
       let to_go_headers =
         headers
-          [ ("X-Interop", "ocaml"); ("X-Trace", "one");
-            ("X-Trace", "two") ]
+          [ ("X-Interop", "ocaml"); ("X-Trace", "one"); ("X-Trace", "two") ]
       in
       expect_ok "publish to Go"
         (Nats_eio.Connection.publish connection ~headers:to_go_headers
@@ -199,10 +201,13 @@ let run env =
       let go_response =
         expect_ok "Go request"
           (Nats_eio.Connection.request
-             ~headers:(headers [ ("X-Interop", "ocaml-request") ]) ~timeout
-             connection (subject prefix "go-request") "request-from-ocaml")
+             ~headers:(headers [ ("X-Interop", "ocaml-request") ])
+             ~timeout connection
+             (subject prefix "go-request")
+             "request-from-ocaml")
       in
-      if not (String.equal (Nats.Message.payload go_response) "response-from-go")
+      if
+        not (String.equal (Nats.Message.payload go_response) "response-from-go")
       then failf "Go response was %S" (Nats.Message.payload go_response);
       if
         not
@@ -216,7 +221,8 @@ let run env =
       expect_ok "OCaml responder" (Eio.Promise.await ocaml_responder);
       (match
          Nats_eio.Connection.request ~timeout connection
-           (subject prefix "no-responder") "missing"
+           (subject prefix "no-responder")
+           "missing"
        with
       | Error Nats_eio.Error.No_responders -> ()
       | Ok _ -> failf "no-responder request unexpectedly succeeded"

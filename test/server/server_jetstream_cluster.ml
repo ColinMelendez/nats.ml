@@ -16,8 +16,7 @@ let expect_jetstream_ok label = function
 
 let expect_jetstream_config_ok label = function
   | Ok value -> value
-  | Error error ->
-      failf "%s: %a" label Nats_eio.Jetstream.Error.pp_config error
+  | Error error -> failf "%s: %a" label Nats_eio.Jetstream.Error.pp_config error
 
 let required name =
   match Sys.getenv_opt name with
@@ -76,19 +75,20 @@ let expect_server_info ~clock ~names events =
 let expect_disconnected ~clock events =
   ignore
     (wait_for_event ~clock ~label:"disconnect" ~remaining:24
-       (function Nats_eio.Event.Disconnected -> true | _ -> false) events)
+       (function Nats_eio.Event.Disconnected -> true | _ -> false)
+       events)
 
 let expect_reconnected ~clock events =
   ignore
     (wait_for_event ~clock ~label:"reconnect" ~remaining:24
-       (function Nats_eio.Event.Reconnected -> true | _ -> false) events)
+       (function Nats_eio.Event.Reconnected -> true | _ -> false)
+       events)
 
 let expect_connected ~clock events =
   ignore
     (wait_for_event ~clock ~label:"initial connection" ~remaining:24
        (function
-         | Nats_eio.Event.Core Nats.Event.Connected -> true
-         | _ -> false)
+         | Nats_eio.Event.Core Nats.Event.Connected -> true | _ -> false)
        events)
 
 let expect_discovered info expected =
@@ -106,9 +106,9 @@ let transient_jetstream_api { Nats_eio.Jetstream.Error.code; _ } =
 let transient_jetstream_error = function
   | Nats_eio.Jetstream.Error.Api api -> transient_jetstream_api api
   | Nats_eio.Jetstream.Error.Connection
-      ( Nats_eio.Error.Timeout
-      | Nats_eio.Error.No_responders
-      | Nats_eio.Error.Disconnected ) -> true
+      ( Nats_eio.Error.Timeout | Nats_eio.Error.No_responders
+      | Nats_eio.Error.Disconnected ) ->
+      true
   | _ -> false
 
 let retry_jetstream ~clock ~connection ~timeout:retry_timeout ~label operation =
@@ -141,7 +141,8 @@ let expect_stream_config info ~name =
   let config = Nats_eio.Jetstream.Stream.Info.config info in
   if not (String.equal (Nats_eio.Jetstream.Stream.Config.name config) name) then
     failf "stream info named %S, expected %S"
-      (Nats_eio.Jetstream.Stream.Config.name config) name;
+      (Nats_eio.Jetstream.Stream.Config.name config)
+      name;
   (match Nats_eio.Jetstream.Stream.Config.storage config with
   | Nats_eio.Jetstream.Stream.Config.File -> ()
   | Nats_eio.Jetstream.Stream.Config.Memory ->
@@ -150,11 +151,7 @@ let expect_stream_config info ~name =
     failf "cluster stream does not have three replicas"
 
 let expect_stream_state info ~messages ~last_sequence =
-  if
-    not
-      (Int64.equal
-         (Nats_eio.Jetstream.Stream.Info.messages info)
-         messages)
+  if not (Int64.equal (Nats_eio.Jetstream.Stream.Info.messages info) messages)
   then failf "cluster stream had the wrong message count";
   if
     not
@@ -164,12 +161,8 @@ let expect_stream_state info ~messages ~last_sequence =
   then failf "cluster stream had the wrong last sequence"
 
 let expect_consumer_config info ~name ~delivery ~filter =
-  if
-    not
-      (String.equal
-         (Nats_eio.Jetstream.Consumer.Info.name info)
-         name)
-  then failf "consumer info named the wrong consumer";
+  if not (String.equal (Nats_eio.Jetstream.Consumer.Info.name info) name) then
+    failf "consumer info named the wrong consumer";
   let config = Nats_eio.Jetstream.Consumer.Info.config info in
   (match Nats_eio.Jetstream.Consumer.Config.ack_policy config with
   | Nats_eio.Jetstream.Consumer.Config.Explicit -> ()
@@ -186,14 +179,17 @@ let expect_consumer_config info ~name ~delivery ~filter =
       ()
   | Some subject ->
       failf "consumer delivered to %S, expected %S"
-        (Nats.Subject.to_string subject) delivery
+        (Nats.Subject.to_string subject)
+        delivery
   | None -> failf "consumer has no delivery subject");
   match Nats_eio.Jetstream.Consumer.Config.filter_subject config with
-  | Some subject when String.equal (Nats.Subject.Filter.to_string subject) filter
-    -> ()
+  | Some subject
+    when String.equal (Nats.Subject.Filter.to_string subject) filter ->
+      ()
   | Some subject ->
       failf "consumer filtered %S, expected %S"
-        (Nats.Subject.Filter.to_string subject) filter
+        (Nats.Subject.Filter.to_string subject)
+        filter
   | None -> failf "consumer has no filter subject"
 
 let expect_ack_floor label expected info =
@@ -265,7 +261,8 @@ let run env =
     expect_ok "connection config"
       (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 20)
          ~reconnect_delay:Mtime.Span.(100 * ms)
-         ~reconnect_max_delay:Mtime.Span.(500 * ms) ())
+         ~reconnect_max_delay:Mtime.Span.(500 * ms)
+         ())
   in
   let connection =
     expect_ok "connect"
@@ -275,7 +272,9 @@ let run env =
     ~finally:(fun () -> ignore (Nats_eio.Connection.close connection))
     (fun () ->
       let events = Nats_eio.Connection.events connection in
-      let initial_info = expect_server_info ~clock ~names:[ initial_name ] events in
+      let initial_info =
+        expect_server_info ~clock ~names:[ initial_name ] events
+      in
       expect_discovered initial_info discovered;
       expect_connected ~clock events;
       let jetstream =
@@ -287,45 +286,46 @@ let run env =
       let stream_config =
         expect_jetstream_config_ok "stream config"
           (Nats_eio.Jetstream.Stream.Config.v ~name:stream_name
-             ~subjects:[ filter ]
-             ~storage:Nats_eio.Jetstream.Stream.Config.File ~replicas:3 ())
+             ~subjects:[ filter ] ~storage:Nats_eio.Jetstream.Stream.Config.File
+             ~replicas:3 ())
       in
       let stream =
         expect_jetstream_ok "create replicated stream"
           (retry_jetstream ~clock ~connection ~timeout:jetstream_timeout
-             ~label:"create replicated stream"
-             (fun () -> Nats_eio.Jetstream.Stream.create jetstream stream_config))
+             ~label:"create replicated stream" (fun () ->
+               Nats_eio.Jetstream.Stream.create jetstream stream_config))
       in
       let stream_info =
         expect_jetstream_ok "replicated stream info"
           (retry_jetstream ~clock ~connection ~timeout:jetstream_timeout
-             ~label:"replicated stream info"
-             (fun () -> Nats_eio.Jetstream.Stream.info stream))
+             ~label:"replicated stream info" (fun () ->
+               Nats_eio.Jetstream.Stream.info stream))
       in
       expect_stream_config stream_info ~name:stream_name;
       let delivery =
         Nats.Subject.literal
-          ("ocaml.integration.cluster.js.delivery." ^ string_of_int (Unix.getpid ()))
+          ("ocaml.integration.cluster.js.delivery."
+          ^ string_of_int (Unix.getpid ()))
       in
       let consumer_config =
         expect_jetstream_config_ok "consumer config"
-          (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"OCAML_CLUSTER_PUSH"
-             ~deliver_subject:delivery ~filter_subject:filter
+          (Nats_eio.Jetstream.Consumer.Config.v
+             ~durable_name:"OCAML_CLUSTER_PUSH" ~deliver_subject:delivery
+             ~filter_subject:filter
              ~ack_policy:Nats_eio.Jetstream.Consumer.Config.Explicit ~replicas:3
              ())
       in
       let consumer =
         expect_jetstream_ok "create replicated consumer"
           (retry_jetstream ~clock ~connection ~timeout:jetstream_timeout
-             ~label:"create replicated consumer"
-             (fun () ->
+             ~label:"create replicated consumer" (fun () ->
                Nats_eio.Jetstream.Consumer.create stream consumer_config))
       in
       let consumer_info =
         expect_jetstream_ok "replicated consumer info"
           (retry_jetstream ~clock ~connection ~timeout:jetstream_timeout
-             ~label:"replicated consumer info"
-             (fun () -> Nats_eio.Jetstream.Consumer.info consumer))
+             ~label:"replicated consumer info" (fun () ->
+               Nats_eio.Jetstream.Consumer.info consumer))
       in
       expect_consumer_config consumer_info ~name:"OCAML_CLUSTER_PUSH"
         ~delivery:(Nats.Subject.to_string delivery)
@@ -335,7 +335,8 @@ let run env =
           (Nats_eio.Jetstream.Consumer.Push.v ~sw consumer)
       in
       Fun.protect
-        ~finally:(fun () -> ignore (Nats_eio.Jetstream.Consumer.Push.close push))
+        ~finally:(fun () ->
+          ignore (Nats_eio.Jetstream.Consumer.Push.close push))
         (fun () ->
           if
             not
@@ -373,8 +374,8 @@ let run env =
           let baseline_stream_info =
             expect_jetstream_ok "baseline stream state"
               (retry_jetstream ~clock ~connection ~timeout:jetstream_timeout
-                 ~label:"baseline stream state"
-                 (fun () -> Nats_eio.Jetstream.Stream.info stream))
+                 ~label:"baseline stream state" (fun () ->
+                   Nats_eio.Jetstream.Stream.info stream))
           in
           expect_stream_config baseline_stream_info ~name:stream_name;
           expect_stream_state baseline_stream_info ~messages:1L
@@ -392,8 +393,8 @@ let run env =
           let post_failover_stream_info =
             expect_jetstream_ok "post-failover stream readiness"
               (retry_jetstream ~clock ~connection ~timeout:jetstream_timeout
-                 ~label:"post-failover stream readiness"
-                 (fun () -> Nats_eio.Jetstream.Stream.info stream))
+                 ~label:"post-failover stream readiness" (fun () ->
+                   Nats_eio.Jetstream.Stream.info stream))
           in
           expect_stream_config post_failover_stream_info ~name:stream_name;
           expect_stream_state post_failover_stream_info ~messages:1L
@@ -401,8 +402,8 @@ let run env =
           let post_failover_consumer_info =
             expect_jetstream_ok "post-failover consumer readiness"
               (retry_jetstream ~clock ~connection ~timeout:jetstream_timeout
-                 ~label:"post-failover consumer readiness"
-                 (fun () -> Nats_eio.Jetstream.Consumer.info consumer))
+                 ~label:"post-failover consumer readiness" (fun () ->
+                   Nats_eio.Jetstream.Consumer.info consumer))
           in
           expect_consumer_config post_failover_consumer_info
             ~name:"OCAML_CLUSTER_PUSH"
@@ -415,8 +416,7 @@ let run env =
           let second_ack =
             expect_jetstream_ok "post-failover cluster publish"
               (retry_jetstream ~clock ~connection ~timeout:jetstream_timeout
-                 ~label:"post-failover cluster publish"
-                 (fun () ->
+                 ~label:"post-failover cluster publish" (fun () ->
                    Nats_eio.Jetstream.publish ~timeout ~msg_id:"cluster-after"
                      jetstream subject "cluster-after"))
           in
@@ -428,7 +428,8 @@ let run env =
               (Int64.equal
                  (Nats_eio.Jetstream.Publish_ack.sequence second_ack)
                  2L)
-          then failf "post-failover cluster publish did not receive sequence two";
+          then
+            failf "post-failover cluster publish did not receive sequence two";
           let second =
             expect_jetstream_ok "post-failover cluster delivery"
               (Nats_eio.Jetstream.Consumer.Push.next_with_timeout
@@ -439,35 +440,34 @@ let run env =
             ~stream_sequence:2L ~consumer_sequence:2L second;
           expect_jetstream_ok "post-failover cluster acknowledgement"
             (retry_jetstream ~clock ~connection ~timeout:jetstream_timeout
-               ~label:"post-failover cluster acknowledgement"
-               (fun () -> Nats_eio.Jetstream.Msg.ack_sync ~timeout second));
+               ~label:"post-failover cluster acknowledgement" (fun () ->
+                 Nats_eio.Jetstream.Msg.ack_sync ~timeout second));
           let final_info =
             expect_jetstream_ok "post-failover acknowledgement info"
               (retry_jetstream ~clock ~connection ~timeout:jetstream_timeout
-                 ~label:"post-failover acknowledgement info"
-                 (fun () -> Nats_eio.Jetstream.Consumer.info consumer))
+                 ~label:"post-failover acknowledgement info" (fun () ->
+                   Nats_eio.Jetstream.Consumer.info consumer))
           in
           expect_pending_zero "final consumer" final_info;
           expect_ack_floor "final consumer" 2L final_info;
           let final_stream_info =
             expect_jetstream_ok "final stream state"
               (retry_jetstream ~clock ~connection ~timeout:jetstream_timeout
-                 ~label:"final stream state"
-                 (fun () -> Nats_eio.Jetstream.Stream.info stream))
+                 ~label:"final stream state" (fun () ->
+                   Nats_eio.Jetstream.Stream.info stream))
           in
           expect_stream_config final_stream_info ~name:stream_name;
-          expect_stream_state final_stream_info ~messages:2L
-            ~last_sequence:2L;
+          expect_stream_state final_stream_info ~messages:2L ~last_sequence:2L;
           expect_jetstream_ok "close replicated push"
             (Nats_eio.Jetstream.Consumer.Push.close push);
           expect_jetstream_ok "delete replicated consumer"
             (retry_jetstream ~clock ~connection ~timeout:jetstream_timeout
-               ~label:"delete replicated consumer"
-               (fun () -> Nats_eio.Jetstream.Consumer.delete consumer));
+               ~label:"delete replicated consumer" (fun () ->
+                 Nats_eio.Jetstream.Consumer.delete consumer));
           expect_jetstream_ok "delete replicated stream"
             (retry_jetstream ~clock ~connection ~timeout:jetstream_timeout
-               ~label:"delete replicated stream"
-               (fun () -> Nats_eio.Jetstream.Stream.delete stream));
+               ~label:"delete replicated stream" (fun () ->
+                 Nats_eio.Jetstream.Stream.delete stream));
           print_endline "jetstream-cluster: ok"))
 
 let () =

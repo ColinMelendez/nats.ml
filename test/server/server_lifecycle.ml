@@ -40,7 +40,8 @@ let authentication () =
   | None, None, Some token when safe_credential token ->
       Some (Nats.Auth.token token)
   | Some user, Some pass, None when safe_credential user && safe_credential pass
-    -> Some (Nats.Auth.user_pass ~user ~pass)
+    ->
+      Some (Nats.Auth.user_pass ~user ~pass)
   | Some _, Some _, None ->
       failf
         "NATS_TEST_USER and NATS_TEST_PASS must be non-empty ASCII letters, \
@@ -154,8 +155,8 @@ let expect_parent_switch_cleanup ~net ~clock ~endpoint ?config () =
   if not (Eio.Promise.await stopped) then
     failf "subscription read survived parent switch cleanup"
 
-let run_slow_consumer_cycle ~sw ~net ~clock ~endpoint ~config ~responder ~timeout
-    ~cycle =
+let run_slow_consumer_cycle ~sw ~net ~clock ~endpoint ~config ~responder
+    ~timeout ~cycle =
   let slow_client = connect ~sw ~net ~clock ?config endpoint in
   Fun.protect
     ~finally:(fun () -> ignore (Nats_eio.Connection.close slow_client))
@@ -181,7 +182,8 @@ let run_slow_consumer_cycle ~sw ~net ~clock ~endpoint ~config ~responder ~timeou
         [ "first"; "second" ];
       expect_ok "slow-consumer readiness publish"
         (Nats_eio.Connection.publish responder
-           (subject (cycle_name "slow-ready" cycle)) "ready");
+           (subject (cycle_name "slow-ready" cycle))
+           "ready");
       expect_ok "slow-consumer publish flush"
         (Nats_eio.Connection.flush responder);
       expect_payload "slow-consumer readiness" "ready"
@@ -209,7 +211,8 @@ let run_slow_consumer_cycle ~sw ~net ~clock ~endpoint ~config ~responder ~timeou
       expect_slow_consumer_event ~clock ~timeout ~sid:slow_sid slow_events;
       print_endline ("slow_consumer_cycle_" ^ string_of_int cycle ^ ": ok"))
 
-let run_drain_cycle ~sw ~net ~clock ~endpoint ~config ~responder ~timeout ~cycle =
+let run_drain_cycle ~sw ~net ~clock ~endpoint ~config ~responder ~timeout ~cycle
+    =
   let client = connect ~sw ~net ~clock ?config endpoint in
   Fun.protect
     ~finally:(fun () -> ignore (Nats_eio.Connection.close client))
@@ -233,7 +236,8 @@ let run_drain_cycle ~sw ~net ~clock ~endpoint ~config ~responder ~timeout ~cycle
         [ "first"; "second" ];
       expect_ok "subscription drain readiness publish"
         (Nats_eio.Connection.publish responder
-           (subject (cycle_name "drain-ready" cycle)) "ready");
+           (subject (cycle_name "drain-ready" cycle))
+           "ready");
       expect_ok "subscription drain publish flush"
         (Nats_eio.Connection.flush responder);
       expect_payload "subscription drain readiness" "ready"

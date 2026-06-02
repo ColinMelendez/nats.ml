@@ -37,8 +37,7 @@ module Config = struct
         | None ->
             let character = String.get bucket position in
             if not (allowed_bucket_character character) then
-              invalid :=
-                Some (Invalid_bucket_character { position; character })
+              invalid := Some (Invalid_bucket_character { position; character })
       done;
       match !invalid with None -> Ok () | Some error -> Error error
 
@@ -47,14 +46,13 @@ module Config = struct
     | Some value when Int64.compare value (-1L) >= 0 -> Ok ()
     | Some value -> Error (Invalid_limit { field; value })
 
-  let normalize_limit = function Some (-1L) -> None | value -> value
+  let normalize_limit = function Some -1L -> None | value -> value
 
-  let v ~bucket ?(history = 1) ?ttl ?max_bytes ?max_value_size
-      ?(storage = File) () =
+  let v ~bucket ?(history = 1) ?ttl ?max_bytes ?max_value_size ?(storage = File)
+      () =
     match validate_bucket bucket with
     | Error error -> Error error
-    | Ok ()
-      when Int.compare history 1 < 0 || Int.compare history 64 > 0 ->
+    | Ok () when Int.compare history 1 < 0 || Int.compare history 64 > 0 ->
         Error (Invalid_history history)
     | Ok () -> (
         match ttl with
@@ -125,8 +123,7 @@ module Key = struct
         | None ->
             let character = String.get value position in
             if not (allowed_key_character character) then
-              invalid :=
-                Some (Invalid_key_character { position; character })
+              invalid := Some (Invalid_key_character { position; character })
             else if Char.equal character '.' && !previous_dot then
               invalid := Some Invalid_key_dots
             else previous_dot := Char.equal character '.'
@@ -233,7 +230,8 @@ module Error = struct
     | Key_not_found -> Format.pp_print_string ppf "key was not found"
     | Key_deleted entry ->
         Format.fprintf ppf "key %S was deleted at revision %Ld"
-          (Key.to_string (Entry.key entry)) (Entry.revision entry)
+          (Key.to_string (Entry.key entry))
+          (Entry.revision entry)
     | Key_exists -> Format.pp_print_string ppf "key already exists"
     | Revision_mismatch { expected } ->
         Format.fprintf ppf "key revision did not match expected revision %Ld"
@@ -282,7 +280,6 @@ let map_jetstream_error = function
   | error -> Error.Jetstream error
 
 let map_config_error error = Error.Invalid_config error
-
 let stream_name bucket = "KV_" ^ bucket
 
 let key_subject value key =
@@ -357,8 +354,7 @@ let status value =
           bytes = Jetstream.Stream.Info.bytes info;
           first_revision = Jetstream.Stream.Info.first_sequence info;
           last_revision = Jetstream.Stream.Info.last_sequence info;
-          history =
-            Jetstream.Stream.Config.max_msgs_per_subject config;
+          history = Jetstream.Stream.Config.max_msgs_per_subject config;
           ttl = Jetstream.Stream.Config.max_age config;
           max_bytes = Jetstream.Stream.Config.max_bytes config;
           max_value_size = Jetstream.Stream.Config.max_msg_size config;
@@ -522,7 +518,7 @@ let make_filter value pattern =
   let subject = "$KV." ^ value.bucket ^ "." ^ pattern in
   match Nats.Subject.Filter.of_string subject with
   | Error reason -> Error (Error.Invalid_filter { value = pattern; reason })
-  | Ok filter ->
+  | Ok filter -> (
       let tokens = String.split_on_char '.' pattern in
       let invalid = ref None in
       List.iter
@@ -536,7 +532,7 @@ let make_filter value pattern =
               | Error reason ->
                   invalid := Some (Error.Invalid_key { value = token; reason })))
         tokens;
-      match !invalid with None -> Ok filter | Some error -> Error error
+      match !invalid with None -> Ok filter | Some error -> Error error)
 
 let timestamp_of_nanoseconds value =
   if Int64.compare value 0L < 0 then Error (Error.Invalid_timestamp value)
@@ -569,11 +565,13 @@ let timestamp_of_nanoseconds value =
     let month_part = Int64.div (Int64.add (Int64.mul 5L doy) 2L) 153L in
     let day =
       Int64.add
-        (Int64.sub doy (Int64.div (Int64.add (Int64.mul 153L month_part) 2L) 5L))
+        (Int64.sub doy
+           (Int64.div (Int64.add (Int64.mul 153L month_part) 2L) 5L))
         1L
     in
     let month =
-      Int64.add month_part (if Int64.compare month_part 10L < 0 then 3L else -9L)
+      Int64.add month_part
+        (if Int64.compare month_part 10L < 0 then 3L else -9L)
     in
     let year =
       Int64.add year (if Int64.compare month 2L <= 0 then 1L else 0L)
@@ -582,8 +580,8 @@ let timestamp_of_nanoseconds value =
     let minute = Int64.div (Int64.rem seconds_in_day 3_600L) 60L in
     let second = Int64.rem seconds_in_day 60L in
     Ok
-      (Format.asprintf "%04Ld-%02Ld-%02LdT%02Ld:%02Ld:%02Ld.%09LdZ" year
-         month day hour minute second fraction)
+      (Format.asprintf "%04Ld-%02Ld-%02LdT%02Ld:%02Ld:%02Ld.%09LdZ" year month
+         day hour minute second fraction)
 
 let key_of_delivery value message =
   let subject = Nats.Subject.to_string (Jetstream.Msg.subject message) in
@@ -625,8 +623,9 @@ let one_shot_config ~filter ~deliver_policy ~headers_only =
   match
     Jetstream.Consumer.Config.v ~deliver_policy
       ~ack_policy:Jetstream.Consumer.Config.No_ack ~filter_subject:filter
-      ~headers_only ~inactive_threshold:Mtime.Span.(5 * min) ~mem_storage:true
-      ()
+      ~headers_only
+      ~inactive_threshold:Mtime.Span.(5 * min)
+      ~mem_storage:true ()
   with
   | Ok config -> Ok config
   | Error error ->
@@ -635,7 +634,7 @@ let one_shot_config ~filter ~deliver_policy ~headers_only =
 let with_temporary_consumer value config f =
   match Jetstream.Consumer.create value.stream config with
   | Error error -> Error (map_jetstream_error error)
-  | Ok consumer ->
+  | Ok consumer -> (
       let cleanup_error = ref None in
       let result =
         Fun.protect
@@ -650,7 +649,7 @@ let with_temporary_consumer value config f =
       | Ok result, Some (Ok ()) -> Ok result
       | Ok _, Some (Error error) -> Error (map_jetstream_error error)
       | Error error, _ -> Error error
-      | Ok _, None -> assert false
+      | Ok _, None -> assert false)
 
 let one_shot_batch = 256
 let one_shot_expires = Mtime.Span.(1 * s)
@@ -715,7 +714,7 @@ let keys ?filter value =
       | Ok config -> (
           match collect_messages value config with
           | Error error -> Error error
-          | Ok messages ->
+          | Ok messages -> (
               let result =
                 List.fold_left
                   (fun result message ->
@@ -735,20 +734,19 @@ let keys ?filter value =
                                 if Key_set.mem key_string seen then
                                   Ok (seen, keys)
                                 else
-                                  Ok
-                                    (Key_set.add key_string seen, key :: keys)
-                            | Ok (Entry.Delete | Entry.Purge) ->
-                                Ok (seen, keys))))
-                  (Ok (Key_set.empty, [])) messages
+                                  Ok (Key_set.add key_string seen, key :: keys)
+                            | Ok (Entry.Delete | Entry.Purge) -> Ok (seen, keys)
+                            )))
+                  (Ok (Key_set.empty, []))
+                  messages
               in
               match result with
               | Error error -> Error error
-              | Ok (_, keys) -> Ok (List.rev keys)))
+              | Ok (_, keys) -> Ok (List.rev keys))))
 
 let history value key =
   let filter =
-    Nats.Subject.Filter.literal
-      (Nats.Subject.to_string (key_subject value key))
+    Nats.Subject.Filter.literal (Nats.Subject.to_string (key_subject value key))
   in
   match
     one_shot_config ~filter ~deliver_policy:Jetstream.Consumer.Config.All
@@ -758,7 +756,7 @@ let history value key =
   | Ok config -> (
       match collect_messages value config with
       | Error error -> Error error
-      | Ok messages ->
+      | Ok messages -> (
           let result =
             List.fold_left
               (fun result message ->
@@ -770,7 +768,9 @@ let history value key =
                     | Ok entry -> Ok (entry :: entries)))
               (Ok []) messages
           in
-          match result with Error error -> Error error | Ok entries -> Ok (List.rev entries))
+          match result with
+          | Error error -> Error error
+          | Ok entries -> Ok (List.rev entries)))
 
 module Watch = struct
   type delivery = New | Last_per_subject | All
@@ -803,10 +803,11 @@ module Watch = struct
     in
     match
       Jetstream.Consumer.Config.v ~deliver_subject ~deliver_policy
-        ~ack_policy:Jetstream.Consumer.Config.No_ack
-        ~filter_subject:filter ~idle_heartbeat:Mtime.Span.(5 * s)
+        ~ack_policy:Jetstream.Consumer.Config.No_ack ~filter_subject:filter
+        ~idle_heartbeat:Mtime.Span.(5 * s)
         ~flow_control:true ~headers_only:meta_only
-        ~inactive_threshold:Mtime.Span.(5 * min) ~mem_storage:true ()
+        ~inactive_threshold:Mtime.Span.(5 * min)
+        ~mem_storage:true ()
     with
     | Ok config -> Ok config
     | Error error ->
@@ -822,7 +823,7 @@ module Watch = struct
         | Ok config -> (
             match Jetstream.Consumer.Push.create ~sw value.stream config with
             | Error error -> Error (map_error error)
-            | Ok push -> (
+            | Ok push ->
                 let initial_pending =
                   match delivery with
                   | New -> None
@@ -843,7 +844,7 @@ module Watch = struct
                     initial;
                     initial_pending;
                     initial_received = 0L;
-                  })))
+                  }))
 
   let next_message watch deadline =
     match deadline with
@@ -864,20 +865,20 @@ module Watch = struct
           watch.initial <- Live;
           result := Some (Ok Initial_done)
       | Retained | Live -> (
-              match next_message watch deadline with
-              | Error error -> result := Some (Error (map_error error))
-              | Ok message ->
-              (match entry_of_delivery watch.value message with
+          match next_message watch deadline with
+          | Error error -> result := Some (Error (map_error error))
+          | Ok message -> (
+              match entry_of_delivery watch.value message with
               | Error error -> result := Some (Error error)
-              | Ok entry ->
+              | Ok entry -> (
                   let initial_complete =
                     match watch.initial with
                     | Retained ->
                         if
-                          Int64.compare watch.initial_received Int64.max_int
-                          < 0
-                        then watch.initial_received <-
-                          Int64.add watch.initial_received 1L;
+                          Int64.compare watch.initial_received Int64.max_int < 0
+                        then
+                          watch.initial_received <-
+                            Int64.add watch.initial_received 1L;
                         let received_enough =
                           match watch.initial_pending with
                           | Some pending ->
@@ -885,15 +886,13 @@ module Watch = struct
                           | None -> false
                         in
                         received_enough
-                        || Int64.equal
-                             (Jetstream.Msg.num_pending message)
-                             0L
+                        || Int64.equal (Jetstream.Msg.num_pending message) 0L
                     | Marker | Live -> false
                   in
                   if initial_complete then watch.initial <- Marker;
                   match (watch.ignore_deletes, Entry.operation entry) with
                   | true, (Entry.Delete | Entry.Purge) -> ()
-                  | _ -> result := Some (Ok (Entry entry))))
+                  | _ -> result := Some (Ok (Entry entry)))))
     done;
     match !result with Some result -> result | None -> assert false
 

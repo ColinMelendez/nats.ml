@@ -24,9 +24,7 @@ let read_operation wire =
         (Format.asprintf "%a while reading %S" Nats.Codec.pp_error error wire)
 
 let reader_of_slices strings =
-  let slices =
-    List.map Bytesrw.Bytes.Slice.of_string strings
-  in
+  let slices = List.map Bytesrw.Bytes.Slice.of_string strings in
   let remaining = ref slices in
   Bytesrw.Bytes.Reader.make (fun () ->
       match !remaining with
@@ -402,10 +400,7 @@ let () =
             (expect_codec_ok (Nats.Codec.encode empty_operation));
           (match
              read_operation
-               "HPUB orders.created _INBOX.reply 12 12\r\n\
-                NATS/1.0\r\n\
-                \r\n\
-                \r\n"
+               "HPUB orders.created _INBOX.reply 12 12\r\nNATS/1.0\r\n\r\n\r\n"
            with
           | Nats.Op.Hpub { message; status = None } ->
               equal bool true (Nats.Message.equal empty message)
@@ -433,8 +428,7 @@ let () =
         (fun () ->
           let reader =
             Bytesrw.Bytes.Reader.of_string
-              ("HMSG inbox 7 12 12\r\nNATS/1.0\r\n\r\n\r\n"
-             ^ "PING\r\n")
+              ("HMSG inbox 7 12 12\r\nNATS/1.0\r\n\r\n\r\n" ^ "PING\r\n")
           in
           (match Nats.Codec.read reader with
           | Ok (Nats.Op.Hmsg { sid = 7; status = None; message }) ->

@@ -444,8 +444,7 @@ let () =
             (Nats_eio.Jetstream.Stream.Config.max_msgs_per_subject config);
           equal bool true (Nats_eio.Jetstream.Stream.Config.allow_rollup config);
           equal bool true (Nats_eio.Jetstream.Stream.Config.allow_direct config);
-          equal bool true
-            (Nats_eio.Jetstream.Stream.Config.deny_delete config);
+          equal bool true (Nats_eio.Jetstream.Stream.Config.deny_delete config);
           equal int 3 (Nats_eio.Jetstream.Stream.Config.replicas config);
           (match Nats_eio.Jetstream.Stream.Config.placement config with
           | None -> fail "stream config lost placement"
@@ -527,16 +526,16 @@ let () =
               (Nats_eio.Jetstream.Stream.Config.with_sealed config true)
           in
           equal bool true (Nats_eio.Jetstream.Stream.Config.sealed sealed);
-          (match
-             Nats_eio.Jetstream.Stream.Config.v ~name:"KV_users"
-               ~subjects:[ subject ] ~replicas:0 ()
-           with
-          | Error Nats_eio.Jetstream.Error.Invalid_replicas 0 -> ()
+          match
+            Nats_eio.Jetstream.Stream.Config.v ~name:"KV_users"
+              ~subjects:[ subject ] ~replicas:0 ()
+          with
+          | Error (Nats_eio.Jetstream.Error.Invalid_replicas 0) -> ()
           | Ok _ -> fail "stream config accepted zero replicas"
           | Error error ->
               fail
                 (Format.asprintf "unexpected replica error: %a"
-                   Nats_eio.Jetstream.Error.pp_config error)));
+                   Nats_eio.Jetstream.Error.pp_config error));
       test "consumer config updaters preserve modeled fields" (fun () ->
           let span = Mtime.Span.of_uint64_ns 1_000_000L in
           let second_span = Mtime.Span.of_uint64_ns 2_000_000L in
@@ -549,9 +548,7 @@ let () =
               Nats.Subject.Filter.literal "orders.updated";
             ]
           in
-          let pause_until =
-            ptime_of_rfc3339 "2026-08-13T12:00:00.000000000Z"
-          in
+          let pause_until = ptime_of_rfc3339 "2026-08-13T12:00:00.000000000Z" in
           let config =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"worker"
@@ -561,8 +558,7 @@ let () =
                    (Nats_eio.Jetstream.Consumer.Config.By_start_sequence 1L)
                  ~ack_policy:Nats_eio.Jetstream.Consumer.Config.All
                  ~ack_wait:span ~max_deliver:5 ~filter_subjects
-                 ~backoff:[ span; second_span ]
-                 ~pause_until
+                 ~backoff:[ span; second_span ] ~pause_until
                  ~sample_frequency:10 ~rate_limit:64000L ~replicas:3
                  ~metadata:[ ("owner", "server") ]
                  ~replay_policy:Nats_eio.Jetstream.Consumer.Config.Original
@@ -592,9 +588,7 @@ let () =
           equal (list int64) [ 1_000_000L; 2_000_000L ]
             (List.map Mtime.Span.to_uint64_ns
                (Nats_eio.Jetstream.Consumer.Config.backoff described));
-          (match
-             Nats_eio.Jetstream.Consumer.Config.pause_until described
-           with
+          (match Nats_eio.Jetstream.Consumer.Config.pause_until described with
           | Some value when Ptime.equal pause_until value -> ()
           | _ -> fail "consumer config updater lost pause deadline");
           (match Nats_eio.Jetstream.Consumer.Config.metadata described with
@@ -627,7 +621,9 @@ let () =
             (Nats_eio.Jetstream.Consumer.Config.rate_limit cleared_metadata);
           equal (option int) None
             (Nats_eio.Jetstream.Consumer.Config.replicas cleared_metadata);
-          (match Nats_eio.Jetstream.Consumer.Config.metadata cleared_metadata with
+          (match
+             Nats_eio.Jetstream.Consumer.Config.metadata cleared_metadata
+           with
           | [] -> ()
           | _ -> fail "consumer config updater retained metadata");
           let singular =
@@ -635,9 +631,7 @@ let () =
               (Nats_eio.Jetstream.Consumer.Config.with_filter_subjects
                  cleared_metadata filter_subjects)
           in
-          (match
-             Nats_eio.Jetstream.Consumer.Config.filter_subject singular
-           with
+          (match Nats_eio.Jetstream.Consumer.Config.filter_subject singular with
           | None -> ()
           | Some _ -> fail "consumer config updater retained singular filter");
           equal (list string)
@@ -650,8 +644,9 @@ let () =
                  (Some filter))
           in
           (match Nats_eio.Jetstream.Consumer.Config.filter_subject singular with
-          | Some value when
-              String.equal (Nats.Subject.Filter.to_string value) "orders.*" ->
+          | Some value
+            when String.equal (Nats.Subject.Filter.to_string value) "orders.*"
+            ->
               ()
           | _ -> fail "consumer config updater did not set singular filter");
           (match
@@ -712,56 +707,56 @@ let () =
              Nats_eio.Jetstream.Consumer.Config.v ~sample_frequency:(-1) ()
            with
           | Error
-              (Nats_eio.Jetstream.Error.Invalid_consumer_sample_frequency
-                "-1") ->
+              (Nats_eio.Jetstream.Error.Invalid_consumer_sample_frequency "-1")
+            ->
               ()
           | _ -> fail "consumer config accepted an invalid sample frequency");
           (match Nats_eio.Jetstream.Consumer.Config.v ~rate_limit:(-1L) () with
-          | Error (Nats_eio.Jetstream.Error.Invalid_consumer_rate_limit (-1L)) ->
+          | Error (Nats_eio.Jetstream.Error.Invalid_consumer_rate_limit -1L) ->
               ()
           | _ -> fail "consumer config accepted a negative rate limit");
           (match Nats_eio.Jetstream.Consumer.Config.v ~replicas:(-1) () with
-          | Error (Nats_eio.Jetstream.Error.Invalid_consumer_replicas (-1)) ->
-              ()
+          | Error (Nats_eio.Jetstream.Error.Invalid_consumer_replicas -1) -> ()
           | _ -> fail "consumer config accepted negative replicas");
           (match Nats_eio.Jetstream.Consumer.Config.v ~rate_limit:1L () with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_policy
-                { field = "rate_limit"; value = "requires deliver_subject" }) ->
+                 { field = "rate_limit"; value = "requires deliver_subject" })
+            ->
               ()
           | _ -> fail "consumer config accepted pull rate limiting");
           (match
              Nats_eio.Jetstream.Consumer.Config.v
                ~filter_subject:(Nats.Subject.Filter.literal "orders.*")
-               ~filter_subjects:
-                 [ Nats.Subject.Filter.literal "orders.created" ] ()
+               ~filter_subjects:[ Nats.Subject.Filter.literal "orders.created" ]
+               ()
            with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_policy
-                { field = "filter_subjects"; value = "exclusive with filter_subject" }) ->
+                 {
+                   field = "filter_subjects";
+                   value = "exclusive with filter_subject";
+                 }) ->
               ()
           | _ -> fail "consumer config accepted exclusive filter forms");
-          (match
-            Nats_eio.Jetstream.Consumer.Config.v
-              ~backoff:[ Mtime.Span.zero ] ()
+          match
+            Nats_eio.Jetstream.Consumer.Config.v ~backoff:[ Mtime.Span.zero ] ()
           with
           | Ok _ -> ()
-          | Error _ -> fail "consumer config rejected zero backoff"));
-      test "priority consumer configuration validates policy constraints" (fun () ->
+          | Error _ -> fail "consumer config rejected zero backoff");
+      test "priority consumer configuration validates policy constraints"
+        (fun () ->
           let timeout = Mtime.Span.(30 * s) in
           let config =
             expect_jetstream_config_ok
-              (Nats_eio.Jetstream.Consumer.Config.v
-                 ~priority_groups:[ "blue" ]
+              (Nats_eio.Jetstream.Consumer.Config.v ~priority_groups:[ "blue" ]
                  ~priority_policy:
                    Nats_eio.Jetstream.Consumer.Config.Pinned_client
                  ~priority_timeout:timeout ())
           in
           equal (list string) [ "blue" ]
             (Nats_eio.Jetstream.Consumer.Config.priority_groups config);
-          (match
-             Nats_eio.Jetstream.Consumer.Config.priority_policy config
-           with
+          (match Nats_eio.Jetstream.Consumer.Config.priority_policy config with
           | Some Nats_eio.Jetstream.Consumer.Config.Pinned_client -> ()
           | _ -> fail "priority consumer lost its policy");
           equal int64 30_000_000_000L
@@ -771,82 +766,90 @@ let () =
           (match
              Nats_eio.Jetstream.Consumer.Config.v
                ~priority_groups:[ "blue"; "green" ]
-               ~priority_policy:
-                 Nats_eio.Jetstream.Consumer.Config.Pinned_client ()
+               ~priority_policy:Nats_eio.Jetstream.Consumer.Config.Pinned_client
+               ()
            with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_policy
-                {
-                  field = "priority_groups";
-                  value = "only one group is currently supported";
-                }) ->
+                 {
+                   field = "priority_groups";
+                   value = "only one group is currently supported";
+                 }) ->
               ()
           | _ -> fail "priority config accepted multiple groups");
           (match
              Nats_eio.Jetstream.Consumer.Config.v
                ~priority_groups:[ "bad.group" ]
-               ~priority_policy:
-                 Nats_eio.Jetstream.Consumer.Config.Prioritized ()
+               ~priority_policy:Nats_eio.Jetstream.Consumer.Config.Prioritized
+               ()
            with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_priority_group
-                "bad.group") ->
+                 "bad.group") ->
               ()
           | _ -> fail "priority config accepted an invalid group name");
           (match
              Nats_eio.Jetstream.Consumer.Config.v
-               ~priority_policy:
-                 Nats_eio.Jetstream.Consumer.Config.Prioritized ()
-          with
-          | Error
-              (Nats_eio.Jetstream.Error.Invalid_consumer_policy
-                { field = "priority_policy"; value = "requires priority_groups" }) ->
-              ()
-          | _ -> fail "priority policy accepted an empty group list");
-          (match
-             Nats_eio.Jetstream.Consumer.Config.v
-               ~priority_groups:[ "blue" ] ~priority_timeout:timeout ()
+               ~priority_policy:Nats_eio.Jetstream.Consumer.Config.Prioritized
+               ()
            with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_policy
-                { field = "priority_groups"; value = "requires priority_policy" }) ->
+                 {
+                   field = "priority_policy";
+                   value = "requires priority_groups";
+                 }) ->
+              ()
+          | _ -> fail "priority policy accepted an empty group list");
+          (match
+             Nats_eio.Jetstream.Consumer.Config.v ~priority_groups:[ "blue" ]
+               ~priority_timeout:timeout ()
+           with
+          | Error
+              (Nats_eio.Jetstream.Error.Invalid_consumer_policy
+                 {
+                   field = "priority_groups";
+                   value = "requires priority_policy";
+                 }) ->
               ()
           | _ -> fail "priority groups accepted no policy");
           (match
-             Nats_eio.Jetstream.Consumer.Config.v
-               ~priority_groups:[ "blue" ]
+             Nats_eio.Jetstream.Consumer.Config.v ~priority_groups:[ "blue" ]
                ~priority_policy:Nats_eio.Jetstream.Consumer.Config.Overflow
                ~priority_timeout:timeout ()
            with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_policy
-                { field = "priority_timeout"; value = "requires pinned_client" }) ->
+                 {
+                   field = "priority_timeout";
+                   value = "requires pinned_client";
+                 }) ->
               ()
           | _ -> fail "overflow policy accepted a pin timeout");
           (match
              Nats_eio.Jetstream.Consumer.Config.v
                ~deliver_subject:(Nats.Subject.literal "orders.push")
                ~priority_groups:[ "blue" ]
-               ~priority_policy:
-                 Nats_eio.Jetstream.Consumer.Config.Prioritized ()
+               ~priority_policy:Nats_eio.Jetstream.Consumer.Config.Prioritized
+               ()
            with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_policy
-                { field = "priority_policy"; value = "requires pull consumer" }) ->
+                 { field = "priority_policy"; value = "requires pull consumer" })
+            ->
               ()
           | _ -> fail "priority config accepted a push consumer");
-          (match
-             Nats_eio.Jetstream.Consumer.Config.v
-               ~ack_policy:Nats_eio.Jetstream.Consumer.Config.No_ack
-               ~priority_groups:[ "blue" ]
-               ~priority_policy:
-                 Nats_eio.Jetstream.Consumer.Config.Overflow ()
-           with
+          match
+            Nats_eio.Jetstream.Consumer.Config.v
+              ~ack_policy:Nats_eio.Jetstream.Consumer.Config.No_ack
+              ~priority_groups:[ "blue" ]
+              ~priority_policy:Nats_eio.Jetstream.Consumer.Config.Overflow ()
+          with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_policy
-                { field = "ack_policy"; value = "requires explicit" }) ->
+                 { field = "ack_policy"; value = "requires explicit" }) ->
               ()
-          | _ -> fail "overflow policy accepted implicit acknowledgement"));
+          | _ -> fail "overflow policy accepted implicit acknowledgement");
       test "priority consumer create emits policy and timeout" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
@@ -862,11 +865,12 @@ let () =
               in
               let config =
                 expect_jetstream_config_ok
-                  (Nats_eio.Jetstream.Consumer.Config.v
-                     ~durable_name:"worker" ~priority_groups:[ "blue" ]
+                  (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"worker"
+                     ~priority_groups:[ "blue" ]
                      ~priority_policy:
                        Nats_eio.Jetstream.Consumer.Config.Pinned_client
-                     ~priority_timeout:Mtime.Span.(30 * s) ())
+                     ~priority_timeout:Mtime.Span.(30 * s)
+                     ())
               in
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -882,8 +886,7 @@ let () =
               if
                 not
                   (contains_substring
-                     ~needle:"priority_policy\\\":\\\"pinned_client"
-                     trace)
+                     ~needle:"priority_policy\\\":\\\"pinned_client" trace)
               then fail "priority consumer create omitted its policy";
               if
                 not
@@ -918,28 +921,27 @@ let () =
               let config = Nats_eio.Jetstream.Consumer.Info.config info in
               equal (list string) [ "blue" ]
                 (Nats_eio.Jetstream.Consumer.Config.priority_groups config);
-              (match
-                 Nats_eio.Jetstream.Consumer.Info.priority_groups info
-               with
-              | [ group ] ->
+              (match Nats_eio.Jetstream.Consumer.Info.priority_groups info with
+              | [ group ] -> (
                   equal string "blue"
                     (Nats_eio.Jetstream.Consumer.Priority_group.name group);
                   equal (option string) (Some "pin-1")
                     (Nats_eio.Jetstream.Consumer.Priority_group.pinned_client_id
                        group);
-                  (match
-                     Nats_eio.Jetstream.Consumer.Priority_group.pinned_at group
-                   with
-                  | Some value when
-                      Ptime.equal value
-                        (ptime_of_rfc3339
-                           "2026-08-12T12:00:00.000000000Z") ->
+                  match
+                    Nats_eio.Jetstream.Consumer.Priority_group.pinned_at group
+                  with
+                  | Some value
+                    when Ptime.equal value
+                           (ptime_of_rfc3339 "2026-08-12T12:00:00.000000000Z")
+                    ->
                       ()
                   | _ -> fail "consumer info lost the pin timestamp")
               | _ -> fail "consumer info lost its priority group state");
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
-      test "consumer unpin sends the group request and clears its pin" (fun () ->
+      test "consumer unpin sends the group request and clears its pin"
+        (fun () ->
           let first_response, first_response_u = Eio.Promise.create () in
           let unpin_response, unpin_response_u = Eio.Promise.create () in
           let second_response, second_response_u = Eio.Promise.create () in
@@ -978,11 +980,12 @@ let () =
               let unpin_trace = Buffer.contents trace in
               if
                 not
-                  (contains_substring
-                     ~needle:"CONSUMER.UNPIN.ORDERS.worker" unpin_trace)
+                  (contains_substring ~needle:"CONSUMER.UNPIN.ORDERS.worker"
+                     unpin_trace)
               then fail "consumer unpin used the wrong endpoint";
               if
-                not (contains_substring ~needle:"group\\\":\\\"blue" unpin_trace)
+                not
+                  (contains_substring ~needle:"group\\\":\\\"blue" unpin_trace)
               then fail "consumer unpin omitted its group";
               Eio.Promise.resolve unpin_response_u (Ok (api_ok_wire ~sid:2));
               expect_jetstream_ok (Eio.Promise.await unpin_result);
@@ -996,10 +999,10 @@ let () =
               if
                 not
                   (Int.equal
-                     (count_substring ~needle:"id\\\":\\\"pin-unpin" second_trace)
+                     (count_substring ~needle:"id\\\":\\\"pin-unpin"
+                        second_trace)
                      0)
-              then
-                fail "consumer unpin left a stale local pin";
+              then fail "consumer unpin left a stale local pin";
               Eio.Promise.resolve second_response_u
                 (Ok (delivery_wire_with_sid ~sid:3 "second"));
               ignore (expect_jetstream_ok (Eio.Promise.await second_result));
@@ -1023,8 +1026,7 @@ let () =
               in
               let config =
                 expect_jetstream_config_ok
-                  (Nats_eio.Jetstream.Consumer.Config.v
-                     ~durable_name:"worker"
+                  (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"worker"
                      ~deliver_subject:(Nats.Subject.literal "orders.push")
                      ~filter_subjects:
                        [
@@ -1036,9 +1038,10 @@ let () =
                          Mtime.Span.of_uint64_ns 1_000_000L;
                          Mtime.Span.of_uint64_ns 2_000_000L;
                        ]
-                     ~pause_until
-                     ~sample_frequency:25 ~rate_limit:65536L ~replicas:3
-                     ~metadata:[ ("owner", "client") ] ())
+                     ~pause_until ~sample_frequency:25 ~rate_limit:65536L
+                     ~replicas:3
+                     ~metadata:[ ("owner", "client") ]
+                     ())
               in
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -1048,19 +1051,23 @@ let () =
               let trace = Buffer.contents trace in
               if
                 not
-                  (contains_substring
-                     ~needle:"CONSUMER.CREATE.ORDERS.worker" trace)
+                  (contains_substring ~needle:"CONSUMER.CREATE.ORDERS.worker"
+                     trace)
               then fail "consumer create was not sent";
-              if not (contains_substring ~needle:"sample_freq\\\":\\\"25%" trace)
+              if
+                not (contains_substring ~needle:"sample_freq\\\":\\\"25%" trace)
               then fail "consumer create omitted sample frequency";
-              if not (contains_substring ~needle:"rate_limit_bps\\\":65536" trace)
+              if
+                not
+                  (contains_substring ~needle:"rate_limit_bps\\\":65536" trace)
               then fail "consumer create omitted rate limit";
               if not (contains_substring ~needle:"num_replicas\\\":3" trace)
               then fail "consumer create omitted replica count";
               if
                 not
                   (contains_substring
-                     ~needle:"filter_subjects\\\":[\\\"orders.created\\\",\\\"orders.updated\\\"]"
+                     ~needle:
+                       "filter_subjects\\\":[\\\"orders.created\\\",\\\"orders.updated\\\"]"
                      trace)
               then fail "consumer create omitted plural filters";
               if
@@ -1078,8 +1085,7 @@ let () =
               if
                 not
                   (contains_substring
-                     ~needle:"metadata\\\":{\\\"owner\\\":\\\"client\\\"}"
-                     trace)
+                     ~needle:"metadata\\\":{\\\"owner\\\":\\\"client\\\"}" trace)
               then fail "consumer create omitted metadata";
               Eio.Promise.resolve response_u
                 (Ok
@@ -1114,11 +1120,11 @@ let () =
                 (Ok
                    (consumer_info_wire_with_sid ~sid:1
                       {|{"paused":true,"pause_until":"2026-08-13T12:00:00.000000000Z","pause_remaining":60000000000,"future_field":true}|}));
-              let paused = expect_jetstream_ok (Eio.Promise.await pause_result) in
+              let paused =
+                expect_jetstream_ok (Eio.Promise.await pause_result)
+              in
               equal bool true (Nats_eio.Jetstream.Consumer.Pause.paused paused);
-              (match
-                 Nats_eio.Jetstream.Consumer.Pause.pause_until paused
-               with
+              (match Nats_eio.Jetstream.Consumer.Pause.pause_until paused with
               | Some value when Ptime.equal until value -> ()
               | _ -> fail "pause response lost its deadline");
               equal (option int64) (Some 60_000_000_000L)
@@ -1138,9 +1144,7 @@ let () =
               in
               equal bool false
                 (Nats_eio.Jetstream.Consumer.Pause.paused resumed);
-              (match
-                 Nats_eio.Jetstream.Consumer.Pause.pause_until resumed
-               with
+              (match Nats_eio.Jetstream.Consumer.Pause.pause_until resumed with
               | None -> ()
               | Some _ -> fail "consumer resume retained its deadline");
               equal (option int64) None
@@ -1169,17 +1173,16 @@ let () =
                        "pause_until\\\":\\\"2026-08-13T12:00:00.000000000Z"
                      trace)
               then fail "consumer pause omitted its deadline";
-              if
-                not
-                  (Int.equal (count_substring ~needle:" 0\\r\\n\"" trace) 1)
-              then
-                fail "consumer resume did not send an empty request";
+              if not (Int.equal (count_substring ~needle:" 0\\r\\n\"" trace) 1)
+              then fail "consumer resume did not send an empty request";
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "consumer info normalizes zero and rejects malformed pause deadlines"
         (fun () ->
           let zero_response, zero_response_u = Eio.Promise.create () in
-          let malformed_response, malformed_response_u = Eio.Promise.create () in
+          let malformed_response, malformed_response_u =
+            Eio.Promise.create ()
+          in
           let hold, hold_u = Eio.Promise.create () in
           with_connection
             ~reads:
@@ -1200,13 +1203,15 @@ let () =
                 (Ok
                    (consumer_info_wire_with_sid ~sid:1
                       {|{"stream_name":"ORDERS","name":"worker","config":{"deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","pause_until":"0001-01-01T00:00:00.000000000+00:00"}}|}));
-              let zero_info = expect_jetstream_ok (Eio.Promise.await zero_result) in
-              (match
-                 Nats_eio.Jetstream.Consumer.Info.pause_until zero_info
-               with
+              let zero_info =
+                expect_jetstream_ok (Eio.Promise.await zero_result)
+              in
+              (match Nats_eio.Jetstream.Consumer.Info.pause_until zero_info with
               | None -> ()
               | Some _ -> fail "consumer info retained the zero pause deadline");
-              let malformed_result, malformed_result_u = Eio.Promise.create () in
+              let malformed_result, malformed_result_u =
+                Eio.Promise.create ()
+              in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve malformed_result_u
                     (Nats_eio.Jetstream.Consumer.info consumer));
@@ -1215,10 +1220,11 @@ let () =
                 (Ok
                    (consumer_info_wire_with_sid ~sid:2
                       {|{"stream_name":"ORDERS","name":"worker","config":{"deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","pause_until":"not-a-timestamp"}}|}));
-              expect_jetstream_error (Eio.Promise.await malformed_result) (function
+              expect_jetstream_error (Eio.Promise.await malformed_result)
+                (function
                 | Nats_eio.Jetstream.Error.Invalid_config
                     (Nats_eio.Jetstream.Error.Invalid_consumer_pause_until
-                      "not-a-timestamp") ->
+                       "not-a-timestamp") ->
                     true
                 | _ -> false);
               expect_ok (Nats_eio.Connection.close connection);
@@ -1240,7 +1246,8 @@ let () =
                      ~allow_rollup:true ~allow_direct:true ~deny_delete:true
                      ~replicas:3
                      ~compression:Nats_eio.Jetstream.Stream.Config.S2
-                     ~metadata:[ ("owner", "users") ] ())
+                     ~metadata:[ ("owner", "users") ]
+                     ())
               in
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -1269,15 +1276,12 @@ let () =
               then fail "stream create omitted the deny-delete flag";
               if not (contains_substring ~needle:"num_replicas\\\":3" trace)
               then fail "stream create omitted the replica count";
-              if
-                not
-                  (contains_substring ~needle:"compression\\\":\\\"s2" trace)
+              if not (contains_substring ~needle:"compression\\\":\\\"s2" trace)
               then fail "stream create omitted compression";
               if
                 not
                   (contains_substring
-                     ~needle:"metadata\\\":{\\\"owner\\\":\\\"users\\\"}"
-                     trace)
+                     ~needle:"metadata\\\":{\\\"owner\\\":\\\"users\\\"}" trace)
               then fail "stream create omitted stream metadata";
               Eio.Promise.resolve response_u
                 (Ok
@@ -1314,12 +1318,13 @@ let () =
                      ~description:"updated" ~max_msgs_per_subject:5L
                      ~allow_rollup:true ~allow_direct:true ~replicas:2
                      ~compression:Nats_eio.Jetstream.Stream.Config.S2
-                     ~metadata:[ ("owner", "client") ] ())
+                     ~metadata:[ ("owner", "client") ]
+                     ())
               in
               let placement =
                 expect_jetstream_config_ok
-                  (Nats_eio.Jetstream.Stream.Config.Placement.v
-                     ~cluster:"east" ())
+                  (Nats_eio.Jetstream.Stream.Config.Placement.v ~cluster:"east"
+                     ())
               in
               let config =
                 expect_jetstream_config_ok
@@ -1362,13 +1367,15 @@ let () =
                 fail "stream update discarded an unknown boolean field";
               if
                 count_substring
-                  ~needle:"metadata\\\":{\\\"owner\\\":\\\"client\\\"}"
-                  trace < 1
+                  ~needle:"metadata\\\":{\\\"owner\\\":\\\"client\\\"}" trace
+                < 1
               then fail "stream update did not replace stream metadata";
               if
                 count_substring
-                  ~needle:"republish\\\":{\\\"src\\\":\\\"orders.in\\\",\\\"dest\\\":\\\"orders.out\\\"}"
-                  trace < 1
+                  ~needle:
+                    "republish\\\":{\\\"src\\\":\\\"orders.in\\\",\\\"dest\\\":\\\"orders.out\\\"}"
+                  trace
+                < 1
               then fail "stream update discarded an unmodeled object field";
               Eio.Promise.resolve update_response_u
                 (Ok
@@ -1499,15 +1506,17 @@ let () =
                 (Ok
                    (consumer_info_wire_with_sid ~sid:1
                       {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","description":"before","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant","max_deliver":5,"max_ack_pending":-1,"filter_subjects":["orders.created","orders.updated"],"backoff":[1000000,2000000],"pause_until":"2026-08-13T12:00:00Z","sample_freq":"10%","rate_limit_bps":64000,"num_replicas":2,"metadata":{"owner":"server"},"future_field":true},"paused":true,"pause_remaining":60000000000}|}));
-              let current_info = expect_jetstream_ok (Eio.Promise.await info_result) in
+              let current_info =
+                expect_jetstream_ok (Eio.Promise.await info_result)
+              in
               equal bool true
                 (Nats_eio.Jetstream.Consumer.Info.paused current_info);
               (match
                  Nats_eio.Jetstream.Consumer.Info.pause_until current_info
                with
               | Some value
-                when
-                  Ptime.equal (ptime_of_rfc3339 "2026-08-13T12:00:00Z") value ->
+                when Ptime.equal (ptime_of_rfc3339 "2026-08-13T12:00:00Z") value
+                ->
                   ()
               | _ -> fail "consumer info lost pause deadline");
               equal (option int64) (Some 60_000_000_000L)
@@ -1615,8 +1624,7 @@ let () =
               then fail "consumer update omitted the changed description";
               if
                 not (contains_substring ~needle:"max_deliver\\\":7" clear_trace)
-              then
-                fail "consumer update omitted the changed delivery limit";
+              then fail "consumer update omitted the changed delivery limit";
               if
                 not
                   (contains_substring ~needle:"max_ack_pending\\\":-1"
@@ -1624,8 +1632,8 @@ let () =
               then fail "consumer update reset unlimited ack pending";
               if
                 not
-                  (contains_substring
-                     ~needle:"durable_name\\\":\\\"worker\\\"" clear_trace)
+                  (contains_substring ~needle:"durable_name\\\":\\\"worker\\\""
+                     clear_trace)
               then fail "consumer update dropped the durable identity";
               if
                 not
@@ -1634,8 +1642,7 @@ let () =
               then fail "consumer update did not clear sample frequency";
               if
                 not
-                  (contains_substring ~needle:"rate_limit_bps\\\":0"
-                     clear_trace)
+                  (contains_substring ~needle:"rate_limit_bps\\\":0" clear_trace)
               then fail "consumer update did not clear rate limiting";
               if
                 not
@@ -1651,24 +1658,20 @@ let () =
                   (contains_substring ~needle:"filter_subjects\\\":[]"
                      clear_trace)
               then fail "consumer update did not clear plural filters";
-              if
-                not (contains_substring ~needle:"backoff\\\":[]" clear_trace)
+              if not (contains_substring ~needle:"backoff\\\":[]" clear_trace)
               then fail "consumer update did not clear backoff";
               if
                 not
-                  (contains_substring
-                     ~needle:"2026-08-13T12:00:00Z"
-                     clear_trace)
+                  (contains_substring ~needle:"2026-08-13T12:00:00Z" clear_trace)
               then fail "consumer update did not preserve pause deadline";
-              if
-                not (contains_substring ~needle:"metadata\\\":{}" clear_trace)
-              then
-                fail "consumer update did not clear metadata";
+              if not (contains_substring ~needle:"metadata\\\":{}" clear_trace)
+              then fail "consumer update did not clear metadata";
               if
                 not
                   (contains_substring ~needle:"future_field\\\":true"
                      clear_trace)
-              then fail "consumer update discarded an unknown configuration field";
+              then
+                fail "consumer update discarded an unknown configuration field";
               Eio.Promise.resolve update_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:3
@@ -1697,7 +1700,8 @@ let () =
                    (Nats_eio.Jetstream.Consumer.Info.config info)
                with
               | None -> ()
-              | Some _ -> fail "consumer update response retained singular filter");
+              | Some _ ->
+                  fail "consumer update response retained singular filter");
               (match
                  Nats_eio.Jetstream.Consumer.Config.filter_subjects
                    (Nats_eio.Jetstream.Consumer.Info.config info)
@@ -1741,9 +1745,10 @@ let () =
               in
               if
                 not
-                  (contains_substring
-                     ~needle:"description\\\":\\\"preserved" preserve_trace)
-              then fail "consumer update did not preserve description replacement";
+                  (contains_substring ~needle:"description\\\":\\\"preserved"
+                     preserve_trace)
+              then
+                fail "consumer update did not preserve description replacement";
               if
                 not
                   (contains_substring ~needle:"sample_freq\\\":\\\"10%"
@@ -1763,11 +1768,13 @@ let () =
                 not
                   (contains_substring ~needle:"filter_subject\\\":\\\"\\\""
                      preserve_trace)
-              then fail "consumer update did not clear singular filter on preserve";
+              then
+                fail "consumer update did not clear singular filter on preserve";
               if
                 not
                   (contains_substring
-                     ~needle:"filter_subjects\\\":[\\\"orders.created\\\",\\\"orders.updated\\\"]"
+                     ~needle:
+                       "filter_subjects\\\":[\\\"orders.created\\\",\\\"orders.updated\\\"]"
                      preserve_trace)
               then fail "consumer update did not preserve plural filters";
               if
@@ -1802,7 +1809,8 @@ let () =
                    (Nats_eio.Jetstream.Consumer.Info.config preserved_info)
                with
               | None -> ()
-              | Some _ -> fail "consumer update response retained singular filter");
+              | Some _ ->
+                  fail "consumer update response retained singular filter");
               equal (list string)
                 [ "orders.created"; "orders.updated" ]
                 (List.map Nats.Subject.Filter.to_string
@@ -1835,12 +1843,12 @@ let () =
             (fun ~sw ~trace connection ->
               let config =
                 expect_jetstream_config_ok
-                  (Nats_eio.Jetstream.Consumer.Config.v
-                     ~durable_name:"worker" ~description:"updated"
-                     ~priority_groups:[ "blue" ]
+                  (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"worker"
+                     ~description:"updated" ~priority_groups:[ "blue" ]
                      ~priority_policy:
                        Nats_eio.Jetstream.Consumer.Config.Pinned_client
-                     ~priority_timeout:Mtime.Span.(30 * s) ())
+                     ~priority_timeout:Mtime.Span.(30 * s)
+                     ())
               in
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -1862,8 +1870,7 @@ let () =
               if
                 not
                   (contains_substring
-                     ~needle:"priority_policy\\\":\\\"pinned_client"
-                     trace)
+                     ~needle:"priority_policy\\\":\\\"pinned_client" trace)
               then fail "consumer update dropped priority policy";
               if
                 not
@@ -1888,8 +1895,8 @@ let () =
             (fun ~sw ~trace connection ->
               let config =
                 expect_jetstream_config_ok
-                  (Nats_eio.Jetstream.Consumer.Config.v
-                     ~durable_name:"worker" ~priority_groups:[ "green" ]
+                  (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"worker"
+                     ~priority_groups:[ "green" ]
                      ~priority_policy:
                        Nats_eio.Jetstream.Consumer.Config.Prioritized ())
               in
@@ -1913,7 +1920,8 @@ let () =
                 fail "priority identity rejection sent an update";
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
-      test "stream purge sends a filtered request and returns the count" (fun () ->
+      test "stream purge sends a filtered request and returns the count"
+        (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
           with_connection_traced
@@ -1934,8 +1942,7 @@ let () =
               yield_n 5;
               let trace = Buffer.contents trace in
               if
-                not
-                  (contains_substring ~needle:"STREAM.PURGE.OBJ_assets" trace)
+                not (contains_substring ~needle:"STREAM.PURGE.OBJ_assets" trace)
               then fail "stream purge was not sent";
               if
                 not
@@ -2124,7 +2131,8 @@ let () =
               expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Push.close push);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
-      test "owned push creates after subscribing and deletes on close" (fun () ->
+      test "owned push creates after subscribing and deletes on close"
+        (fun () ->
           let create_response, create_response_u = Eio.Promise.create () in
           let info_response, info_response_u = Eio.Promise.create () in
           let delete_response, delete_response_u = Eio.Promise.create () in
@@ -2150,8 +2158,7 @@ let () =
                 expect_jetstream_config_ok
                   (Nats_eio.Jetstream.Consumer.Config.v
                      ~deliver_subject:(Nats.Subject.literal "orders.push")
-                     ~deliver_policy:
-                       Nats_eio.Jetstream.Consumer.Config.All
+                     ~deliver_policy:Nats_eio.Jetstream.Consumer.Config.All
                      ~ack_policy:Nats_eio.Jetstream.Consumer.Config.No_ack
                      ~inactive_threshold:Mtime.Span.(5 * min)
                      ~mem_storage:true ())
@@ -2159,8 +2166,7 @@ let () =
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve result_u
-                    (Nats_eio.Jetstream.Consumer.Push.create ~sw stream
-                       config));
+                    (Nats_eio.Jetstream.Consumer.Push.create ~sw stream config));
               yield_n 5;
               let trace_value = Buffer.contents trace in
               let subscription_position =
@@ -2216,19 +2222,18 @@ let () =
               in
               let config =
                 expect_jetstream_config_ok
-                  (Nats_eio.Jetstream.Consumer.Config.v
-                     ~durable_name:"worker"
+                  (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"worker"
                      ~deliver_subject:(Nats.Subject.literal "orders.push")
                      ())
               in
               expect_jetstream_error
                 (Nats_eio.Jetstream.Consumer.Push.create ~sw stream config)
                 (function
-                  | Nats_eio.Jetstream.Error.Invalid_config
-                      (Nats_eio.Jetstream.Error.Invalid_consumer_policy
-                        { field }) ->
-                      String.equal field "durable_name"
-                  | _ -> false);
+                | Nats_eio.Jetstream.Error.Invalid_config
+                    (Nats_eio.Jetstream.Error.Invalid_consumer_policy { field })
+                  ->
+                    String.equal field "durable_name"
+                | _ -> false);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "push restores its subscription after reconnect" (fun () ->
@@ -2573,7 +2578,8 @@ let () =
               if
                 not
                   (contains_substring
-                     ~needle:"filter_subjects\\\":[\\\"orders.created\\\",\\\"orders.updated\\\"]"
+                     ~needle:
+                       "filter_subjects\\\":[\\\"orders.created\\\",\\\"orders.updated\\\"]"
                      (Buffer.contents trace))
               then fail "ephemeral push dropped plural filters on recreate";
               if
@@ -2583,8 +2589,7 @@ let () =
               then fail "ephemeral push dropped backoff on recreate";
               if
                 not
-                  (contains_substring
-                     ~needle:"2026-08-13T12:00:00.000000000Z"
+                  (contains_substring ~needle:"2026-08-13T12:00:00.000000000Z"
                      (Buffer.contents trace))
               then fail "ephemeral push dropped pause deadline on recreate";
               if
@@ -3603,7 +3608,7 @@ let () =
                 `Await first_response;
                 `Await second_response;
                 `Await hold;
-            ]
+              ]
             (fun ~sw ~trace connection ->
               let consumer = consumer connection in
               let headers =
@@ -3615,15 +3620,15 @@ let () =
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve result_u
-                    (Nats_eio.Jetstream.Consumer.fetch consumer
-                       ~batch:1 ~group:"blue" ~priority:4));
+                    (Nats_eio.Jetstream.Consumer.fetch consumer ~batch:1
+                       ~group:"blue" ~priority:4));
               yield_n 5;
               let first_trace = Buffer.contents trace in
               if
                 not
                   (Int.equal
-                     (count_substring
-                        ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker" first_trace)
+                     (count_substring ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker"
+                        first_trace)
                      1)
               then fail "one-shot fetch did not send its request";
               if
@@ -3642,21 +3647,22 @@ let () =
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve result_u
-                    (Nats_eio.Jetstream.Consumer.fetch consumer
-                       ~batch:1 ~group:"blue" ~priority:4));
+                    (Nats_eio.Jetstream.Consumer.fetch consumer ~batch:1
+                       ~group:"blue" ~priority:4));
               yield_n 5;
               let second_trace = Buffer.contents trace in
               if
                 not
                   (Int.equal
-                     (count_substring
-                        ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker" second_trace)
+                     (count_substring ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker"
+                        second_trace)
                      2)
               then fail "one-shot fetch did not issue its second request";
               if
                 not
                   (Int.equal
-                     (count_substring ~needle:"id\\\":\\\"pin-fetch" second_trace)
+                     (count_substring ~needle:"id\\\":\\\"pin-fetch"
+                        second_trace)
                      1)
               then fail "one-shot fetch did not retain its pin id";
               Eio.Promise.resolve second_response_u
@@ -3691,9 +3697,9 @@ let () =
               in
               let pull =
                 expect_jetstream_ok
-                  (Nats_eio.Jetstream.Consumer.Pull.v ~sw ~batch:1
-                     ~group:"blue" ~min_pending:2L ~min_ack_pending:3L
-                     ~priority:4 (consumer connection))
+                  (Nats_eio.Jetstream.Consumer.Pull.v ~sw ~batch:1 ~group:"blue"
+                     ~min_pending:2L ~min_ack_pending:3L ~priority:4
+                     (consumer connection))
               in
               let first_result, first_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -3704,8 +3710,8 @@ let () =
               if
                 not
                   (Int.equal
-                     (count_substring
-                        ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker" first_trace)
+                     (count_substring ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker"
+                        first_trace)
                      1)
               then fail "pull did not send its first priority request";
               if
@@ -3713,12 +3719,13 @@ let () =
                   (Int.equal
                      (count_substring ~needle:"id\\\":\\\"pin-1" first_trace)
                      0)
-              then
-                fail "pull sent a pin id before receiving one";
+              then fail "pull sent a pin id before receiving one";
               if
-                not (contains_substring ~needle:"group\\\":\\\"blue" first_trace)
+                not
+                  (contains_substring ~needle:"group\\\":\\\"blue" first_trace)
               then fail "pull omitted its priority group";
-              if not (contains_substring ~needle:"min_pending\\\":2" first_trace)
+              if
+                not (contains_substring ~needle:"min_pending\\\":2" first_trace)
               then fail "pull omitted its pending threshold";
               if
                 not
@@ -3729,7 +3736,9 @@ let () =
               then fail "pull omitted its priority";
               Eio.Promise.resolve first_response_u
                 (Ok (delivery_wire_with_headers ~sid:1 ~headers "first"));
-              let first = expect_jetstream_ok (Eio.Promise.await first_result) in
+              let first =
+                expect_jetstream_ok (Eio.Promise.await first_result)
+              in
               equal string "first" (Nats_eio.Jetstream.Msg.payload first);
               let second_result, second_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -3740,8 +3749,8 @@ let () =
               if
                 not
                   (Int.equal
-                     (count_substring
-                        ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker" second_trace)
+                     (count_substring ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker"
+                        second_trace)
                      2)
               then fail "pull did not issue its second request";
               if
@@ -3749,8 +3758,7 @@ let () =
                   (Int.equal
                      (count_substring ~needle:"id\\\":\\\"pin-1" second_trace)
                      1)
-              then
-                fail "pull did not echo the server pin id";
+              then fail "pull did not echo the server pin id";
               Eio.Promise.resolve pin_lost_u
                 (Ok
                    (status_wire_with_sid ~sid:1 ~code:423
@@ -3760,8 +3768,8 @@ let () =
               if
                 not
                   (Int.equal
-                     (count_substring
-                        ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker" third_trace)
+                     (count_substring ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker"
+                        third_trace)
                      3)
               then fail "pull did not retry after losing its pin";
               if
@@ -3769,8 +3777,7 @@ let () =
                   (Int.equal
                      (count_substring ~needle:"id\\\":\\\"pin-1" third_trace)
                      1)
-              then
-                fail "pull retained a stale pin id after a mismatch";
+              then fail "pull retained a stale pin id after a mismatch";
               Eio.Promise.resolve second_response_u
                 (Ok (delivery_wire_with_sid ~sid:1 "second"));
               let second =

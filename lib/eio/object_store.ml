@@ -1,11 +1,13 @@
 module Core_error = Error
 module String_map = Map.Make (String)
 
-let ( let* ) value f = match value with Error error -> Error error | Ok value -> f value
+let ( let* ) value f =
+  match value with Error error -> Error error | Ok value -> f value
 
 module Config = struct
   type storage = Memory | File
   type compression = Jetstream.Stream.Config.compression = Uncompressed | S2
+
   module Placement = Jetstream.Stream.Config.Placement
 
   type t = {
@@ -49,7 +51,10 @@ module Config = struct
       done;
       match !failure with None -> Ok () | Some error -> Error error
 
-  let normalize_limit = function Some value when Int64.equal value 0L -> None | Some (-1L) -> None | value -> value
+  let normalize_limit = function
+    | Some value when Int64.equal value 0L -> None
+    | Some -1L -> None
+    | value -> value
 
   let validate_limit field = function
     | None -> Ok ()
@@ -227,8 +232,8 @@ module Error = struct
     | Config.Invalid_limit { field; value } ->
         Format.fprintf ppf "invalid object-store %s limit %Ld" field value
     | Config.Invalid_replicas value ->
-        Format.fprintf ppf "object-store replicas must be between 1 and 5, got %d"
-          value
+        Format.fprintf ppf
+          "object-store replicas must be between 1 and 5, got %d" value
 
   let pp_name ppf = function
     | Name.Empty_name -> Format.pp_print_string ppf "object name is empty"
@@ -238,8 +243,10 @@ module Error = struct
         Format.fprintf ppf "object chunk size must be positive, got %d" value
 
   let pp ppf = function
-    | Connection error -> Format.fprintf ppf "connection: %a" Core_error.pp error
-    | Jetstream error -> Format.fprintf ppf "JetStream: %a" Jetstream.Error.pp error
+    | Connection error ->
+        Format.fprintf ppf "connection: %a" Core_error.pp error
+    | Jetstream error ->
+        Format.fprintf ppf "JetStream: %a" Jetstream.Error.pp error
     | Decode error -> Format.fprintf ppf "JSON decode: %a" Jsont.Error.pp error
     | Encode error -> Format.fprintf ppf "JSON encode: %a" Jsont.Error.pp error
     | Invalid_config error ->
@@ -252,14 +259,16 @@ module Error = struct
         Format.fprintf ppf "invalid object headers: %a" Nats.Header.pp_error
           error
     | Unexpected_bucket { expected; actual } ->
-        Format.fprintf ppf "metadata bucket %S does not match %S" actual expected
+        Format.fprintf ppf "metadata bucket %S does not match %S" actual
+          expected
     | Unexpected_object_name { expected; actual } ->
         Format.fprintf ppf "metadata object name %S does not match %S" actual
           expected
     | Invalid_link_bucket error ->
         Format.fprintf ppf "invalid link bucket: %a" pp_config error
     | Invalid_link_name { value; reason } ->
-        Format.fprintf ppf "invalid link object name %S: %a" value pp_name reason
+        Format.fprintf ppf "invalid link object name %S: %a" value pp_name
+          reason
     | Invalid_metadata field ->
         Format.fprintf ppf "invalid object metadata field %S" field
     | Invalid_metadata_subject subject ->
@@ -295,7 +304,8 @@ module Error = struct
     | Cleanup_failed { info; error } ->
         (match info with
         | None -> Format.pp_print_string ppf "object cleanup failed"
-        | Some _ -> Format.pp_print_string ppf "object committed; cleanup failed");
+        | Some _ ->
+            Format.pp_print_string ppf "object committed; cleanup failed");
         Format.fprintf ppf ": %a" Jetstream.Error.pp error
 end
 
@@ -340,7 +350,6 @@ type t = {
 }
 
 type bucket = t
-
 type wire_link = { bucket : string; name : string option }
 type wire_options = { chunk_size : int option; link : wire_link option }
 
@@ -360,7 +369,8 @@ type wire_info = {
 }
 
 let wire_link_codec =
-  Jsont.Object.map ~kind:"NATS object link" (fun bucket name -> { bucket; name })
+  Jsont.Object.map ~kind:"NATS object link" (fun bucket name ->
+      { bucket; name })
   |> Jsont.Object.mem "bucket" Jsont.string ~enc:(fun (value : wire_link) ->
       value.bucket)
   |> Jsont.Object.opt_mem "name" Jsont.string ~enc:(fun (value : wire_link) ->
@@ -370,42 +380,55 @@ let wire_link_codec =
 let wire_options_codec =
   Jsont.Object.map ~kind:"NATS object options" (fun chunk_size link ->
       { chunk_size; link })
-  |> Jsont.Object.opt_mem "max_chunk_size" Jsont.int ~enc:(fun (value : wire_options) ->
-      value.chunk_size)
-  |> Jsont.Object.opt_mem "link" wire_link_codec ~enc:(fun (value : wire_options) ->
-      value.link)
+  |> Jsont.Object.opt_mem "max_chunk_size" Jsont.int
+       ~enc:(fun (value : wire_options) -> value.chunk_size)
+  |> Jsont.Object.opt_mem "link" wire_link_codec
+       ~enc:(fun (value : wire_options) -> value.link)
   |> Jsont.Object.skip_unknown |> Jsont.Object.finish
 
 let headers_codec = Jsont.Object.as_string_map (Jsont.list Jsont.string)
 let metadata_codec = Jsont.Object.as_string_map Jsont.string
 
 let wire_info_codec =
-  Jsont.Object.map ~kind:"NATS object metadata" (fun name description headers
-      metadata options bucket nuid size mtime chunks digest deleted ->
-    {
-      name;
-      description;
-      headers;
-      metadata;
-      options;
-      bucket;
-      nuid;
-      size;
-      mtime;
-      chunks;
-      digest;
-      deleted = Option.value ~default:false deleted;
-    })
+  Jsont.Object.map ~kind:"NATS object metadata"
+    (fun
+      name
+      description
+      headers
+      metadata
+      options
+      bucket
+      nuid
+      size
+      mtime
+      chunks
+      digest
+      deleted
+    ->
+      {
+        name;
+        description;
+        headers;
+        metadata;
+        options;
+        bucket;
+        nuid;
+        size;
+        mtime;
+        chunks;
+        digest;
+        deleted = Option.value ~default:false deleted;
+      })
   |> Jsont.Object.mem "name" Jsont.string ~enc:(fun (value : wire_info) ->
       value.name)
-  |> Jsont.Object.opt_mem "description" Jsont.string ~enc:(fun (value : wire_info) ->
-      value.description)
-  |> Jsont.Object.opt_mem "headers" headers_codec ~enc:(fun (value : wire_info) ->
-      value.headers)
-  |> Jsont.Object.opt_mem "metadata" metadata_codec ~enc:(fun (value : wire_info) ->
-      value.metadata)
-  |> Jsont.Object.opt_mem "options" wire_options_codec ~enc:(fun (value : wire_info) ->
-      value.options)
+  |> Jsont.Object.opt_mem "description" Jsont.string
+       ~enc:(fun (value : wire_info) -> value.description)
+  |> Jsont.Object.opt_mem "headers" headers_codec
+       ~enc:(fun (value : wire_info) -> value.headers)
+  |> Jsont.Object.opt_mem "metadata" metadata_codec
+       ~enc:(fun (value : wire_info) -> value.metadata)
+  |> Jsont.Object.opt_mem "options" wire_options_codec
+       ~enc:(fun (value : wire_info) -> value.options)
   |> Jsont.Object.mem "bucket" Jsont.string ~enc:(fun (value : wire_info) ->
       value.bucket)
   |> Jsont.Object.mem "nuid" Jsont.string ~enc:(fun (value : wire_info) ->
@@ -431,10 +454,12 @@ let map_jetstream_error = function
   | error -> Error.Jetstream error
 
 let map_config_error error = Error.Invalid_config error
-
 let stream_name bucket = "OBJ_" ^ bucket
 let chunk_filter bucket = Nats.Subject.Filter.literal ("$O." ^ bucket ^ ".C.>")
-let metadata_filter bucket = Nats.Subject.Filter.literal ("$O." ^ bucket ^ ".M.>")
+
+let metadata_filter bucket =
+  Nats.Subject.Filter.literal ("$O." ^ bucket ^ ".M.>")
+
 let chunk_subject bucket nuid = "$O." ^ bucket ^ ".C." ^ nuid
 
 let encode_name name =
@@ -445,8 +470,13 @@ let metadata_subject bucket name =
 
 let stream_config config =
   match
-    Jetstream.Stream.Config.v ~name:(stream_name (Config.bucket config))
-      ~subjects:[ chunk_filter (Config.bucket config); metadata_filter (Config.bucket config) ]
+    Jetstream.Stream.Config.v
+      ~name:(stream_name (Config.bucket config))
+      ~subjects:
+        [
+          chunk_filter (Config.bucket config);
+          metadata_filter (Config.bucket config);
+        ]
       ?description:(Config.description config)
       ~storage:
         (match Config.storage config with
@@ -460,7 +490,8 @@ let stream_config config =
       ~metadata:(Config.metadata config) ~allow_rollup:true ~allow_direct:true
       ()
   with
-  | Error error -> Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
+  | Error error ->
+      Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
   | Ok config -> Ok config
 
 let create jetstream config =
@@ -532,7 +563,7 @@ let update_config (value : t) (config : Config.t) =
     in
     match Jetstream.Stream.info value.stream with
     | Error error -> Error (map_jetstream_error error)
-    | Ok info ->
+    | Ok info -> (
         let current = Jetstream.Stream.Info.config info in
         let apply result =
           match result with
@@ -608,15 +639,18 @@ let update_config (value : t) (config : Config.t) =
         in
         match Jetstream.Stream.update value.stream current with
         | Error error -> Error (map_jetstream_error error)
-        | Ok info -> Ok (status_of_info value info)
+        | Ok info -> Ok (status_of_info value info))
 
 let headers_to_wire headers =
   let add map (name, value) =
     String_map.update name
-      (function None -> Some [ value ] | Some values -> Some (value :: values))
+      (function
+        | None -> Some [ value ] | Some values -> Some (value :: values))
       map
   in
-  let values = List.fold_left add String_map.empty (Nats.Header.to_list headers) in
+  let values =
+    List.fold_left add String_map.empty (Nats.Header.to_list headers)
+  in
   if String_map.is_empty values then None
   else Some (String_map.map List.rev values)
 
@@ -632,7 +666,7 @@ let headers_of_wire headers =
     | Some values ->
         String_map.bindings values
         |> List.concat_map (fun (name, values) ->
-               List.map (fun value -> (name, value)) values)
+            List.map (fun value -> (name, value)) values)
   in
   match Nats.Header.of_list entries with
   | Ok headers -> Ok headers
@@ -693,8 +727,7 @@ let info_of_wire ~bucket ~requested_name ~timestamp wire =
               (Option.bind wire.options (fun value -> value.chunk_size))
           in
           let* link =
-            link_of_wire
-              (Option.bind wire.options (fun value -> value.link))
+            link_of_wire (Option.bind wire.options (fun value -> value.link))
           in
           Ok
             {
@@ -743,7 +776,8 @@ let decode_message (value : t) ~requested_name message =
   | Error error -> Error (Error.Decode error)
   | Ok wire ->
       info_of_wire ~bucket:value.bucket ~requested_name
-        ~timestamp:(Jetstream.Stream.Message.timestamp message) wire
+        ~timestamp:(Jetstream.Stream.Message.timestamp message)
+        wire
 
 let read_info_raw ?timeout (value : t) (name : Name.t) =
   let subject = Nats.Subject.literal (metadata_subject value.bucket name) in
@@ -755,7 +789,8 @@ let read_info_raw ?timeout (value : t) (name : Name.t) =
 let info ?timeout ?(include_deleted = false) value name =
   match read_info_raw ?timeout value name with
   | Error error -> Error error
-  | Ok info when Info.deleted info && not include_deleted -> Error Error.Not_found
+  | Ok info when Info.deleted info && not include_deleted ->
+      Error Error.Not_found
   | Ok info -> Ok info
 
 let new_nuid value =
@@ -774,7 +809,8 @@ let next_chunk reader chunk_size =
     else
       let available = Bytesrw.Bytes.Slice.length slice in
       let length = Int.min available (chunk_size - !written) in
-      Bytes.blit (Bytesrw.Bytes.Slice.bytes slice)
+      Bytes.blit
+        (Bytesrw.Bytes.Slice.bytes slice)
         (Bytesrw.Bytes.Slice.first slice)
         buffer !written length;
       written := !written + length;
@@ -797,7 +833,8 @@ let timeout_deadline value timeout =
   | Some timeout -> (
       match
         Mtime.add_span
-          (Connection.now (Jetstream.connection value.jetstream)) timeout
+          (Connection.now (Jetstream.connection value.jetstream))
+          timeout
       with
       | Some deadline -> Some deadline
       | None -> Some Mtime.max_stamp)
@@ -814,7 +851,8 @@ let remaining_timeout value deadline =
 let purge_chunks ?timeout value subject =
   match
     Jetstream.Stream.purge ?timeout
-      ~subject:(Nats.Subject.Filter.literal subject) value.stream
+      ~subject:(Nats.Subject.Filter.literal subject)
+      value.stream
   with
   | Ok _ -> Ok ()
   | Error error -> Error error
@@ -825,7 +863,7 @@ let upload_chunks ?deadline value ~nuid ~chunk_size reader =
   let chunks = ref 0L in
   let result = ref None in
   let finished = ref false in
-  while not !finished && Option.is_none !result do
+  while (not !finished) && Option.is_none !result do
     match next_chunk reader chunk_size with
     | None -> finished := true
     | Some chunk -> (
@@ -835,7 +873,8 @@ let upload_chunks ?deadline value ~nuid ~chunk_size reader =
         | Ok publish_timeout -> (
             match
               Jetstream.publish ?timeout:publish_timeout value.jetstream
-                (Nats.Subject.literal (chunk_subject value.bucket nuid)) chunk
+                (Nats.Subject.literal (chunk_subject value.bucket nuid))
+                chunk
             with
             | Error error -> result := Some (Error (map_jetstream_error error))
             | Ok _ ->
@@ -844,7 +883,9 @@ let upload_chunks ?deadline value ~nuid ~chunk_size reader =
   done;
   match !result with
   | Some result -> result
-  | None -> Ok { size = !size; chunks = !chunks; digest = digest_string !digest; nuid }
+  | None ->
+      Ok
+        { size = !size; chunks = !chunks; digest = digest_string !digest; nuid }
 
 let metadata_headers =
   match Nats.Header.of_list [ ("Nats-Rollup", "sub") ] with
@@ -859,9 +900,9 @@ let put ?timeout value meta reader =
     | Error error -> Error error
     | Ok info_timeout -> (
         match read_info_raw ?timeout:info_timeout value name with
-    | Ok info -> Ok (Some info)
-    | Error Error.Not_found -> Ok None
-    | Error error -> Error error)
+        | Ok info -> Ok (Some info)
+        | Error Error.Not_found -> Ok None
+        | Error error -> Error error)
   in
   match old with
   | Error error -> Error error
@@ -872,32 +913,26 @@ let put ?timeout value meta reader =
         if not !committed then
           ignore
             (Eio.Cancel.protect (fun () ->
-                 ignore
-                   (purge_chunks value
-                      (chunk_subject value.bucket nuid))))
+                 ignore (purge_chunks value (chunk_subject value.bucket nuid))))
       in
       Fun.protect ~finally:cleanup (fun () ->
           match
             upload_chunks ?deadline value ~nuid
-              ~chunk_size:(Meta.chunk_size meta)
-              reader
+              ~chunk_size:(Meta.chunk_size meta) reader
           with
           | Error error -> Error error
-          | Ok upload ->
+          | Ok upload -> (
               let wire =
                 wire_of_object ~bucket:value.bucket ~name
                   ~description:(Meta.description meta)
                   ~headers:(Meta.headers meta) ~metadata:(Meta.metadata meta)
                   ~options:
                     (Some
-                       {
-                         chunk_size = Some (Meta.chunk_size meta);
-                         link = None;
-                       })
+                       { chunk_size = Some (Meta.chunk_size meta); link = None })
                   ~nuid:upload.nuid ~size:upload.size ~chunks:upload.chunks
                   ~digest:(Some upload.digest) ~deleted:false
               in
-              (match encode_wire wire with
+              match encode_wire wire with
               | Error error -> Error error
               | Ok payload -> (
                   match remaining_timeout value deadline with
@@ -911,7 +946,7 @@ let put ?timeout value meta reader =
                           payload
                       with
                       | Error error -> Error (map_jetstream_error error)
-                      | Ok _ ->
+                      | Ok _ -> (
                           committed := true;
                           let result =
                             match remaining_timeout value deadline with
@@ -921,24 +956,24 @@ let put ?timeout value meta reader =
                           in
                           let cleanup_result =
                             match old with
-                            | Some old_info when not (Info.deleted old_info) ->
-                                (match remaining_timeout value deadline with
+                            | Some old_info when not (Info.deleted old_info)
+                              -> (
+                                match remaining_timeout value deadline with
                                 | Error _ ->
                                     Error
                                       (Jetstream.Error.Connection
                                          Core_error.Timeout)
-                                | Ok purge_timeout ->
-                                    (match
-                                       purge_chunks ?timeout:purge_timeout value
-                                         (chunk_subject value.bucket
-                                            (Info.nuid old_info))
-                                     with
+                                | Ok purge_timeout -> (
+                                    match
+                                      purge_chunks ?timeout:purge_timeout value
+                                        (chunk_subject value.bucket
+                                           (Info.nuid old_info))
+                                    with
                                     | Ok () -> Ok ()
-                                    | Error error ->
-                                        Error error))
+                                    | Error error -> Error error))
                             | _ -> Ok ()
                           in
-                          (match result with
+                          match result with
                           | Error error -> Error error
                           | Ok info -> (
                               match cleanup_result with
@@ -961,7 +996,9 @@ let options_of_info info =
   Some
     {
       chunk_size =
-        (match Info.link info with None -> Some (Info.chunk_size info) | Some _ -> None);
+        (match Info.link info with
+        | None -> Some (Info.chunk_size info)
+        | Some _ -> None);
       link = Option.map link_to_wire (Info.link info);
     }
 
@@ -996,11 +1033,13 @@ let timestamp_of_nanoseconds value =
     let month_part = Int64.div (Int64.add (Int64.mul 5L doy) 2L) 153L in
     let day =
       Int64.add
-        (Int64.sub doy (Int64.div (Int64.add (Int64.mul 153L month_part) 2L) 5L))
+        (Int64.sub doy
+           (Int64.div (Int64.add (Int64.mul 153L month_part) 2L) 5L))
         1L
     in
     let month =
-      Int64.add month_part (if Int64.compare month_part 10L < 0 then 3L else -9L)
+      Int64.add month_part
+        (if Int64.compare month_part 10L < 0 then 3L else -9L)
     in
     let year =
       Int64.add year (if Int64.compare month 2L <= 0 then 1L else 0L)
@@ -1009,8 +1048,8 @@ let timestamp_of_nanoseconds value =
     let minute = Int64.div (Int64.rem seconds_in_day 3_600L) 60L in
     let second = Int64.rem seconds_in_day 60L in
     Ok
-      (Format.asprintf "%04Ld-%02Ld-%02LdT%02Ld:%02Ld:%02Ld.%09LdZ" year
-         month day hour minute second fraction)
+      (Format.asprintf "%04Ld-%02Ld-%02LdT%02Ld:%02Ld:%02Ld.%09LdZ" year month
+         day hour minute second fraction)
 
 let get_content ~deadline (value : t) info writer =
   let expected_size = Info.size info in
@@ -1022,30 +1061,33 @@ let get_content ~deadline (value : t) info writer =
       Error (Error.Size_mismatch { expected = expected_size; actual = size })
     else if Int64.compare chunks expected_chunks <> 0 then
       Error
-        (Error.Chunk_count_mismatch { expected = expected_chunks; actual = chunks })
+        (Error.Chunk_count_mismatch
+           { expected = expected_chunks; actual = chunks })
     else if not (String.equal actual_digest expected_digest) then
       Error
-        (Error.Digest_mismatch { expected = expected_digest; actual = actual_digest })
+        (Error.Digest_mismatch
+           { expected = expected_digest; actual = actual_digest })
     else Ok ()
   in
-  if Int64.equal expected_chunks 0L then
+  if Int64.equal expected_chunks 0L then (
     let digest = Digestif.SHA256.init () in
     match verify digest 0L 0L with
     | Error error -> Error error
     | Ok () ->
         Bytesrw.Bytes.Writer.write_eod writer;
-        Ok info
+        Ok info)
   else
     Eio.Switch.run (fun sw ->
         let filter =
-          Nats.Subject.Filter.literal (chunk_subject value.bucket (Info.nuid info))
+          Nats.Subject.Filter.literal
+            (chunk_subject value.bucket (Info.nuid info))
         in
         match
           Jetstream.Consumer.Ordered.v ~sw ~batch:1 ?expires:None
             ?filter_subject:(Some filter) value.stream
         with
         | Error error -> Error (map_jetstream_error error)
-        | Ok ordered ->
+        | Ok ordered -> (
             let digest = ref (Digestif.SHA256.init ()) in
             let size = ref 0L in
             let chunks = ref 0L in
@@ -1059,7 +1101,8 @@ let get_content ~deadline (value : t) info writer =
                   | Error error -> Error (map_jetstream_error error))
               | Ok (Some timeout) -> (
                   match
-                    Jetstream.Consumer.Ordered.next_with_timeout ~timeout ordered
+                    Jetstream.Consumer.Ordered.next_with_timeout ~timeout
+                      ordered
                   with
                   | Ok message -> Ok message
                   | Error error -> Error (map_jetstream_error error))
@@ -1079,7 +1122,9 @@ let get_content ~deadline (value : t) info writer =
                       chunk_subject value.bucket (Info.nuid info)
                     in
                     if not (String.equal actual_subject expected_subject) then
-                      result := Some (Error (Error.Invalid_chunk_subject actual_subject))
+                      result :=
+                        Some
+                          (Error (Error.Invalid_chunk_subject actual_subject))
                     else
                       let payload = Jetstream.Msg.payload message in
                       Bytesrw.Bytes.Writer.write_string writer payload;
@@ -1095,7 +1140,10 @@ let get_content ~deadline (value : t) info writer =
                           Some
                             (Error
                                (Error.Chunk_count_mismatch
-                                  { expected = expected_chunks; actual = !chunks }))
+                                  {
+                                    expected = expected_chunks;
+                                    actual = !chunks;
+                                  }))
               done
             in
             let result =
@@ -1114,7 +1162,7 @@ let get_content ~deadline (value : t) info writer =
             | Error error -> Error error
             | Ok () ->
                 Bytesrw.Bytes.Writer.write_eod writer;
-                Ok info)
+                Ok info))
 
 let resolve_link ~max_links value info deadline =
   let rec loop depth path value info =
@@ -1123,7 +1171,7 @@ let resolve_link ~max_links value info deadline =
     | Some link -> (
         match Link.name link with
         | None -> Error (Error.Link_to_bucket info)
-        | Some name ->
+        | Some name -> (
             if Int.compare depth max_links >= 0 then
               Error (Error.Link_depth_exceeded { limit = max_links; info })
             else
@@ -1149,12 +1197,13 @@ let resolve_link ~max_links value info deadline =
                                  })
                         | Ok target_info ->
                             loop (Int.add depth 1) (identity :: path) target
-                              target_info)))
+                              target_info))))
   in
   let identity = Info.bucket info ^ "/" ^ Name.to_string (Info.name info) in
   loop 0 [ identity ] value info
 
-let get ?timeout ?(include_deleted = false) ?(max_links = 10) value name writer =
+let get ?timeout ?(include_deleted = false) ?(max_links = 10) value name writer
+    =
   if Int.compare max_links 0 < 0 then Error (Error.Invalid_metadata "max_links")
   else
     let deadline = timeout_deadline value timeout in
@@ -1188,7 +1237,8 @@ let publish_metadata ~deadline value name wire =
       | Ok timeout -> (
           match
             Jetstream.publish ?timeout ~headers:metadata_headers value.jetstream
-              (Nats.Subject.literal (metadata_subject value.bucket name)) payload
+              (Nats.Subject.literal (metadata_subject value.bucket name))
+              payload
           with
           | Ok _ -> Ok ()
           | Error error -> Error (map_jetstream_error error)))
@@ -1218,7 +1268,7 @@ let update ?timeout ?name value meta =
       match read_info_raw ?timeout:info_timeout value old_name with
       | Error error -> Error error
       | Ok old when Info.deleted old -> Error (Error.Deleted old)
-      | Ok old ->
+      | Ok old -> (
           let* () = check_target () in
           let digest =
             match Info.link old with
@@ -1252,7 +1302,7 @@ let update ?timeout ?name value meta =
                 with
                 | Ok () -> Ok info
                 | Error error ->
-                    Error (Error.Cleanup_failed { info = Some info; error })))
+                    Error (Error.Cleanup_failed { info = Some info; error }))))
 
 let check_link_target ~deadline value link =
   match Link.name link with
@@ -1293,24 +1343,25 @@ let put_link ?timeout value meta link =
   | Ok () -> (
       match check_link_target ~deadline value link with
       | Error error -> Error error
-      | Ok () ->
+      | Ok () -> (
           let nuid = new_nuid value in
           let wire =
             wire_of_object ~bucket:value.bucket ~name
               ~description:(Meta.description meta) ~headers:(Meta.headers meta)
               ~metadata:(Meta.metadata meta)
-              ~options:(Some { chunk_size = None; link = Some (link_to_wire link) })
+              ~options:
+                (Some { chunk_size = None; link = Some (link_to_wire link) })
               ~nuid ~size:0L ~chunks:0L ~digest:None ~deleted:false
           in
           match publish_metadata ~deadline value name wire with
           | Error error -> Error error
-          | Ok () ->
+          | Ok () -> (
               match remaining_timeout value deadline with
               | Error error -> Error error
-              | Ok info_timeout ->
+              | Ok info_timeout -> (
                   match read_info_raw ?timeout:info_timeout value name with
                   | Error error -> Error error
-                  | Ok info -> Ok info)
+                  | Ok info -> Ok info))))
 
 let info_of_delivery (value : t) message =
   match
@@ -1331,7 +1382,8 @@ let info_of_delivery (value : t) message =
             let* timestamp =
               timestamp_of_nanoseconds (Jetstream.Msg.timestamp message)
             in
-            info_of_wire ~bucket:value.bucket ~requested_name:name ~timestamp wire)
+            info_of_wire ~bucket:value.bucket ~requested_name:name ~timestamp
+              wire)
 
 module Watch = struct
   type delivery = New | Last_per_subject | All
@@ -1370,11 +1422,13 @@ module Watch = struct
     match
       Jetstream.Consumer.Config.v ~deliver_subject ~deliver_policy
         ~ack_policy:Jetstream.Consumer.Config.No_ack ~filter_subject:filter
-        ~idle_heartbeat:Mtime.Span.(5 * s) ~flow_control:true
-        ~headers_only:false ~inactive_threshold:Mtime.Span.(5 * min)
+        ~idle_heartbeat:Mtime.Span.(5 * s)
+        ~flow_control:true ~headers_only:false
+        ~inactive_threshold:Mtime.Span.(5 * min)
         ~mem_storage:true ()
     with
-    | Error error -> Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
+    | Error error ->
+        Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
     | Ok config -> (
         match Jetstream.Consumer.Push.create ~sw value.stream config with
         | Error error -> Error (map_error error)
@@ -1386,16 +1440,11 @@ module Watch = struct
                   Some (Jetstream.Consumer.Push.initial_pending push)
             in
             let initial =
-              match initial_pending with None | Some 0L -> Marker | Some _ -> Retained
+              match initial_pending with
+              | None | Some 0L -> Marker
+              | Some _ -> Retained
             in
-            Ok
-              {
-                value;
-                push;
-                connection;
-                ignore_deletes;
-                initial;
-              })
+            Ok { value; push; connection; ignore_deletes; initial })
 
   let next_message watch deadline =
     match deadline with
@@ -1424,7 +1473,8 @@ module Watch = struct
               | Ok info ->
                   let initial_complete =
                     match watch.initial with
-                    | Retained -> Int64.equal (Jetstream.Msg.num_pending message) 0L
+                    | Retained ->
+                        Int64.equal (Jetstream.Msg.num_pending message) 0L
                     | Marker | Live -> false
                   in
                   if initial_complete then watch.initial <- Marker;
@@ -1492,7 +1542,9 @@ let list ?timeout ?(include_deleted = false) value =
               ~finally:(fun () -> ignore (Watch.close watch))
               (fun () ->
                 collect ();
-                match !result with Some result -> result | None -> assert false)
+                match !result with
+                | Some result -> result
+                | None -> assert false)
           in
           result)
 
@@ -1502,9 +1554,11 @@ let seal value =
   | Ok stream_info -> (
       match
         Jetstream.Stream.Config.with_sealed
-          (Jetstream.Stream.Info.config stream_info) true
+          (Jetstream.Stream.Info.config stream_info)
+          true
       with
-      | Error error -> Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
+      | Error error ->
+          Error (Error.Jetstream (Jetstream.Error.Invalid_config error))
       | Ok config -> (
           match Jetstream.Stream.update value.stream config with
           | Error error -> Error (map_jetstream_error error)
@@ -1516,48 +1570,50 @@ let delete ?timeout value name =
   | Error error -> Error error
   | Ok info_timeout -> (
       match read_info_raw ?timeout:info_timeout value name with
-  | Error error -> Error error
-  | Ok info when Info.deleted info -> Ok ()
-  | Ok info ->
-      let wire =
-        wire_of_object ~bucket:value.bucket ~name:(Info.name info)
-          ~description:(Info.description info) ~headers:(Info.headers info)
-          ~metadata:(Info.metadata info)
-          ~options:(options_of_info info)
-          ~nuid:(Info.nuid info) ~size:0L ~chunks:0L ~digest:None ~deleted:true
-      in
-      (match encode_wire wire with
       | Error error -> Error error
-      | Ok payload -> (
-          match remaining_timeout value deadline with
+      | Ok info when Info.deleted info -> Ok ()
+      | Ok info -> (
+          let wire =
+            wire_of_object ~bucket:value.bucket ~name:(Info.name info)
+              ~description:(Info.description info) ~headers:(Info.headers info)
+              ~metadata:(Info.metadata info) ~options:(options_of_info info)
+              ~nuid:(Info.nuid info) ~size:0L ~chunks:0L ~digest:None
+              ~deleted:true
+          in
+          match encode_wire wire with
           | Error error -> Error error
-          | Ok publish_timeout -> (
-              match
-                Jetstream.publish ?timeout:publish_timeout
-                  ~headers:metadata_headers value.jetstream
-                  (Nats.Subject.literal (metadata_subject value.bucket name))
-                  payload
-              with
-              | Error error -> Error (map_jetstream_error error)
-              | Ok _ ->
-                  if String.equal (Info.nuid info) "" then Ok ()
-                  else
-                    match remaining_timeout value deadline with
-                    | Error _ ->
-                        Error
-                          (Error.Cleanup_failed
-                             {
-                               info = Some info;
-                               error =
-                                 Jetstream.Error.Connection Core_error.Timeout;
-                             })
-                    | Ok purge_timeout -> (
-                        match
-                          purge_chunks ?timeout:purge_timeout value
-                            (chunk_subject value.bucket (Info.nuid info))
-                        with
-                        | Ok () -> Ok ()
-                        | Error error ->
+          | Ok payload -> (
+              match remaining_timeout value deadline with
+              | Error error -> Error error
+              | Ok publish_timeout -> (
+                  match
+                    Jetstream.publish ?timeout:publish_timeout
+                      ~headers:metadata_headers value.jetstream
+                      (Nats.Subject.literal
+                         (metadata_subject value.bucket name))
+                      payload
+                  with
+                  | Error error -> Error (map_jetstream_error error)
+                  | Ok _ -> (
+                      if String.equal (Info.nuid info) "" then Ok ()
+                      else
+                        match remaining_timeout value deadline with
+                        | Error _ ->
                             Error
                               (Error.Cleanup_failed
-                                 { info = Some info; error }))))))
+                                 {
+                                   info = Some info;
+                                   error =
+                                     Jetstream.Error.Connection
+                                       Core_error.Timeout;
+                                 })
+                        | Ok purge_timeout -> (
+                            match
+                              purge_chunks ?timeout:purge_timeout value
+                                (chunk_subject value.bucket (Info.nuid info))
+                            with
+                            | Ok () -> Ok ()
+                            | Error error ->
+                                Error
+                                  (Error.Cleanup_failed
+                                     { info = Some info; error })))))))

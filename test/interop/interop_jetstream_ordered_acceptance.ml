@@ -36,14 +36,15 @@ let auth () =
   | None, None, Some token -> Some (Nats.Auth.token token)
   | Some user, Some pass, None -> Some (Nats.Auth.user_pass ~user ~pass)
   | _ ->
-      failf "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
+      failf
+        "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
 
 let read_file path = In_channel.with_open_bin path In_channel.input_all
 
 let tls_config () =
   match Sys.getenv_opt "NATS_TEST_TLS_CA" with
   | None -> None
-  | Some ca_file ->
+  | Some ca_file -> (
       let ca =
         match X509.Certificate.decode_pem (read_file ca_file) with
         | Ok value -> value
@@ -52,14 +53,15 @@ let tls_config () =
       in
       let authenticator =
         X509.Authenticator.chain_of_trust
-          ~time:(fun () -> Some (Ptime_clock.now ())) [ ca ]
+          ~time:(fun () -> Some (Ptime_clock.now ()))
+          [ ca ]
       in
       let peer_name =
         Domain_name.host_exn (Domain_name.of_string_exn "localhost")
       in
       match Tls.Config.client ~authenticator ~peer_name () with
       | Ok value -> Some value
-      | Error (`Msg message) -> failf "TLS client configuration: %s" message
+      | Error (`Msg message) -> failf "TLS client configuration: %s" message)
 
 let next_message ~timeout label subscription =
   match Nats_eio.Subscription.next_with_timeout ~timeout subscription with
@@ -88,7 +90,8 @@ let expect_publish_ack label ~stream ~sequence ack =
 let ordered_headers ~interop ~trace =
   match Nats.Header.of_list [ ("X-Interop", interop); ("X-Trace", trace) ] with
   | Ok headers -> headers
-  | Error error -> failf "ordered interop headers: %a" Nats.Header.pp_error error
+  | Error error ->
+      failf "ordered interop headers: %a" Nats.Header.pp_error error
 
 let expect_ordered_consumer_configs stream filter =
   let infos =
@@ -102,12 +105,14 @@ let expect_ordered_consumer_configs stream filter =
           Nats_eio.Jetstream.Consumer.Config.filter_subject
             (Nats_eio.Jetstream.Consumer.Info.config info)
         with
-        | Some value -> String.equal (Nats.Subject.Filter.to_string value) filter
+        | Some value ->
+            String.equal (Nats.Subject.Filter.to_string value) filter
         | None -> false)
       infos
   in
   if List.length matching_infos <> 2 then
-    failf "expected two ordered consumers, found %d" (List.length matching_infos);
+    failf "expected two ordered consumers, found %d"
+      (List.length matching_infos);
   List.iter
     (fun info ->
       let config = Nats_eio.Jetstream.Consumer.Info.config info in
@@ -129,9 +134,11 @@ let expect_ordered_delivery label ~stream ~subject ~consumer ~payload ~interop
   if not (String.equal actual_subject subject) then
     failf "%s subject was %S, expected %S" label actual_subject subject;
   expect_header (label ^ " X-Interop") interop
-    (Nats_eio.Jetstream.Msg.headers message) "X-Interop";
+    (Nats_eio.Jetstream.Msg.headers message)
+    "X-Interop";
   expect_header (label ^ " X-Trace") trace
-    (Nats_eio.Jetstream.Msg.headers message) "X-Trace";
+    (Nats_eio.Jetstream.Msg.headers message)
+    "X-Trace";
   if not (String.equal (Nats_eio.Jetstream.Msg.stream message) stream) then
     failf "%s named the wrong stream" label;
   let actual_consumer = Nats_eio.Jetstream.Msg.consumer message in
@@ -158,7 +165,8 @@ let publish_ordered ~timeout jetstream ~stream ~subject ~payload ~interop ~trace
   let ack =
     expect_jetstream_ok ("publish " ^ payload)
       (Nats_eio.Jetstream.publish ~timeout ~headers jetstream
-         (Nats.Subject.literal subject) payload)
+         (Nats.Subject.literal subject)
+         payload)
   in
   expect_publish_ack ("publish " ^ payload) ~stream ~sequence ack
 
@@ -205,7 +213,8 @@ let run env =
       let ordered =
         expect_jetstream_ok "open OCaml ordered session"
           (Nats_eio.Jetstream.Consumer.Ordered.v ~sw
-             ~filter_subject:(Nats.Subject.Filter.literal match_subject) stream)
+             ~filter_subject:(Nats.Subject.Filter.literal match_subject)
+             stream)
       in
       let ordered_closed = ref false in
       Fun.protect
@@ -221,12 +230,12 @@ let run env =
           let consumer_names =
             expect_ordered_consumer_configs stream match_subject
           in
-          expect_ok "ordered setup flush"
-            (Nats_eio.Connection.flush connection);
+          expect_ok "ordered setup flush" (Nats_eio.Connection.flush connection);
           let start_response =
             expect_ok "start Go ordered peer"
               (Nats_eio.Connection.request ~timeout connection
-                 (Nats.Subject.literal (prefix ^ ".start")) "start")
+                 (Nats.Subject.literal (prefix ^ ".start"))
+                 "start")
           in
           expect_payload "start response" "started" start_response;
           let first =
@@ -235,7 +244,8 @@ let run env =
                  ordered)
           in
           let ocaml_consumer_name = Nats_eio.Jetstream.Msg.consumer first in
-          if not (List.exists (String.equal ocaml_consumer_name) consumer_names) then
+          if not (List.exists (String.equal ocaml_consumer_name) consumer_names)
+          then
             failf "OCaml ordered delivery named an unexpected consumer %S"
               ocaml_consumer_name;
           let second =
@@ -249,21 +259,22 @@ let run env =
                  ordered)
           in
           expect_ordered_delivery "OCaml ordered first" ~stream:stream_name
-            ~subject:match_subject ~consumer:ocaml_consumer_name ~payload:"go-one"
-            ~interop:"go-ordered" ~trace:"go-one" ~stream_sequence:1L
-            ~consumer_sequence:1L first;
+            ~subject:match_subject ~consumer:ocaml_consumer_name
+            ~payload:"go-one" ~interop:"go-ordered" ~trace:"go-one"
+            ~stream_sequence:1L ~consumer_sequence:1L first;
           expect_ordered_delivery "OCaml ordered second" ~stream:stream_name
-            ~subject:match_subject ~consumer:ocaml_consumer_name ~payload:"go-three"
-            ~interop:"go-ordered" ~trace:"go-three" ~stream_sequence:3L
-            ~consumer_sequence:2L second;
+            ~subject:match_subject ~consumer:ocaml_consumer_name
+            ~payload:"go-three" ~interop:"go-ordered" ~trace:"go-three"
+            ~stream_sequence:3L ~consumer_sequence:2L second;
           expect_ordered_delivery "OCaml ordered third" ~stream:stream_name
-            ~subject:match_subject ~consumer:ocaml_consumer_name ~payload:"go-five"
-            ~interop:"go-ordered" ~trace:"go-five" ~stream_sequence:5L
-            ~consumer_sequence:3L third;
+            ~subject:match_subject ~consumer:ocaml_consumer_name
+            ~payload:"go-five" ~interop:"go-ordered" ~trace:"go-five"
+            ~stream_sequence:5L ~consumer_sequence:3L third;
           let batch_two_response =
             expect_ok "request second ordered batch"
               (Nats_eio.Connection.request ~timeout connection
-                 (Nats.Subject.literal (prefix ^ ".batch2")) "batch2")
+                 (Nats.Subject.literal (prefix ^ ".batch2"))
+                 "batch2")
           in
           expect_payload "second batch response" "go-batch2-ready"
             batch_two_response;
@@ -287,13 +298,13 @@ let run env =
                  ordered)
           in
           expect_ordered_delivery "OCaml ordered fourth" ~stream:stream_name
-            ~subject:match_subject ~consumer:ocaml_consumer_name ~payload:"ocaml-six"
-            ~interop:"ocaml-ordered" ~trace:"ocaml-six" ~stream_sequence:6L
-            ~consumer_sequence:4L fourth;
+            ~subject:match_subject ~consumer:ocaml_consumer_name
+            ~payload:"ocaml-six" ~interop:"ocaml-ordered" ~trace:"ocaml-six"
+            ~stream_sequence:6L ~consumer_sequence:4L fourth;
           expect_ordered_delivery "OCaml ordered fifth" ~stream:stream_name
-            ~subject:match_subject ~consumer:ocaml_consumer_name ~payload:"ocaml-eight"
-            ~interop:"ocaml-ordered" ~trace:"ocaml-eight" ~stream_sequence:8L
-            ~consumer_sequence:5L fifth;
+            ~subject:match_subject ~consumer:ocaml_consumer_name
+            ~payload:"ocaml-eight" ~interop:"ocaml-ordered" ~trace:"ocaml-eight"
+            ~stream_sequence:8L ~consumer_sequence:5L fifth;
           expect_jetstream_ok "close OCaml ordered session"
             (Nats_eio.Jetstream.Consumer.Ordered.close ordered);
           ordered_closed := true;
@@ -317,7 +328,8 @@ let run env =
           let cleanup_response =
             expect_ok "request ordered cleanup"
               (Nats_eio.Connection.request ~timeout connection
-                 (Nats.Subject.literal (prefix ^ ".cleanup")) "cleanup")
+                 (Nats.Subject.literal (prefix ^ ".cleanup"))
+                 "cleanup")
           in
           expect_payload "ordered cleanup response" "cleaned" cleanup_response;
           print_endline "interop-jetstream-ordered: ok"))

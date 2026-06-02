@@ -8,8 +8,7 @@
 module Config : sig
   (** {1:types Types} *)
 
-  type storage = Memory | File
-  (** The storage backend used by the bucket. *)
+  type storage = Memory | File  (** The storage backend used by the bucket. *)
 
   type t
   (** A validated bucket configuration. *)
@@ -20,7 +19,7 @@ module Config : sig
     | Invalid_history of int
     | Invalid_ttl
     | Invalid_limit of { field : string; value : int64 }
-  (** Errors produced while validating a bucket configuration. *)
+        (** Errors produced while validating a bucket configuration. *)
 
   (** {1:constructors Constructors} *)
 
@@ -38,8 +37,8 @@ module Config : sig
       [history] defaults to [1] and must be in [1, 64]. [ttl] defaults to an
       unlimited lifetime; a zero span has the same meaning. Limit options use
       [None] for the unlimited value and accept [-1] when supplied for direct
-      JetStream correspondence; supplied [-1] is normalized to [None].
-      [storage] defaults to {!File}. *)
+      JetStream correspondence; supplied [-1] is normalized to [None]. [storage]
+      defaults to {!File}. *)
 
   (** {1:queries Queries} *)
 
@@ -71,8 +70,7 @@ module Key : sig
   type error =
     | Empty_key
     | Invalid_key_character of { position : int; character : char }
-    | Invalid_key_dots
-  (** Errors produced while validating a key. *)
+    | Invalid_key_dots  (** Errors produced while validating a key. *)
 
   val of_string : string -> (t, error) result
   (** [of_string value] validates an external key. *)
@@ -84,8 +82,10 @@ end
 module Entry : sig
   (** One retained bucket revision, including tombstones. *)
 
-  type operation = Put | Delete | Purge
-  (** The operation that produced an entry. *)
+  type operation =
+    | Put
+    | Delete
+    | Purge  (** The operation that produced an entry. *)
 
   type t
   (** An immutable bucket entry.
@@ -138,10 +138,10 @@ module Error : sig
     | Key_exists
     | Revision_mismatch of { expected : int64 }
     | Closed
-  (** Errors returned by bucket operations. [Key_deleted] carries the
-      tombstone that hides a key. [Revision_mismatch] is produced only for a
-      server compare-and-set rejection. [Closed] is returned by a watch after
-      explicit or switch-owned closure. *)
+        (** Errors returned by bucket operations. [Key_deleted] carries the
+            tombstone that hides a key. [Revision_mismatch] is produced only for
+            a server compare-and-set rejection. [Closed] is returned by a watch
+            after explicit or switch-owned closure. *)
 
   val pp_config : Format.formatter -> config -> unit
   (** [pp_config ppf error] formats a configuration error. *)
@@ -178,12 +178,16 @@ type bucket = t
 (** The bucket capability consumed by {!Watch}. *)
 
 module Watch : sig
-  type delivery = New | Last_per_subject | All
-  (** The retained messages delivered before the initial marker. *)
+  type delivery =
+    | New
+    | Last_per_subject
+    | All  (** The retained messages delivered before the initial marker. *)
 
-  type event = Initial_done | Entry of Entry.t
-  (** A watch event. [Initial_done] is emitted once after the retained
-      snapshot selected by [delivery]. *)
+  type event =
+    | Initial_done
+    | Entry of Entry.t
+        (** A watch event. [Initial_done] is emitted once after the retained
+            snapshot selected by [delivery]. *)
 
   type t
   (** An owned, cancellable key-value watch. Calls to [next] are single-owner;
@@ -198,20 +202,19 @@ module Watch : sig
     bucket ->
     (t, Error.t) result
   (** [v ~sw ?key ?delivery ?ignore_deletes ?meta_only value] watches the
-      bucket-relative key filter [key], defaulting to [>]. The default
-      delivery policy is [Last_per_subject]. [Initial_done] follows the
-      retained snapshot; [New] emits it immediately. Delete and purge entries
-      are delivered unless [ignore_deletes] is true. [meta_only] suppresses
-      values while retaining entry metadata. The watch owns an ephemeral
-      server consumer and closes it with [sw]. Delivery order is the order
-      observed by the push session; reconnect recovery does not provide the
-      stronger gap-detection guarantees of an ordered consumer. *)
+      bucket-relative key filter [key], defaulting to [>]. The default delivery
+      policy is [Last_per_subject]. [Initial_done] follows the retained
+      snapshot; [New] emits it immediately. Delete and purge entries are
+      delivered unless [ignore_deletes] is true. [meta_only] suppresses values
+      while retaining entry metadata. The watch owns an ephemeral server
+      consumer and closes it with [sw]. Delivery order is the order observed by
+      the push session; reconnect recovery does not provide the stronger
+      gap-detection guarantees of an ordered consumer. *)
 
   val next : t -> (event, Error.t) result
   (** [next watch] returns the next watch event. *)
 
-  val next_with_timeout :
-    timeout:Mtime.Span.t -> t -> (event, Error.t) result
+  val next_with_timeout : timeout:Mtime.Span.t -> t -> (event, Error.t) result
   (** [next_with_timeout ~timeout watch] bounds the wait across skipped
       tombstones and control events. A timeout leaves the watch open. *)
 
@@ -247,29 +250,26 @@ val put : t -> Key.t -> string -> (int64, Error.t) result
 (** [put value key payload] appends a new value and returns its revision. *)
 
 val create_key : t -> Key.t -> string -> (int64, Error.t) result
-(** [create_key value key payload] creates [key] only when its current
-    revision is zero. A tombstoned key is resurrected with a compare-and-set
-    update at the tombstone revision. *)
+(** [create_key value key payload] creates [key] only when its current revision
+    is zero. A tombstoned key is resurrected with a compare-and-set update at
+    the tombstone revision. *)
 
 val update : t -> Key.t -> revision:int64 -> string -> (int64, Error.t) result
 (** [update value key ~revision payload] replaces [key] only when its current
     positive revision equals [revision]. *)
 
-val delete :
-  ?expected_revision:int64 -> t -> Key.t -> (int64, Error.t) result
+val delete : ?expected_revision:int64 -> t -> Key.t -> (int64, Error.t) result
 (** [delete ?expected_revision value key] appends a delete tombstone. *)
 
-val purge :
-  ?expected_revision:int64 -> t -> Key.t -> (int64, Error.t) result
-(** [purge ?expected_revision value key] appends a purge tombstone that rolls
-    up older revisions for the subject. *)
+val purge : ?expected_revision:int64 -> t -> Key.t -> (int64, Error.t) result
+(** [purge ?expected_revision value key] appends a purge tombstone that rolls up
+    older revisions for the subject. *)
 
 val get : t -> Key.t -> (Entry.t, Error.t) result
 (** [get value key] returns the latest entry for [key]. A delete or purge
     returns [Error (Key_deleted tombstone)]. *)
 
-val get_revision :
-  t -> Key.t -> revision:int64 -> (Entry.t, Error.t) result
+val get_revision : t -> Key.t -> revision:int64 -> (Entry.t, Error.t) result
 (** [get_revision value key ~revision] returns the exact retained revision for
     [key]. [revision] must be positive. A revision belonging to another key
     returns [Key_not_found]. *)
@@ -281,5 +281,5 @@ val keys : ?filter:string -> t -> (Key.t list, Error.t) result
     terminal [>]. It defaults to [>]. Tombstoned keys are omitted. *)
 
 val history : t -> Key.t -> (Entry.t list, Error.t) result
-(** [history value key] returns retained entries for [key], oldest first.
-    Put, delete, and purge entries are included. *)
+(** [history value key] returns retained entries for [key], oldest first. Put,
+    delete, and purge entries are included. *)

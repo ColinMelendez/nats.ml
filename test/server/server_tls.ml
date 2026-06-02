@@ -13,8 +13,8 @@ let endpoint () =
       match Nats.Endpoint.of_string value with
       | Ok value -> value
       | Error error ->
-          failf "invalid TLS endpoint %S: %a" value Nats.Endpoint.pp_error
-            error)
+          failf "invalid TLS endpoint %S: %a" value Nats.Endpoint.pp_error error
+      )
   | None -> failf "NATS_TEST_TLS_SERVER is required"
 
 let read_file path = In_channel.with_open_bin path In_channel.input_all
@@ -32,7 +32,8 @@ let tls_config () =
   in
   let authenticator =
     X509.Authenticator.chain_of_trust
-      ~time:(fun () -> Some (Ptime_clock.now ())) [ ca ]
+      ~time:(fun () -> Some (Ptime_clock.now ()))
+      [ ca ]
   in
   let peer_name =
     Domain_name.host_exn (Domain_name.of_string_exn "localhost")
@@ -60,18 +61,21 @@ let run env =
       let subject = Nats.Subject.literal "ocaml.integration.tls" in
       let filter = Nats.Subject.Filter.literal "ocaml.integration.tls" in
       let subscription =
-        expect_ok "TLS subscribe" (Nats_eio.Connection.subscribe connection filter)
+        expect_ok "TLS subscribe"
+          (Nats_eio.Connection.subscribe connection filter)
       in
       expect_ok "TLS subscribe flush" (Nats_eio.Connection.flush connection);
-      expect_ok "TLS publish" (Nats_eio.Connection.publish connection subject "secure");
+      expect_ok "TLS publish"
+        (Nats_eio.Connection.publish connection subject "secure");
       expect_ok "TLS publish flush" (Nats_eio.Connection.flush connection);
       let delivery =
         expect_ok "TLS delivery"
           (Nats_eio.Subscription.next_with_timeout
-             ~timeout:Mtime.Span.(5 * s) subscription)
+             ~timeout:Mtime.Span.(5 * s)
+             subscription)
       in
-      if not (String.equal (Nats.Message.payload delivery.message) "secure") then
-        failf "TLS payload was %S" (Nats.Message.payload delivery.message);
+      if not (String.equal (Nats.Message.payload delivery.message) "secure")
+      then failf "TLS payload was %S" (Nats.Message.payload delivery.message);
       print_endline "tls: ok")
 
 let () =

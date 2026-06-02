@@ -1,9 +1,6 @@
 (** Reusable Core NATS authentication capabilities. *)
 
-type error =
-  | Auth_required
-  | Missing_nonce
-  | Signing of string
+type error = Auth_required | Missing_nonce | Signing of string
 
 val pp_error : Format.formatter -> error -> unit
 
@@ -28,8 +25,8 @@ val nkey : nkey:string -> sign:signer -> t
     signature. *)
 
 val jwt : jwt:string -> nkey:string -> sign:signer -> t
-(** [jwt ~jwt ~nkey ~sign] authenticates with a JWT, NKey public key, and
-    nonce signature. *)
+(** [jwt ~jwt ~nkey ~sign] authenticates with a JWT, NKey public key, and nonce
+    signature. *)
 
 val connect : t -> Info.t -> (Client.Connect.t, error) result
 (** [connect auth info] derives the low-level CONNECT credentials for [info].

@@ -2,15 +2,17 @@
 
     An object store is a bucket of named, immutable-content objects. Object
     content crosses the API as {!Bytesrw.Bytes.Reader.t} and
-    {!Bytesrw.Bytes.Writer.t}; the string functions are convenience wrappers
-    for small values. *)
+    {!Bytesrw.Bytes.Writer.t}; the string functions are convenience wrappers for
+    small values. *)
 
 module Config : sig
-  type storage = Memory | File
-  (** The JetStream storage backend used by the bucket. *)
+  type storage =
+    | Memory
+    | File  (** The JetStream storage backend used by the bucket. *)
 
-  type compression = Jetstream.Stream.Config.compression = Uncompressed | S2
-  (** Compression applied by the backing JetStream stream. *)
+  type compression = Jetstream.Stream.Config.compression =
+    | Uncompressed
+    | S2  (** Compression applied by the backing JetStream stream. *)
 
   module Placement = Jetstream.Stream.Config.Placement
 
@@ -38,10 +40,9 @@ module Config : sig
     (t, error) result
   (** [v ~bucket ()] validates a bucket configuration.
 
-      A zero TTL and [-1] byte limit mean unlimited. The default storage
-      backend is {!File}. [replicas] must be between 1 and 5. Placement,
-      compression, and metadata are projected to the backing JetStream stream.
-  *)
+      A zero TTL and [-1] byte limit mean unlimited. The default storage backend
+      is {!File}. [replicas] must be between 1 and 5. Placement, compression,
+      and metadata are projected to the backing JetStream stream. *)
 
   val bucket : t -> string
   val description : t -> string option
@@ -72,11 +73,7 @@ module Link : sig
 
   type error = Config.error
 
-  val v :
-    bucket:string ->
-    ?name:Name.t ->
-    unit ->
-    (t, error) result
+  val v : bucket:string -> ?name:Name.t -> unit -> (t, error) result
   (** [v ~bucket ?name ()] validates a bucket link target. *)
 
   val bucket : t -> string
@@ -197,15 +194,16 @@ type bucket = t
 (** A bucket capability consumed by {!Watch}. *)
 
 val create : Jetstream.t -> Config.t -> (t, Error.t) result
-(** [create jetstream config] creates the backing stream and returns its
-    bucket capability. *)
+(** [create jetstream config] creates the backing stream and returns its bucket
+    capability. *)
 
 val bind : Jetstream.t -> bucket:string -> (t, Error.t) result
 (** [bind jetstream ~bucket] creates a local handle without contacting the
     server. *)
 
 val open_ : Jetstream.t -> bucket:string -> (t, Error.t) result
-(** [open_ jetstream ~bucket] binds to and checks the existing backing stream. *)
+(** [open_ jetstream ~bucket] binds to and checks the existing backing stream.
+*)
 
 val delete_bucket : t -> (unit, Error.t) result
 (** [delete_bucket bucket] deletes the backing JetStream stream. *)
@@ -233,22 +231,19 @@ val update :
     is committed before the old subject is purged. *)
 
 val put_link :
-  ?timeout:Mtime.Span.t ->
-  t ->
-  Meta.t ->
-  Link.t ->
-  (Info.t, Error.t) result
+  ?timeout:Mtime.Span.t -> t -> Meta.t -> Link.t -> (Info.t, Error.t) result
 (** [put_link bucket meta link] stores a metadata-only object link. An existing
-    ordinary object, including a tombstone, is rejected; an existing link may
-    be replaced. The target must be a live ordinary object unless it is a
-    bucket link. *)
+    ordinary object, including a tombstone, is rejected; an existing link may be
+    replaced. The target must be a live ordinary object unless it is a bucket
+    link. *)
 
 val list :
   ?timeout:Mtime.Span.t ->
   ?include_deleted:bool ->
   t ->
   (Info.t list, Error.t) result
-(** [list bucket] returns a best-effort snapshot of retained metadata records. *)
+(** [list bucket] returns a best-effort snapshot of retained metadata records.
+*)
 
 val seal : t -> (Status.t, Error.t) result
 (** [seal bucket] marks the backing stream sealed and returns its status. *)
@@ -269,16 +264,12 @@ val put :
   Meta.t ->
   Bytesrw.Bytes.Reader.t ->
   (Info.t, Error.t) result
-(** [put bucket meta reader] uploads chunks incrementally, publishes metadata
-    as the commit point, verifies the server record, and removes superseded
-    chunks. An interrupted pre-commit upload is purged best-effort. *)
+(** [put bucket meta reader] uploads chunks incrementally, publishes metadata as
+    the commit point, verifies the server record, and removes superseded chunks.
+    An interrupted pre-commit upload is purged best-effort. *)
 
 val put_string :
-  ?timeout:Mtime.Span.t ->
-  t ->
-  Meta.t ->
-  string ->
-  (Info.t, Error.t) result
+  ?timeout:Mtime.Span.t -> t -> Meta.t -> string -> (Info.t, Error.t) result
 
 val get :
   ?timeout:Mtime.Span.t ->
@@ -289,8 +280,8 @@ val get :
   Bytesrw.Bytes.Writer.t ->
   (Info.t, Error.t) result
 (** [get bucket name writer] streams and verifies the object's chunks before
-    writing end-of-data to [writer]. Object links are followed; bucket links
-    are rejected as byte sources. *)
+    writing end-of-data to [writer]. Object links are followed; bucket links are
+    rejected as byte sources. *)
 
 val get_string :
   ?timeout:Mtime.Span.t ->
@@ -300,11 +291,7 @@ val get_string :
   Name.t ->
   (string, Error.t) result
 
-val delete :
-  ?timeout:Mtime.Span.t ->
-  t ->
-  Name.t ->
-  (unit, Error.t) result
+val delete : ?timeout:Mtime.Span.t -> t -> Name.t -> (unit, Error.t) result
 (** [delete bucket name] publishes a deleted metadata marker and purges the
     object's chunks. *)
 

@@ -36,14 +36,15 @@ let auth () =
   | None, None, Some token -> Some (Nats.Auth.token token)
   | Some user, Some pass, None -> Some (Nats.Auth.user_pass ~user ~pass)
   | _ ->
-      failf "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
+      failf
+        "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
 
 let read_file path = In_channel.with_open_bin path In_channel.input_all
 
 let tls_config () =
   match Sys.getenv_opt "NATS_TEST_TLS_CA" with
   | None -> None
-  | Some ca_file ->
+  | Some ca_file -> (
       let ca =
         match X509.Certificate.decode_pem (read_file ca_file) with
         | Ok value -> value
@@ -52,14 +53,15 @@ let tls_config () =
       in
       let authenticator =
         X509.Authenticator.chain_of_trust
-          ~time:(fun () -> Some (Ptime_clock.now ())) [ ca ]
+          ~time:(fun () -> Some (Ptime_clock.now ()))
+          [ ca ]
       in
       let peer_name =
         Domain_name.host_exn (Domain_name.of_string_exn "localhost")
       in
       match Tls.Config.client ~authenticator ~peer_name () with
       | Ok value -> Some value
-      | Error (`Msg message) -> failf "TLS client configuration: %s" message
+      | Error (`Msg message) -> failf "TLS client configuration: %s" message)
 
 let next_message ~timeout label subscription =
   match Nats_eio.Subscription.next_with_timeout ~timeout subscription with
@@ -95,34 +97,38 @@ let expect_push_consumer_config label info ~name ~delivery ~filter =
       ()
   | Some subject ->
       failf "%s delivered to %S, expected %S" label
-        (Nats.Subject.to_string subject) delivery
+        (Nats.Subject.to_string subject)
+        delivery
   | None -> failf "%s had no delivery subject" label);
   (match Nats_eio.Jetstream.Consumer.Config.filter_subject config with
-  | Some subject when String.equal (Nats.Subject.Filter.to_string subject) filter
-    -> ()
+  | Some subject
+    when String.equal (Nats.Subject.Filter.to_string subject) filter ->
+      ()
   | Some subject ->
       failf "%s filtered %S, expected %S" label
-        (Nats.Subject.Filter.to_string subject) filter
+        (Nats.Subject.Filter.to_string subject)
+        filter
   | None -> failf "%s had no filter subject" label);
   match Nats_eio.Jetstream.Consumer.Config.ack_policy config with
   | Nats_eio.Jetstream.Consumer.Config.Explicit -> ()
   | _ -> failf "%s did not use explicit acknowledgements" label
 
-let expect_push_delivery label ~stream ~consumer ~payload ~interop ~trace message =
+let expect_push_delivery label ~stream ~consumer ~payload ~interop ~trace
+    message =
   expect_payload label payload (Nats_eio.Jetstream.Msg.message message);
   expect_header (label ^ " X-Interop") interop
-    (Nats_eio.Jetstream.Msg.headers message) "X-Interop";
+    (Nats_eio.Jetstream.Msg.headers message)
+    "X-Interop";
   expect_header (label ^ " X-Trace") trace
-    (Nats_eio.Jetstream.Msg.headers message) "X-Trace";
+    (Nats_eio.Jetstream.Msg.headers message)
+    "X-Trace";
   if not (String.equal (Nats_eio.Jetstream.Msg.stream message) stream) then
     failf "%s named the wrong stream" label;
   if not (String.equal (Nats_eio.Jetstream.Msg.consumer message) consumer) then
     failf "%s named the wrong consumer" label;
   if not (Int64.equal (Nats_eio.Jetstream.Msg.stream_sequence message) 1L) then
     failf "%s had the wrong stream sequence" label;
-  if
-    not
-      (Int64.equal (Nats_eio.Jetstream.Msg.consumer_sequence message) 1L)
+  if not (Int64.equal (Nats_eio.Jetstream.Msg.consumer_sequence message) 1L)
   then failf "%s had the wrong consumer sequence" label;
   if not (Int64.equal (Nats_eio.Jetstream.Msg.num_delivered message) 1L) then
     failf "%s had the wrong delivery count" label;
@@ -176,7 +182,8 @@ let run env =
           (Nats_eio.Jetstream.Consumer.info ocaml_consumer)
       in
       expect_push_consumer_config "OCaml push consumer" ocaml_info
-        ~name:"OCAML_PUSH" ~delivery:(prefix ^ ".deliver.ocaml")
+        ~name:"OCAML_PUSH"
+        ~delivery:(prefix ^ ".deliver.ocaml")
         ~filter:(prefix ^ ".go");
       let go_info =
         expect_jetstream_ok "Go push consumer info"
@@ -203,7 +210,8 @@ let run env =
       let start_response =
         expect_ok "start Go push peer"
           (Nats_eio.Connection.request ~timeout connection
-             (Nats.Subject.literal (prefix ^ ".start")) "start")
+             (Nats.Subject.literal (prefix ^ ".start"))
+             "start")
       in
       expect_payload "start response" "started" start_response;
       let go_message =
@@ -226,11 +234,11 @@ let run env =
       let headers =
         match
           Nats.Header.of_list
-            [ ("X-Interop", "ocaml-jetstream-push");
-              ("X-Trace", "ocaml-push") ]
+            [ ("X-Interop", "ocaml-jetstream-push"); ("X-Trace", "ocaml-push") ]
         with
         | Ok headers -> headers
-        | Error error -> failf "push interop headers: %a" Nats.Header.pp_error error
+        | Error error ->
+            failf "push interop headers: %a" Nats.Header.pp_error error
       in
       let ocaml_ack =
         expect_jetstream_ok "publish OCaml JetStream push message"
@@ -239,7 +247,9 @@ let run env =
       in
       expect_publish_ack "OCaml push publish" ~stream:stream_name ~sequence:2L
         ocaml_ack;
-      let done_message = next_message ~timeout "push completion" done_subscription in
+      let done_message =
+        next_message ~timeout "push completion" done_subscription
+      in
       expect_payload "push completion" "go-push-message-acked" done_message;
       expect_jetstream_ok "close OCaml push session"
         (Nats_eio.Jetstream.Consumer.Push.close push);
@@ -259,6 +269,5 @@ let () =
       exit 1
   | error ->
       prerr_endline
-        ("JetStream push interop acceptance failed: "
-       ^ Printexc.to_string error);
+        ("JetStream push interop acceptance failed: " ^ Printexc.to_string error);
       exit 1

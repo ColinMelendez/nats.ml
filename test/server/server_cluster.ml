@@ -43,7 +43,8 @@ let rec wait_for_event ~clock ~label ~remaining predicate events =
 let expect_server_info ~clock ~names events =
   let label = String.concat "/" names in
   let event =
-    wait_for_event ~clock ~label:(Format.asprintf "INFO from %s" label)
+    wait_for_event ~clock
+      ~label:(Format.asprintf "INFO from %s" label)
       ~remaining:16
       (function
         | Nats_eio.Event.Core (Nats.Event.Info info) ->
@@ -67,12 +68,14 @@ let expect_connected ~clock events =
 let expect_disconnected ~clock events =
   ignore
     (wait_for_event ~clock ~label:"disconnect" ~remaining:16
-       (function Nats_eio.Event.Disconnected -> true | _ -> false) events)
+       (function Nats_eio.Event.Disconnected -> true | _ -> false)
+       events)
 
 let expect_reconnected ~clock events =
   ignore
     (wait_for_event ~clock ~label:"reconnect" ~remaining:16
-       (function Nats_eio.Event.Reconnected -> true | _ -> false) events)
+       (function Nats_eio.Event.Reconnected -> true | _ -> false)
+       events)
 
 let contains value values = List.exists (String.equal value) values
 
@@ -124,7 +127,8 @@ let run env =
   if List.length discovered < 2 then
     failf "NATS_TEST_CLUSTER_DISCOVERED must contain at least two servers";
   if List.length recovered_servers < 2 then
-    failf "NATS_TEST_CLUSTER_RECOVERED_SERVERS must contain at least two servers";
+    failf
+      "NATS_TEST_CLUSTER_RECOVERED_SERVERS must contain at least two servers";
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.mono_clock env in
@@ -136,14 +140,16 @@ let run env =
          ())
   in
   let connection =
-    expect_ok "connect" (Nats_eio.Connection.connect ~sw ~net ~clock ~config
-                            [ endpoint server ])
+    expect_ok "connect"
+      (Nats_eio.Connection.connect ~sw ~net ~clock ~config [ endpoint server ])
   in
   Fun.protect
     ~finally:(fun () -> ignore (Nats_eio.Connection.close connection))
     (fun () ->
       let events = Nats_eio.Connection.events connection in
-      let initial_info = expect_server_info ~clock ~names:initial_servers events in
+      let initial_info =
+        expect_server_info ~clock ~names:initial_servers events
+      in
       expect_discovered initial_info discovered;
       expect_connected ~clock events;
       let subject = Nats.Subject.literal "ocaml.integration.cluster" in
@@ -166,7 +172,8 @@ let run env =
         expect_ok "baseline delivery"
           (Nats_eio.Subscription.next_with_timeout ~timeout subscription)
       in
-      if not (String.equal (Nats.Message.payload baseline.message) "before") then
+      if not (String.equal (Nats.Message.payload baseline.message) "before")
+      then
         failf "baseline payload was %S" (Nats.Message.payload baseline.message);
       touch (signal ^ ".1");
       expect_disconnected ~clock events;
@@ -179,8 +186,7 @@ let run env =
       | _ ->
           failf "reconnect INFO server was not one of %s"
             (String.concat "," recovered_servers));
-      ignore
-        (expect_recovered ~generation:1 subscription initial_recovery);
+      ignore (expect_recovered ~generation:1 subscription initial_recovery);
       expect_ok "post-reconnect publish"
         (Nats_eio.Connection.publish connection subject "after");
       expect_ok "post-reconnect flush" (Nats_eio.Connection.flush connection);
@@ -188,7 +194,8 @@ let run env =
         expect_ok "post-reconnect delivery"
           (Nats_eio.Subscription.next_with_timeout ~timeout subscription)
       in
-      if not (String.equal (Nats.Message.payload recovered.message) "after") then
+      if not (String.equal (Nats.Message.payload recovered.message) "after")
+      then
         failf "post-reconnect payload was %S"
           (Nats.Message.payload recovered.message);
       let active_server =
@@ -217,8 +224,7 @@ let run env =
       expect_reconnected ~clock events;
       (match Nats.Info.server_name second_recovered_info with
       | Some value when String.equal value remaining_server -> ()
-      | _ ->
-          failf "second reconnect INFO server was not %s" remaining_server);
+      | _ -> failf "second reconnect INFO server was not %s" remaining_server);
       ignore
         (expect_recovered ~generation:2 subscription second_initial_recovery);
       expect_ok "second post-reconnect publish"

@@ -86,18 +86,16 @@ module Stream : sig
     type storage = Memory | File
     type retention = Limits | Interest | Work_queue
     type discard = Old | New
-    type compression = Uncompressed | S2
-    (** The server-side stream compression policy. *)
+
+    type compression =
+      | Uncompressed
+      | S2  (** The server-side stream compression policy. *)
 
     module Placement : sig
       type t
       type error = Error.config
 
-      val v :
-        ?cluster:string ->
-        ?tags:string list ->
-        unit ->
-        (t, error) result
+      val v : ?cluster:string -> ?tags:string list -> unit -> (t, error) result
       (** [v ?cluster ?tags ()] validates a placement constraint. At least one
           of [cluster] and [tags] must be supplied. *)
 
@@ -151,12 +149,15 @@ module Stream : sig
     val max_age : t -> Mtime.Span.t option
     val max_msg_size : t -> int64 option
     val allow_rollup : t -> bool
+
     val allow_direct : t -> bool
     (** [allow_direct config] is [true] when direct message reads are enabled.
     *)
+
     val deny_delete : t -> bool
     (** [deny_delete config] is [true] when stream-level message deletion is
-    rejected. *)
+        rejected. *)
+
     val sealed : t -> bool
     (** [sealed config] is [true] when the stream rejects further writes. *)
 
@@ -176,13 +177,15 @@ module Stream : sig
     (** [with_storage config storage] preserves all fields except storage. *)
 
     val with_replicas : t -> int -> (t, error) result
-    (** [with_replicas config value] validates and replaces the replica count. *)
+    (** [with_replicas config value] validates and replaces the replica count.
+    *)
 
     val with_placement : t -> Placement.t option -> (t, error) result
     (** [with_placement config value] replaces the placement constraint. *)
 
     val with_compression : t -> compression -> (t, error) result
-    (** [with_compression config value] replaces the storage compression mode. *)
+    (** [with_compression config value] replaces the storage compression mode.
+    *)
 
     val with_metadata : t -> (string * string) list -> (t, error) result
     (** [with_metadata config value] replaces bucket-level stream metadata. *)
@@ -247,10 +250,12 @@ module Stream : sig
 
     val subject : t -> Nats.Subject.t
     val sequence : t -> int64
+
     val timestamp : t -> string
     (** [timestamp message] is the server timestamp in its RFC3339 wire form.
         Keeping the wire form avoids imposing a wall-clock representation on
         callers that only need to preserve or display it. *)
+
     val headers : t -> Nats.Header.t
     val payload : t -> string
   end
@@ -281,13 +286,17 @@ module Stream : sig
 
   val name : t -> string
   val info : t -> (Info.t, Error.t) result
+
   val get :
     ?timeout:Mtime.Span.t -> t -> sequence:int64 -> (Message.t, Error.t) result
   (** [get stream ~sequence] retrieves one stored message by stream sequence
       through JetStream's direct message API. *)
 
   val get_last :
-    ?timeout:Mtime.Span.t -> t -> subject:Nats.Subject.t -> (Message.t, Error.t) result
+    ?timeout:Mtime.Span.t ->
+    t ->
+    subject:Nats.Subject.t ->
+    (Message.t, Error.t) result
   (** [get_last stream ~subject] retrieves the latest stored message for an
       exact subject through JetStream's direct message API. *)
 
@@ -323,11 +332,13 @@ module Msg : sig
   val consumer_sequence : t -> int64
   val num_pending : t -> int64
   val ack : t -> (unit, Error.t) result
+
+  val ack_sync : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
   (** [ack_sync ?timeout message] sends [+ACK] and waits for the server to
       acknowledge receiving it. [timeout] defaults to the connection request
       timeout. A missing response returns [Error (Connection Timeout)] and a
       server without a responder returns [Error (Connection No_responders)]. *)
-  val ack_sync : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
+
   val nak : ?delay:Mtime.Span.t -> t -> (unit, Error.t) result
   val term : ?reason:string -> t -> (unit, Error.t) result
   val in_progress : t -> (unit, Error.t) result
@@ -336,7 +347,6 @@ end
 module Consumer : sig
   module Config : sig
     type ack_policy = No_ack | All | Explicit
-
     type priority_policy = Overflow | Pinned_client | Prioritized
 
     type deliver_policy =
@@ -396,35 +406,48 @@ module Consumer : sig
     val ack_wait : t -> Mtime.Span.t option
     val max_deliver : t -> int option
     val filter_subject : t -> Nats.Subject.Filter.t option
+
     val filter_subjects : t -> Nats.Subject.Filter.t list
     (** [filter_subjects config] returns the multi-subject filters. The list is
         empty when the singular filter form is in use or no filter is set. *)
+
     val backoff : t -> Mtime.Span.t list
     (** [backoff config] returns the redelivery delay schedule. *)
+
     val pause_until : t -> Ptime.t option
     (** [pause_until config] is the server-side pause deadline, when set. *)
+
     val priority_groups : t -> string list
-    (** [priority_groups config] returns the configured priority group names.
-        A priority consumer currently requires exactly one name. *)
+    (** [priority_groups config] returns the configured priority group names. A
+        priority consumer currently requires exactly one name. *)
+
     val priority_policy : t -> priority_policy option
     (** [priority_policy config] is the pull-consumer priority policy, when
         configured. *)
+
     val priority_timeout : t -> Mtime.Span.t option
     (** [priority_timeout config] is the pinned-client grace period, when
         configured. *)
+
     val sample_frequency : t -> int option
     (** [sample_frequency config] is the delivery sample percentage. *)
+
     val rate_limit : t -> int64 option
     (** [rate_limit config] is the push rate limit in bits per second. *)
+
     val replicas : t -> int option
     (** [replicas config] is the explicit replica count; [None] inherits the
         stream's replica count. *)
+
     val metadata : t -> (string * string) list
     (** [metadata config] returns consumer metadata. *)
+
     val replay_policy : t -> replay_policy
+
     val max_ack_pending : t -> int option
     (** [Some (-1)] means unlimited; [None] leaves the server default when a
         consumer is created. *)
+
     val max_waiting : t -> int option
     val max_batch : t -> int option
     val max_expires : t -> Mtime.Span.t option
@@ -439,17 +462,14 @@ module Consumer : sig
     val with_description : t -> string option -> (t, error) result
     (** [with_description config value] replaces the consumer description. *)
 
-    val with_deliver_subject :
-      t -> Nats.Subject.t option -> (t, error) result
+    val with_deliver_subject : t -> Nats.Subject.t option -> (t, error) result
     (** [with_deliver_subject config value] replaces the push delivery subject.
     *)
 
-    val with_deliver_group :
-      t -> Nats.Queue_group.t option -> (t, error) result
+    val with_deliver_group : t -> Nats.Queue_group.t option -> (t, error) result
     (** [with_deliver_group config value] replaces the push queue group. *)
 
-    val with_idle_heartbeat :
-      t -> Mtime.Span.t option -> (t, error) result
+    val with_idle_heartbeat : t -> Mtime.Span.t option -> (t, error) result
     (** [with_idle_heartbeat config value] replaces the idle heartbeat. *)
 
     val with_flow_control : t -> bool option -> (t, error) result
@@ -469,8 +489,8 @@ module Consumer : sig
 
     val with_filter_subject :
       t -> Nats.Subject.Filter.t option -> (t, error) result
-    (** [with_filter_subject config value] replaces the singular subject
-        filter and clears any multi-subject filters. *)
+    (** [with_filter_subject config value] replaces the singular subject filter
+        and clears any multi-subject filters. *)
 
     val with_filter_subjects :
       t -> Nats.Subject.Filter.t list -> (t, error) result
@@ -484,8 +504,8 @@ module Consumer : sig
 
     val with_pause_until : t -> Ptime.t option -> (t, error) result
     (** [with_pause_until config value] replaces the pause deadline. [None]
-        requests an unpaused configuration when creating a consumer. Updating
-        a consumer does not change its pause state; use {!Consumer.resume} or
+        requests an unpaused configuration when creating a consumer. Updating a
+        consumer does not change its pause state; use {!Consumer.resume} or
         {!Consumer.pause} for that operation. *)
 
     val with_priority_groups : t -> string list -> (t, error) result
@@ -494,15 +514,13 @@ module Consumer : sig
         name of at most sixteen ASCII letters, digits, [/], [_], [-], or [=]
         characters. *)
 
-    val with_priority_policy :
-      t -> priority_policy option -> (t, error) result
-    (** [with_priority_policy config policy] replaces the priority policy.
-        A policy requires at least one priority group. *)
+    val with_priority_policy : t -> priority_policy option -> (t, error) result
+    (** [with_priority_policy config policy] replaces the priority policy. A
+        policy requires at least one priority group. *)
 
-    val with_priority_timeout :
-      t -> Mtime.Span.t option -> (t, error) result
-    (** [with_priority_timeout config timeout] replaces the pinned-client
-        grace period. It is meaningful only with {!Pinned_client}. *)
+    val with_priority_timeout : t -> Mtime.Span.t option -> (t, error) result
+    (** [with_priority_timeout config timeout] replaces the pinned-client grace
+        period. It is meaningful only with {!Pinned_client}. *)
 
     val with_sample_frequency : t -> int option -> (t, error) result
     (** [with_sample_frequency config value] replaces the delivery sample
@@ -542,8 +560,7 @@ module Consumer : sig
     val with_headers_only : t -> bool option -> (t, error) result
     (** [with_headers_only config value] replaces headers-only delivery. *)
 
-    val with_inactive_threshold :
-      t -> Mtime.Span.t option -> (t, error) result
+    val with_inactive_threshold : t -> Mtime.Span.t option -> (t, error) result
     (** [with_inactive_threshold config value] replaces inactivity cleanup. *)
 
     val with_mem_storage : t -> bool option -> (t, error) result
@@ -557,8 +574,7 @@ module Consumer : sig
     (** [name group] is the configured priority-group name. *)
 
     val pinned_client_id : t -> string option
-    (** [pinned_client_id group] is the current server-issued pin, when set.
-    *)
+    (** [pinned_client_id group] is the current server-issued pin, when set. *)
 
     val pinned_at : t -> Ptime.t option
     (** [pinned_at group] is the server timestamp at which the pin was set. *)
@@ -574,9 +590,11 @@ module Consumer : sig
     val paused : t -> bool
     val pause_until : t -> Ptime.t option
     val pause_remaining : t -> Mtime.Span.t option
+
     val priority_groups : t -> Priority_group.t list
     (** [priority_groups info] reports the server's current pin state for each
         configured priority group. *)
+
     val unknown : t -> Jsont.json
     val config_unknown : t -> Jsont.json
     val delivered_consumer_sequence : t -> int64 option
@@ -608,8 +626,8 @@ module Consumer : sig
 
   val create :
     ?timeout:Mtime.Span.t -> stream -> Config.t -> (t, Error.t) result
-  (** [create ?timeout stream config] creates a server-side consumer and
-      returns its name. *)
+  (** [create ?timeout stream config] creates a server-side consumer and returns
+      its name. *)
 
   val update :
     ?timeout:Mtime.Span.t -> t -> Config.t -> (Info.t, Error.t) result
@@ -620,15 +638,15 @@ module Consumer : sig
       {!Info.config}. The operation reads the current server configuration first
       and preserves fields not modeled by {!Config.t}. [pause_until] is read
       from the current server configuration and is preserved; pause state is
-      changed only by {!pause} and {!resume}. The consumer identity
-      remains tied to [name consumer]; a supplied durable name must match it,
-      while an omitted durable name retains an existing durable identity.
-      Concurrent changes use last-writer-wins semantics. *)
+      changed only by {!pause} and {!resume}. The consumer identity remains tied
+      to [name consumer]; a supplied durable name must match it, while an
+      omitted durable name retains an existing durable identity. Concurrent
+      changes use last-writer-wins semantics. *)
 
   val pause :
     ?timeout:Mtime.Span.t -> t -> until:Ptime.t -> (Pause.t, Error.t) result
-  (** [pause ?timeout consumer ~until] pauses [consumer] until the supplied
-      UTC deadline. *)
+  (** [pause ?timeout consumer ~until] pauses [consumer] until the supplied UTC
+      deadline. *)
 
   val resume : ?timeout:Mtime.Span.t -> t -> (Pause.t, Error.t) result
   (** [resume ?timeout consumer] clears the consumer pause deadline. *)
@@ -664,10 +682,10 @@ module Consumer : sig
       [Missing_heartbeat]. The heartbeat must be positive and no greater than
       half of [expires]. [group] selects a configured priority group;
       [min_pending] and [min_ack_pending] are overflow thresholds; and
-      [priority] selects a prioritized-policy level from zero (highest) to
-      nine (lowest). Priority options require [group]. On a pinned-client
-      consumer, the handle retains the [Nats-Pin-Id] from a delivery for later
-      fetches and retries a 423 pin mismatch without the stale id. *)
+      [priority] selects a prioritized-policy level from zero (highest) to nine
+      (lowest). Priority options require [group]. On a pinned-client consumer,
+      the handle retains the [Nats-Pin-Id] from a delivery for later fetches and
+      retries a 423 pin mismatch without the stale id. *)
 
   module Pull : sig
     type consumer = t
@@ -694,13 +712,13 @@ module Consumer : sig
         [priority] is a prioritized-policy value between zero and nine. The
         session uses the consumer handle's private per-group table for any
         server-issued pinned-client id on later requests and clears it after a
-        423 pin-mismatch response. The heartbeat
-        must be positive and no greater than half of [expires]. The session
-        owns its subscription and closes it when [sw] releases. A session is
-        not transparently restored after a transport loss; recreate it after
-        receiving [Error (Connection Disconnected)]. A pull session is
-        single-owner: do not call [next] or [next_with_timeout] concurrently on
-        the same value. *)
+        423 pin-mismatch response. The heartbeat must be positive and no greater
+        than half of [expires]. The session owns its subscription and closes it
+        when [sw] releases. A session is not transparently restored after a
+        transport loss; recreate it after receiving
+        [Error (Connection Disconnected)]. A pull session is single-owner: do
+        not call [next] or [next_with_timeout] concurrently on the same value.
+    *)
 
     val next : t -> (Msg.t, Error.t) result
     (** [next pull] waits for the next message. Empty pull batches and the
@@ -735,28 +753,27 @@ module Consumer : sig
     type t
 
     val v : sw:Eio.Switch.t -> consumer -> (t, Error.t) result
-    (** [v ~sw consumer] subscribes to the delivery subject configured on a
-        push consumer. It reads the server-side configuration and returns
+    (** [v ~sw consumer] subscribes to the delivery subject configured on a push
+        consumer. It reads the server-side configuration and returns
         [Not_push_consumer] when no delivery subject is configured. The
         configured queue group is used for the subscription. Idle-heartbeat
-        status frames are consumed transparently, and flow-control requests
-        are answered with an empty message. A missing heartbeat fails the
-        session with [Missing_heartbeat]. The session owns its subscription
-        and closes it when [sw] releases. A replayable delivery subscription
-        is restored after transport recovery; durable consumers are checked
-        with [info], while missing ephemeral consumers are recreated from
-        their last configuration. The session is single-owner: do not call
-        [next] or [next_with_timeout] concurrently on one value. *)
+        status frames are consumed transparently, and flow-control requests are
+        answered with an empty message. A missing heartbeat fails the session
+        with [Missing_heartbeat]. The session owns its subscription and closes
+        it when [sw] releases. A replayable delivery subscription is restored
+        after transport recovery; durable consumers are checked with [info],
+        while missing ephemeral consumers are recreated from their last
+        configuration. The session is single-owner: do not call [next] or
+        [next_with_timeout] concurrently on one value. *)
 
-    val create :
-      sw:Eio.Switch.t -> Stream.t -> Config.t -> (t, Error.t) result
-    (** [create ~sw stream config] creates and owns an ephemeral push
-        consumer. If [config] has no delivery subject, a fresh inbox is
-        chosen. Durable names are rejected. A five-minute inactive threshold
-        and memory storage are supplied when absent. The delivery subscription
-        is installed before the consumer is created, so retained messages
-        cannot race the initial subscription. The consumer is deleted when
-        [close] is called or [sw] releases. *)
+    val create : sw:Eio.Switch.t -> Stream.t -> Config.t -> (t, Error.t) result
+    (** [create ~sw stream config] creates and owns an ephemeral push consumer.
+        If [config] has no delivery subject, a fresh inbox is chosen. Durable
+        names are rejected. A five-minute inactive threshold and memory storage
+        are supplied when absent. The delivery subscription is installed before
+        the consumer is created, so retained messages cannot race the initial
+        subscription. The consumer is deleted when [close] is called or [sw]
+        releases. *)
 
     val consumer : t -> consumer
     (** [consumer push] is the current server-side consumer. An ephemeral
@@ -772,8 +789,8 @@ module Consumer : sig
         flow-control requests are answered with an empty message. Other status
         frames fail the handle instead of being treated as data. A configured
         heartbeat that is not received within two intervals fails with
-        [Missing_heartbeat]. During reconnect recovery, heartbeat deadlines
-        are suspended until the subscription is replayed and the consumer is
+        [Missing_heartbeat]. During reconnect recovery, heartbeat deadlines are
+        suspended until the subscription is replayed and the consumer is
         confirmed or recreated. *)
 
     val next_with_timeout : timeout:Mtime.Span.t -> t -> (Msg.t, Error.t) result
@@ -784,8 +801,8 @@ module Consumer : sig
 
     val iter : t -> f:(Msg.t -> unit) -> (unit, Error.t) result
     (** [iter push ~f] invokes [f] for each message until the handle is closed
-        or fails. It does not acknowledge messages and has the same
-        single-owner rule as [next]. *)
+        or fails. It does not acknowledge messages and has the same single-owner
+        rule as [next]. *)
 
     val close : t -> (unit, Error.t) result
     (** [close push] stops the subscription, deletes an owned consumer, and is
@@ -804,7 +821,8 @@ module Consumer : sig
       ?max_bytes:int ->
       ?deliver_policy:Config.deliver_policy ->
       ?filter_subject:Nats.Subject.Filter.t ->
-      stream -> (t, Error.t) result
+      stream ->
+      (t, Error.t) result
     (** [v ~sw stream] creates a client-managed ephemeral pull consumer. The
         initial delivery policy defaults to [All]. Ordered sessions always use
         [No_ack], memory storage, and a five-minute inactive threshold; they
@@ -823,12 +841,12 @@ module Consumer : sig
     val next_with_timeout : timeout:Mtime.Span.t -> t -> (Msg.t, Error.t) result
     (** [next_with_timeout ~timeout ordered] uses an absolute caller deadline
         across waiting and ordered-consumer recreation. A normal timeout leaves
-        the current session open; a timeout after the old consumer has been
-        torn down fails the session. *)
+        the current session open; a timeout after the old consumer has been torn
+        down fails the session. *)
 
     val iter : t -> f:(Msg.t -> unit) -> (unit, Error.t) result
-    (** [iter ordered ~f] invokes [f] for each ordered message until the
-        session is closed or fails. Messages are not acknowledged. *)
+    (** [iter ordered ~f] invokes [f] for each ordered message until the session
+        is closed or fails. Messages are not acknowledged. *)
 
     val close : t -> (unit, Error.t) result
     (** [close ordered] stops the pull session, best-effort deletes its current

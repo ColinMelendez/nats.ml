@@ -1,7 +1,4 @@
-type error =
-  | Auth_required
-  | Missing_nonce
-  | Signing of string
+type error = Auth_required | Missing_nonce | Signing of string
 
 let pp_error ppf = function
   | Auth_required ->
@@ -39,14 +36,12 @@ let connect auth info =
       if Info.auth_required info then Error Auth_required
       else Ok (Client.Connect.v ())
   | Token value -> Ok (Client.Connect.v ~auth_token:value ())
-  | User_pass { user; pass } ->
-      Ok (Client.Connect.v ~user ~pass ())
+  | User_pass { user; pass } -> Ok (Client.Connect.v ~user ~pass ())
   | Nkey { nkey; sign } ->
       signed ~sign
         ~make:(fun signature -> Client.Connect.v ~nkey ~signature ())
         info
   | Jwt { jwt; nkey; sign } ->
       signed ~sign
-        ~make:(fun signature ->
-          Client.Connect.v ~jwt ~nkey ~signature ())
+        ~make:(fun signature -> Client.Connect.v ~jwt ~nkey ~signature ())
         info

@@ -150,7 +150,9 @@ let run env =
       if not (String.equal (Nats.Message.payload baseline.message) "before")
       then
         failf "baseline payload was %S" (Nats.Message.payload baseline.message);
-      let request_subject = Nats.Subject.literal "ocaml.integration.reconnect.request" in
+      let request_subject =
+        Nats.Subject.literal "ocaml.integration.reconnect.request"
+      in
       let request_filter =
         Nats.Subject.Filter.literal "ocaml.integration.reconnect.request"
       in

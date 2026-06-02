@@ -191,14 +191,16 @@ let () =
           let client = Nats.Client.v Nats.Config.default in
           expect_error
             (Nats.Client.outgoing client (Nats.Client.Publish message))
-            (function Nats.Error.Not_connected -> true | _ -> false);
+            (function
+            | Nats.Error.Not_connected -> true
+            | _ -> false);
           expect_error
             (Nats.Client.outgoing client
                (Nats.Client.Subscribe { subject = filter; queue_group = None }))
             (function Nats.Error.Not_connected -> true | _ -> false);
-          expect_error
-            (Nats.Client.outgoing client Nats.Client.Flush)
-            (function Nats.Error.Not_connected -> true | _ -> false);
+          expect_error (Nats.Client.outgoing client Nats.Client.Flush) (function
+            | Nats.Error.Not_connected -> true
+            | _ -> false);
           expect_error
             (Nats.Client.outgoing client
                (Nats.Client.Connect
@@ -210,7 +212,9 @@ let () =
           let info = client_at_info () in
           expect_error
             (Nats.Client.outgoing info.state (Nats.Client.Publish message))
-            (function Nats.Error.Not_connected -> true | _ -> false);
+            (function
+            | Nats.Error.Not_connected -> true
+            | _ -> false);
           let connected =
             expect_client
               (Nats.Client.outgoing info.state
@@ -238,7 +242,8 @@ let () =
           | [ wire ] -> (
               match operation wire with
               | Nats.Op.Sub { subject; queue_group = Some group; sid = 1 } ->
-                  equal string "orders.*" (Nats.Subject.Filter.to_string subject);
+                  equal string "orders.*"
+                    (Nats.Subject.Filter.to_string subject);
                   equal string "workers" (Nats.Queue_group.to_string group)
               | _ -> fail "expected a queue-group SUB")
           | _ -> fail "expected one queue-group SUB");
@@ -246,13 +251,16 @@ let () =
           | [ { sid = 1; queue_group = Some group; _ } ] ->
               equal string "workers" (Nats.Queue_group.to_string group)
           | _ -> fail "expected queue-group replay metadata");
-      test "reports control events and ignores unknown subscription ids" (fun () ->
+      test "reports control events and ignores unknown subscription ids"
+        (fun () ->
           let connected = connected_client () in
           let acknowledged = incoming connected.state "+OK\r\n" in
           (match acknowledged.events with
           | [ Nats.Event.Protocol_notice Nats.Event.Ok ] -> ()
           | _ -> fail "expected an OK protocol notice");
-          let failed = incoming acknowledged.state "-ERR 'permissions violation'\r\n" in
+          let failed =
+            incoming acknowledged.state "-ERR 'permissions violation'\r\n"
+          in
           (match failed.events with
           | [ Nats.Event.Server_error { message = "permissions violation" } ] ->
               ()
@@ -527,8 +535,7 @@ let () =
       test "drain orders UNSUBs, permits flush, and leaves final close to owner"
         (fun () ->
           let config =
-            expect_config
-              (Nats.Config.v ~ping_interval:(Some Mtime.Span.s) ())
+            expect_config (Nats.Config.v ~ping_interval:(Some Mtime.Span.s) ())
           in
           let client = Nats.Client.v config in
           let info =
@@ -570,14 +577,10 @@ let () =
             expect_client
               (Nats.Client.outgoing first.state
                  (Nats.Client.Subscribe
-                    {
-                      subject = second_filter;
-                      queue_group = Some queue_group;
-                    }))
+                    { subject = second_filter; queue_group = Some queue_group }))
           in
           let draining =
-            expect_client
-              (Nats.Client.outgoing second.state Nats.Client.Drain)
+            expect_client (Nats.Client.outgoing second.state Nats.Client.Drain)
           in
           (match Nats.Client.phase draining.state with
           | Nats.Client.Draining -> ()
@@ -600,7 +603,9 @@ let () =
           in
           expect_error
             (Nats.Client.outgoing draining.state (Nats.Client.Publish message))
-            (function Nats.Error.Draining -> true | _ -> false);
+            (function
+            | Nats.Error.Draining -> true
+            | _ -> false);
           expect_error
             (Nats.Client.outgoing draining.state
                (Nats.Client.Subscribe
@@ -613,7 +618,8 @@ let () =
           | [ Nats.Event.Flush_completed ] -> ()
           | _ -> fail "expected the drain flush completion");
           let flushed =
-            expect_client (Nats.Client.outgoing drain_ack.state Nats.Client.Flush)
+            expect_client
+              (Nats.Client.outgoing drain_ack.state Nats.Client.Flush)
           in
           equal string "PING\r\n"
             (match flushed.output with
@@ -623,14 +629,16 @@ let () =
           (match flush_ack.events with
           | [ Nats.Event.Flush_completed ] -> ()
           | _ -> fail "expected the draining flush completion");
-          let closed = expect_client (Nats.Client.outgoing flush_ack.state Nats.Client.Close) in
+          let closed =
+            expect_client
+              (Nats.Client.outgoing flush_ack.state Nats.Client.Close)
+          in
           match (Nats.Client.phase closed.state, closed.events) with
           | Nats.Client.Closed, [ Nats.Event.Closed ] -> ()
           | _ -> fail "expected the owner-triggered close");
       test "forgets ephemeral subscriptions before reconnect replay" (fun () ->
           let config =
-            expect_config
-              (Nats.Config.v ~ping_interval:(Some Mtime.Span.s) ())
+            expect_config (Nats.Config.v ~ping_interval:(Some Mtime.Span.s) ())
           in
           let client = Nats.Client.v config in
           let info =
@@ -703,7 +711,7 @@ let () =
                     }))
           in
           (match reconnected.output with
-          | [ connect; subscribe; unsubscribe ] ->
+          | [ connect; subscribe; unsubscribe ] -> (
               (match operation connect with
               | Nats.Op.Connect _ -> ()
               | _ -> fail "expected replay CONNECT");
@@ -711,7 +719,7 @@ let () =
               | Nats.Op.Sub { sid = 1; queue_group = Some group; _ } ->
                   equal string "workers" (Nats.Queue_group.to_string group)
               | _ -> fail "expected queue-group replay");
-              (match operation unsubscribe with
+              match operation unsubscribe with
               | Nats.Op.Unsub { sid = 1; max_messages = Some 3 } -> ()
               | _ -> fail "expected replay auto-unsubscribe")
           | _ -> fail "forgotten subscription was replayed");

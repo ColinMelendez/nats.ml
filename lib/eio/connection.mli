@@ -57,15 +57,15 @@ module Subscription : sig
 
   val recovery : t -> recovery
   (** [recovery subscription] reports whether a replayable subscription is
-      detached from the current transport or attached to it. The initial
-      state is [Attached 0]; each successful reconnect replay advances the
-      generation. *)
+      detached from the current transport or attached to it. The initial state
+      is [Attached 0]; each successful reconnect replay advances the generation.
+  *)
 
   val await_recovery :
     ?timeout:Mtime.Span.t -> from:recovery -> t -> (recovery, Error.t) result
   (** [await_recovery ?timeout ~from subscription] waits until the
-      subscription's recovery state differs from [from], or until it reaches
-      a terminal error. A timeout leaves the subscription active. *)
+      subscription's recovery state differs from [from], or until it reaches a
+      terminal error. A timeout leaves the subscription active. *)
 
   val next_or_recovery : t -> (next, Error.t) result
   (** [next_or_recovery subscription] waits for the next delivery, recovery
@@ -82,6 +82,7 @@ module Subscription : sig
       delivery, recovery wakeup, or terminal error for at most [timeout]. *)
 
   val sid : t -> int
+
   val next : t -> (delivery, Error.t) result
   (** [next] waits until a delivery or a terminal subscription error is
       available. *)
@@ -91,12 +92,13 @@ module Subscription : sig
       waiting. It returns [None] when the queue is empty and
       [Some (Error error)] for a queued terminal subscription error. *)
 
-  val next_with_timeout : timeout:Mtime.Span.t -> t -> (delivery, Error.t) result
+  val next_with_timeout :
+    timeout:Mtime.Span.t -> t -> (delivery, Error.t) result
   (** [next_with_timeout ~timeout subscription] waits at most [timeout] for a
-      delivery. A non-positive timeout is rejected with [Invalid_timeout
-      "subscription"]. A timeout leaves the subscription active and returns
-      [Error.Timeout]; closure, disconnection, and cancellation retain the
-      same behavior as [next]. *)
+      delivery. A non-positive timeout is rejected with
+      [Invalid_timeout "subscription"]. A timeout leaves the subscription active
+      and returns [Error.Timeout]; closure, disconnection, and cancellation
+      retain the same behavior as [next]. *)
 
   val iter : t -> f:(delivery -> unit) -> (unit, Error.t) result
   val unsubscribe : t -> (unit, Error.t) result
@@ -149,9 +151,9 @@ val subscribe :
 (** [subscribe ~replay_on_reconnect:false filter] creates an ephemeral
     subscription, such as a pull-reply inbox, that is terminated with
     [Disconnected] rather than restored after a transport loss. The default is
-    [true], preserving ordinary subscription replay. A blocked subscription
-    read and an in-flight drain receive [Disconnected]; already queued
-    deliveries remain available before the terminal marker. *)
+    [true], preserving ordinary subscription replay. A blocked subscription read
+    and an in-flight drain receive [Disconnected]; already queued deliveries
+    remain available before the terminal marker. *)
 
 val request :
   ?timeout:Mtime.Span.t ->

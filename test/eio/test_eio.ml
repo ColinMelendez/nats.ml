@@ -24,7 +24,8 @@ let auth_info_wire =
 let auth_required_info_wire =
   "INFO {\"server_id\":\"srv\",\"version\":\"2.10.0\","
   ^ "\"proto\":1,\"max_payload\":1048576,\"headers\":true,"
-  ^ "\"no_responders\":true,\"auth_required\":true,\"connect_urls\":[]}" ^ "\r\n"
+  ^ "\"no_responders\":true,\"auth_required\":true,\"connect_urls\":[]}"
+  ^ "\r\n"
 
 let expect_ok = function
   | Ok value -> value
@@ -206,8 +207,7 @@ let () =
               in
               (match Nats_eio.Subscription.next_nonblocking subscription with
               | None -> ()
-              | Some (Ok _) ->
-                  fail "empty subscription returned a delivery"
+              | Some (Ok _) -> fail "empty subscription returned a delivery"
               | Some (Error error) ->
                   fail
                     (Format.asprintf "empty subscription returned %a"
@@ -236,14 +236,11 @@ let () =
         (fun () ->
           let signed, signed_u = Eio.Promise.create () in
           let auth =
-            Nats.Auth.nkey ~nkey:"PUB"
-              ~sign:(fun ~nonce ->
+            Nats.Auth.nkey ~nkey:"PUB" ~sign:(fun ~nonce ->
                 Eio.Promise.resolve signed_u nonce;
                 Ok "signature")
           in
-          let config =
-            expect_ok (Nats_eio.Connection.Config.v ~auth ())
-          in
+          let config = expect_ok (Nats_eio.Connection.Config.v ~auth ()) in
           let hold, hold_u = Eio.Promise.create () in
           with_connection ~config
             ~reads:[ `Return auth_info_wire; `Await hold ]
@@ -268,8 +265,8 @@ let () =
               fail "anonymous auth unexpectedly connected"
           | Error error ->
               fail
-                (Format.asprintf "unexpected auth error: %a"
-                   Nats_eio.Error.pp error));
+                (Format.asprintf "unexpected auth error: %a" Nats_eio.Error.pp
+                   error));
       test "keeps the owner available after fragmented INFO" (fun () ->
           let hold, hold_u = Eio.Promise.create () in
           let split = String.length info_wire / 2 in
@@ -938,9 +935,7 @@ let () =
                     (Format.asprintf "expected second queued INFO, got %a"
                        Nats.Event.pp event));
               (match Nats_eio.Event_stream.next events with
-              | Ok
-                  (Nats_eio.Event.Slow_consumer Nats_eio.Error.Events) ->
-                  ()
+              | Ok (Nats_eio.Event.Slow_consumer Nats_eio.Error.Events) -> ()
               | Ok event ->
                   fail
                     (Format.asprintf
@@ -1259,8 +1254,7 @@ let () =
           in
           with_reconnecting_connection ~config
             ~first_reads:[ `Return info_wire; `Await queued; `Await disconnect ]
-            ~second_reads:
-              [ `Await reconnect_info; `Await later; `Await hold ]
+            ~second_reads:[ `Await reconnect_info; `Await later; `Await hold ]
             (fun ~sw connection ->
               let events = Nats_eio.Connection.events connection in
               let subscription =
@@ -1283,8 +1277,8 @@ let () =
               let detached_result, detached_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve detached_result_u
-                    (Nats_eio.Subscription.await_recovery
-                       ~from:initial_recovery subscription));
+                    (Nats_eio.Subscription.await_recovery ~from:initial_recovery
+                       subscription));
               Eio.Promise.resolve queued_u
                 (Ok "MSG orders.created 1 6\r\nbefore\r\n");
               yield_n 5;
@@ -1294,8 +1288,7 @@ let () =
               | Ok (Nats_eio.Subscription.Detached 0) -> ()
               | Ok recovery ->
                   fail
-                    (Format.asprintf
-                       "expected detached generation 0, got %s"
+                    (Format.asprintf "expected detached generation 0, got %s"
                        (match recovery with
                        | Nats_eio.Subscription.Detached generation ->
                            Format.asprintf "detached %d" generation
@@ -1309,8 +1302,10 @@ let () =
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve attached_result_u
                     (Nats_eio.Subscription.await_recovery
-                       ~from:(match detached with Ok value -> value | Error _ ->
-                         initial_recovery)
+                       ~from:
+                         (match detached with
+                         | Ok value -> value
+                         | Error _ -> initial_recovery)
                        subscription));
               Eio.Promise.resolve reconnect_info_u (Ok info_wire);
               (match expect_core_event (Nats_eio.Event_stream.next events) with
@@ -1367,8 +1362,7 @@ let () =
               | Ok (Nats_eio.Subscription.Attached 1) -> ()
               | Ok recovery ->
                   fail
-                    (Format.asprintf
-                       "expected attached generation 1, got %s"
+                    (Format.asprintf "expected attached generation 1, got %s"
                        (match recovery with
                        | Nats_eio.Subscription.Detached generation ->
                            Format.asprintf "detached %d" generation
@@ -1400,7 +1394,8 @@ let () =
             expect_ok
               (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 1)
                  ~reconnect_delay:Mtime.Span.(1 * ms)
-                 ~reconnect_max_delay:Mtime.Span.(1 * ms) ())
+                 ~reconnect_max_delay:Mtime.Span.(1 * ms)
+                 ())
           in
           with_reconnecting_connection ~config
             ~first_reads:[ `Return info_wire; `Await disconnect ]
@@ -1414,14 +1409,12 @@ let () =
                 expect_ok (Nats_eio.Connection.subscribe connection filter)
               in
               (match
-                 Nats_eio.Subscription.next_or_recovery_nonblocking
-                   subscription
+                 Nats_eio.Subscription.next_or_recovery_nonblocking subscription
                with
               | None -> ()
               | Some (Ok next) ->
                   fail
-                    (Format.asprintf
-                       "new subscription unexpectedly returned %s"
+                    (Format.asprintf "new subscription unexpectedly returned %s"
                        (match next with
                        | Nats_eio.Subscription.Delivery _ -> "a delivery"
                        | Nats_eio.Subscription.Recovery -> "a recovery"))
@@ -1431,10 +1424,12 @@ let () =
                        Nats_eio.Error.pp error));
               (match
                  Nats_eio.Subscription.next_or_recovery_with_timeout
-                   ~timeout:Mtime.Span.(1 * ms) subscription
+                   ~timeout:Mtime.Span.(1 * ms)
+                   subscription
                with
               | Error Nats_eio.Error.Timeout -> ()
-              | Ok _ -> fail "empty recovery-aware subscription did not time out"
+              | Ok _ ->
+                  fail "empty recovery-aware subscription did not time out"
               | Error error ->
                   fail
                     (Format.asprintf "recovery-aware subscription: %a"
@@ -1445,8 +1440,8 @@ let () =
               let detached_result, detached_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve detached_result_u
-                    (Nats_eio.Subscription.await_recovery
-                       ~from:initial_recovery subscription));
+                    (Nats_eio.Subscription.await_recovery ~from:initial_recovery
+                       subscription));
               Eio.Promise.resolve disconnect_u (Error End_of_file);
               let detached = Eio.Promise.await detached_result in
               let detached = expect_ok detached in
@@ -1463,8 +1458,7 @@ let () =
                        "subscription remained attached at generation %d"
                        generation));
               (match
-                 Nats_eio.Subscription.next_or_recovery_nonblocking
-                   subscription
+                 Nats_eio.Subscription.next_or_recovery_nonblocking subscription
                with
               | Some (Ok Nats_eio.Subscription.Recovery) -> ()
               | Some (Ok (Nats_eio.Subscription.Delivery _)) ->
@@ -1475,8 +1469,7 @@ let () =
                        Nats_eio.Error.pp error)
               | None -> fail "detached subscription had no recovery wakeup");
               (match
-                 Nats_eio.Subscription.next_or_recovery_nonblocking
-                   subscription
+                 Nats_eio.Subscription.next_or_recovery_nonblocking subscription
                with
               | None -> ()
               | Some (Ok _) -> fail "recovery wakeup was delivered twice"
@@ -1485,7 +1478,8 @@ let () =
                     (Format.asprintf "recovery queue returned %a"
                        Nats_eio.Error.pp error));
               (match
-                 Nats_eio.Subscription.await_recovery ~timeout:Mtime.Span.(1 * ms)
+                 Nats_eio.Subscription.await_recovery
+                   ~timeout:Mtime.Span.(1 * ms)
                    ~from:detached subscription
                with
               | Error Nats_eio.Error.Timeout -> ()
@@ -1515,7 +1509,8 @@ let () =
                        generation));
               (match
                  Nats_eio.Subscription.next_or_recovery_with_timeout
-                   ~timeout:Mtime.Span.(1 * ms) subscription
+                   ~timeout:Mtime.Span.(1 * ms)
+                   subscription
                with
               | Error Nats_eio.Error.Timeout -> ()
               | Ok _ -> fail "attached subscription unexpectedly returned data"
@@ -1525,8 +1520,7 @@ let () =
                        Nats_eio.Error.pp error));
               expect_ok (Nats_eio.Connection.close connection);
               (match
-                 Nats_eio.Subscription.next_or_recovery_nonblocking
-                   subscription
+                 Nats_eio.Subscription.next_or_recovery_nonblocking subscription
                with
               | Some (Error Nats_eio.Error.Closed) -> ()
               | Some (Ok _) -> fail "closed subscription returned data"
@@ -1636,14 +1630,12 @@ let () =
                   (String.length trace - trace_before_disconnect)
               in
               if
-                contains_substring
-                  ~needle:"wrote \"SUB orders.* 2\\r\\n\""
+                contains_substring ~needle:"wrote \"SUB orders.* 2\\r\\n\""
                   reconnect_trace
               then fail "non-replaying subscription was restored on the wire";
               if
                 not
-                  (contains_substring
-                     ~needle:"wrote \"SUB orders.* 1\\r\\n\""
+                  (contains_substring ~needle:"wrote \"SUB orders.* 1\\r\\n\""
                      reconnect_trace)
               then fail "ordinary subscription was not restored on the wire";
               Eio.Promise.resolve later_u
@@ -1782,14 +1774,16 @@ let () =
               Eio.Promise.resolve disconnect_u (Error End_of_file);
               yield_n 5;
               (match
-                 Nats_eio.Connection.publish connection subject "during-reconnect"
+                 Nats_eio.Connection.publish connection subject
+                   "during-reconnect"
                with
               | Error Nats_eio.Error.Disconnected -> ()
               | Ok () -> fail "ordinary publish unexpectedly survived reconnect"
               | Error error ->
                   fail
                     (Format.asprintf
-                       "expected ordinary publish to fail as disconnected, got %a"
+                       "expected ordinary publish to fail as disconnected, got \
+                        %a"
                        Nats_eio.Error.pp error));
               Eio.Promise.resolve reconnect_info_u (Ok info_wire);
               ignore (expect_core_event (Nats_eio.Event_stream.next events));
@@ -1841,7 +1835,8 @@ let () =
               Eio.Promise.resolve disconnect_u (Error End_of_file);
               yield_n 5;
               (match
-                 Nats_eio.Connection.request connection subject "during-reconnect"
+                 Nats_eio.Connection.request connection subject
+                   "during-reconnect"
                with
               | Error Nats_eio.Error.Disconnected -> ()
               | Ok _ ->
@@ -1880,13 +1875,9 @@ let () =
                 String.sub trace trace_before_disconnect
                   (String.length trace - trace_before_disconnect)
               in
-              if
-                contains_substring ~needle:"wrote \"SUB " reconnect_trace
-              then
+              if contains_substring ~needle:"wrote \"SUB " reconnect_trace then
                 fail "request subscription was written during reconnect";
-              if
-                contains_substring ~needle:"wrote \"PUB " reconnect_trace
-              then
+              if contains_substring ~needle:"wrote \"PUB " reconnect_trace then
                 fail "request publish was written during reconnect";
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));

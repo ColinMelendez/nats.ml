@@ -228,6 +228,7 @@ type subscription_drain_waiter = {
 module Subscription = struct
   type item = Message of delivery | Recovery | Done of Error.t
   and delivery = { message : Nats.Message.t; status : Nats.Op.status option }
+
   type recovery = Detached of int | Attached of int
   type next = Delivery of delivery | Recovery
 
@@ -395,11 +396,11 @@ module Subscription = struct
 
   let mark_done t error =
     t.done_seen <- true;
-    (match t.drain_waiter with
+    match t.drain_waiter with
     | None -> ()
     | Some waiter ->
         waiter.done_seen <- true;
-        if waiter.server_flushed then complete_drain t waiter (Ok ()))
+        if waiter.server_flushed then complete_drain t waiter (Ok ())
 
   let rec next t =
     if t.done_seen then terminal_error t
@@ -489,7 +490,7 @@ module Subscription = struct
     let rec wait () =
       match t.terminal with
       | Some error -> Error error
-      | None ->
+      | None -> (
           let current = t.recovery in
           if not (equal_recovery current from) then Ok current
           else
@@ -507,8 +508,9 @@ module Subscription = struct
                     let choose first second =
                       match (first, second) with
                       | (Ok _ as value), _ | _, (Ok _ as value) -> value
-                      | Error Error.Timeout, other
-                      | other, Error Error.Timeout -> other
+                      | Error Error.Timeout, other | other, Error Error.Timeout
+                        ->
+                          other
                       | first, _ -> first
                     in
                     Eio.Fiber.first ~combine:choose wait_signal (fun () ->
@@ -516,7 +518,9 @@ module Subscription = struct
                         | Ok () -> Error Error.Timeout
                         | Error error -> Error error)
             in
-            match wait_result with Ok () -> wait () | Error error -> Error error
+            match wait_result with
+            | Ok () -> wait ()
+            | Error error -> Error error)
     in
     wait ()
 
@@ -1190,10 +1194,10 @@ let rec connect_after_info t =
     if
       (tls_required_by_server t || t.config.Config.tls_required)
       && not t.tls_active
-    then (
+    then
       match upgrade_tls t with
       | Error error -> Error error
-      | Ok () -> connect_after_info t)
+      | Ok () -> connect_after_info t
     else if t.tls_active && not t.connect_info_ready then Ok ()
     else
       match Nats.Client.info t.state with
@@ -1405,7 +1409,8 @@ let recover_transport t initial_error =
   let non_reconnecting_sids =
     Hashtbl.fold
       (fun sid subscription acc ->
-        if Subscription.replay_on_reconnect subscription then acc else sid :: acc)
+        if Subscription.replay_on_reconnect subscription then acc
+        else sid :: acc)
       t.subscriptions []
   in
   List.iter
@@ -1477,8 +1482,7 @@ let apply_outgoing t command =
               let unsubscribe_request () =
                 let result =
                   if t.closed then Error Error.Closed
-                  else if
-                    t.pending_commands >= t.config.Config.command_capacity
+                  else if t.pending_commands >= t.config.Config.command_capacity
                   then
                     Error
                       (Error.Command_queue_full
@@ -1498,8 +1502,7 @@ let apply_outgoing t command =
               in
               let subscription =
                 Subscription.create ~sid
-                  ~capacity:t.config.subscription_capacity
-                  ~unsubscribe_request
+                  ~capacity:t.config.subscription_capacity ~unsubscribe_request
                   ~replay_on_reconnect
                   ~auto_unsubscribe_request:(fun ~max_messages ->
                     if t.closed then Error Error.Closed
@@ -2380,7 +2383,8 @@ let publish t ?reply_to ?(headers = Nats.Header.empty) subject payload =
 
 let subscribe t ?queue_group ?(replay_on_reconnect = true) subject =
   let promise, resolver = Eio.Promise.create () in
-  send t (Subscribe { subject; queue_group; replay_on_reconnect; resolver })
+  send t
+    (Subscribe { subject; queue_group; replay_on_reconnect; resolver })
     promise
 
 let validate_timeout name timeout =

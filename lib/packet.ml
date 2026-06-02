@@ -89,9 +89,8 @@ let contains_internal_line_break string =
     in
     if
       (not trailing_carriage_return)
-      &&
-      (Char.equal (String.get string position) '\r'
-      || Char.equal (String.get string position) '\n')
+      && (Char.equal (String.get string position) '\r'
+         || Char.equal (String.get string position) '\n')
     then found := true
   done;
   !found
@@ -259,8 +258,7 @@ let read ?(eod = false) ?(limits = default_limits) reader =
         else
           match Bytesrw.Bytes.Reader.read reader with
           | slice when Bytesrw.Bytes.Slice.is_eod slice ->
-              if eod then Error Unexpected_end
-              else Error Need_more
+              if eod then Error Unexpected_end else Error Need_more
           | slice ->
               add_slice slice;
               loop ()
@@ -282,7 +280,8 @@ let read ?(eod = false) ?(limits = default_limits) reader =
               | Ok size -> (
                   if size > limits.max_packet_bytes then
                     restore_error
-                      (Packet_too_large { size; limit = limits.max_packet_bytes })
+                      (Packet_too_large
+                         { size; limit = limits.max_packet_bytes })
                   else
                     match read_body size with
                     | Error error -> restore_error error
@@ -296,7 +295,8 @@ let read ?(eod = false) ?(limits = default_limits) reader =
                           || Char.equal (String.get complete (size - 2)) '\r'
                              && Char.equal (String.get complete (size - 1)) '\n'
                         in
-                        if not valid_terminator then restore_error Invalid_terminator
+                        if not valid_terminator then
+                          restore_error Invalid_terminator
                         else (
                           if String.length complete > size then
                             restore reader

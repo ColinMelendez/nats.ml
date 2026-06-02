@@ -36,14 +36,15 @@ let auth () =
   | None, None, Some token -> Some (Nats.Auth.token token)
   | Some user, Some pass, None -> Some (Nats.Auth.user_pass ~user ~pass)
   | _ ->
-      failf "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
+      failf
+        "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
 
 let read_file path = In_channel.with_open_bin path In_channel.input_all
 
 let tls_config () =
   match Sys.getenv_opt "NATS_TEST_TLS_CA" with
   | None -> None
-  | Some ca_file ->
+  | Some ca_file -> (
       let ca =
         match X509.Certificate.decode_pem (read_file ca_file) with
         | Ok value -> value
@@ -52,14 +53,15 @@ let tls_config () =
       in
       let authenticator =
         X509.Authenticator.chain_of_trust
-          ~time:(fun () -> Some (Ptime_clock.now ())) [ ca ]
+          ~time:(fun () -> Some (Ptime_clock.now ()))
+          [ ca ]
       in
       let peer_name =
         Domain_name.host_exn (Domain_name.of_string_exn "localhost")
       in
       match Tls.Config.client ~authenticator ~peer_name () with
       | Ok value -> Some value
-      | Error (`Msg message) -> failf "TLS client configuration: %s" message
+      | Error (`Msg message) -> failf "TLS client configuration: %s" message)
 
 let next_message ~timeout label subscription =
   match Nats_eio.Subscription.next_with_timeout ~timeout subscription with
@@ -180,19 +182,20 @@ let run env =
       let go_message =
         match messages with
         | [ message ] -> message
-        | messages -> failf "Go fetch returned %d messages" (List.length messages)
+        | messages ->
+            failf "Go fetch returned %d messages" (List.length messages)
       in
       expect_payload "Go JetStream message" "from-go-jetstream"
         (Nats_eio.Jetstream.Msg.message go_message);
       expect_header "Go JetStream X-Interop" "go-jetstream"
-        (Nats_eio.Jetstream.Msg.headers go_message) "X-Interop";
+        (Nats_eio.Jetstream.Msg.headers go_message)
+        "X-Interop";
       expect_header "Go JetStream X-Trace" "go"
-        (Nats_eio.Jetstream.Msg.headers go_message) "X-Trace";
+        (Nats_eio.Jetstream.Msg.headers go_message)
+        "X-Trace";
       if
         not
-          (String.equal
-             (Nats_eio.Jetstream.Msg.stream go_message)
-             stream_name)
+          (String.equal (Nats_eio.Jetstream.Msg.stream go_message) stream_name)
       then failf "Go message named the wrong stream";
       if
         not
@@ -205,11 +208,10 @@ let run env =
       then failf "Go message had the wrong stream sequence";
       if
         not
-          (Int64.equal
-             (Nats_eio.Jetstream.Msg.consumer_sequence go_message)
-             1L)
+          (Int64.equal (Nats_eio.Jetstream.Msg.consumer_sequence go_message) 1L)
       then failf "Go message had the wrong consumer sequence";
-      if not (Int64.equal (Nats_eio.Jetstream.Msg.num_pending go_message) 0L) then
+      if not (Int64.equal (Nats_eio.Jetstream.Msg.num_pending go_message) 0L)
+      then
         failf "Go message had %Ld pending messages"
           (Nats_eio.Jetstream.Msg.num_pending go_message);
       expect_jetstream_ok "ack Go message"
@@ -223,7 +225,10 @@ let run env =
       expect_payload "Go acknowledgement" "acknowledged" acknowledgement;
       let ocaml_subject = Nats.Subject.literal (prefix ^ ".ocaml") in
       let headers =
-        match Nats.Header.of_list [ ("X-Interop", "ocaml-jetstream"); ("X-Trace", "ocaml") ] with
+        match
+          Nats.Header.of_list
+            [ ("X-Interop", "ocaml-jetstream"); ("X-Trace", "ocaml") ]
+        with
         | Ok headers -> headers
         | Error error -> failf "interop headers: %a" Nats.Header.pp_error error
       in
@@ -234,8 +239,7 @@ let run env =
              "from-ocaml-jetstream")
       in
       expect_publish_ack "OCaml publish" ~stream:stream_name ~duplicate:false
-        ~sequence:2L
-        ocaml_ack;
+        ~sequence:2L ocaml_ack;
       let ocaml_duplicate_ack =
         expect_jetstream_ok "duplicate OCaml JetStream message"
           (Nats_eio.Jetstream.publish ~timeout ~headers

@@ -18,13 +18,11 @@ let expect_ok = function
 
 let expect_kv_ok = function
   | Ok value -> value
-  | Error error ->
-      fail (Format.asprintf "%a" Nats_eio.Key_value.Error.pp error)
+  | Error error -> fail (Format.asprintf "%a" Nats_eio.Key_value.Error.pp error)
 
 let expect_jetstream_ok = function
   | Ok value -> value
-  | Error error ->
-      fail (Format.asprintf "%a" Nats_eio.Jetstream.Error.pp error)
+  | Error error -> fail (Format.asprintf "%a" Nats_eio.Jetstream.Error.pp error)
 
 let expect_kv_error result predicate =
   match result with
@@ -42,8 +40,9 @@ let operation_wire operation =
 
 let response_wire_with_sid ~sid ?(headers = Nats.Header.empty) payload =
   let message =
-    Nats.Message.v ~subject:(Nats.Subject.literal "_INBOX.reply") ~headers
-      payload
+    Nats.Message.v
+      ~subject:(Nats.Subject.literal "_INBOX.reply")
+      ~headers payload
   in
   operation_wire (Nats.Op.Hmsg { sid; message; status = None })
 
@@ -64,15 +63,12 @@ let stream_info_response ~sid ~bucket ~history =
   response_wire_with_sid ~sid payload
 
 let publish_ack_response ~sid ~stream ~sequence =
-  let payload =
-    Format.asprintf {|{"stream":"%s","seq":%Ld}|} stream sequence
-  in
+  let payload = Format.asprintf {|{"stream":"%s","seq":%Ld}|} stream sequence in
   response_wire_with_sid ~sid payload
 
 let publish_error_response ~sid ~code ~err_code ~description =
   let payload =
-    Format.asprintf
-      {|{"error":{"code":%d,"err_code":%d,"description":"%s"}}|}
+    Format.asprintf {|{"error":{"code":%d,"err_code":%d,"description":"%s"}}|}
       code err_code description
   in
   response_wire_with_sid ~sid payload
@@ -85,11 +81,11 @@ let consumer_response_named ~sid ~policy ~headers_only ~pending ~name
     if String.equal deliver_subject "" then ""
     else Format.asprintf ",\"deliver_subject\":\"%s\"" deliver_subject
   in
-  let headers_only =
-    if headers_only then ",\"headers_only\":true" else ""
-  in
+  let headers_only = if headers_only then ",\"headers_only\":true" else "" in
   let pending =
-    match pending with None -> "" | Some value -> Format.asprintf ",\"num_pending\":%Ld" value
+    match pending with
+    | None -> ""
+    | Some value -> Format.asprintf ",\"num_pending\":%Ld" value
   in
   let payload =
     Format.asprintf
@@ -119,8 +115,8 @@ let consumer_delivery_wire ~sid ~consumer ~key ~stream_sequence
   let message =
     Nats.Message.v
       ~subject:(Nats.Subject.literal ("$KV.users." ^ key))
-      ~reply_to:(Nats.Subject.literal reply_to) ~headers
-      payload
+      ~reply_to:(Nats.Subject.literal reply_to)
+      ~headers payload
   in
   operation_wire (Nats.Op.Hmsg { sid; message; status = None })
 
@@ -237,10 +233,10 @@ let trace_field ~trace ~field =
       fail
         (Format.asprintf "trace did not contain field %S; trace:\n%s" field
            value)
-  | Some position ->
+  | Some position -> (
       let start = position + String.length needle in
       let remainder = String.sub value start (String.length value - start) in
-      (match substring_position ~needle:"\\\"" remainder with
+      match substring_position ~needle:"\\\"" remainder with
       | None ->
           fail
             (Format.asprintf "trace field %S was not terminated; trace:\n%s"
@@ -250,7 +246,7 @@ let trace_field ~trace ~field =
 let wait_for_trace ~trace ~needle =
   let attempts = ref 0 in
   while
-    not (contains_substring ~needle (Buffer.contents trace))
+    (not (contains_substring ~needle (Buffer.contents trace)))
     && Int.compare !attempts 100 < 0
   do
     Eio.Fiber.yield ();
@@ -282,16 +278,14 @@ let () =
       test "configuration and keys reject invalid external names" (fun () ->
           (match Nats_eio.Key_value.Config.v ~bucket:"users" ~history:5 () with
           | Ok config ->
-              equal string "users"
-                (Nats_eio.Key_value.Config.bucket config);
+              equal string "users" (Nats_eio.Key_value.Config.bucket config);
               equal int 5 (Nats_eio.Key_value.Config.history config)
           | Error error ->
               fail
-                (Format.asprintf "%a"
-                   Nats_eio.Key_value.Error.pp_config error));
+                (Format.asprintf "%a" Nats_eio.Key_value.Error.pp_config error));
           (match Nats_eio.Key_value.Config.v ~bucket:"bad.bucket" () with
           | Ok _ -> fail "bucket validation accepted a dot"
-          | Error Nats_eio.Key_value.Config.Invalid_bucket_character _ -> ()
+          | Error (Nats_eio.Key_value.Config.Invalid_bucket_character _) -> ()
           | Error error ->
               fail
                 (Format.asprintf "unexpected config error: %a"
@@ -303,10 +297,10 @@ let () =
               fail
                 (Format.asprintf "unexpected key error: %a"
                    Nats_eio.Key_value.Error.pp_key error));
-          (match
-             Nats_eio.Key_value.Config.v ~bucket:"limits" ~max_bytes:(-1L)
-               ~max_value_size:(-1L) ()
-           with
+          match
+            Nats_eio.Key_value.Config.v ~bucket:"limits" ~max_bytes:(-1L)
+              ~max_value_size:(-1L) ()
+          with
           | Ok config ->
               equal (option int64) None
                 (Nats_eio.Key_value.Config.max_bytes config);
@@ -315,7 +309,7 @@ let () =
           | Error error ->
               fail
                 (Format.asprintf "unexpected normalized config error: %a"
-                   Nats_eio.Key_value.Error.pp_config error)));
+                   Nats_eio.Key_value.Error.pp_config error));
       test "create and status project the KV stream contract" (fun () ->
           let create_response, create_response_u = Eio.Promise.create () in
           let status_response, status_response_u = Eio.Promise.create () in
@@ -346,9 +340,7 @@ let () =
               require_trace ~trace ~needle:"allow_direct\\\":true";
               require_trace ~trace ~needle:"deny_delete\\\":true";
               Eio.Promise.resolve create_response_u
-                (Ok
-                   (stream_config_response ~sid:1 ~bucket:"users"
-                      ~history:5));
+                (Ok (stream_config_response ~sid:1 ~bucket:"users" ~history:5));
               let value = expect_kv_ok (Eio.Promise.await create_result) in
               equal string "users" (Nats_eio.Key_value.bucket value);
               let status_result, status_result_u = Eio.Promise.create () in
@@ -357,18 +349,14 @@ let () =
                     (Nats_eio.Key_value.status value));
               yield_n 5;
               Eio.Promise.resolve status_response_u
-                (Ok
-                   (stream_info_response ~sid:2 ~bucket:"users"
-                      ~history:5));
+                (Ok (stream_info_response ~sid:2 ~bucket:"users" ~history:5));
               let status = expect_kv_ok (Eio.Promise.await status_result) in
               equal int64 3L (Nats_eio.Key_value.Status.values status);
               equal int64 42L (Nats_eio.Key_value.Status.bytes status);
               equal int64 5L
                 (Option.get (Nats_eio.Key_value.Status.history status));
-              equal int64 1L
-                (Nats_eio.Key_value.Status.first_revision status);
-              equal int64 7L
-                (Nats_eio.Key_value.Status.last_revision status);
+              equal int64 1L (Nats_eio.Key_value.Status.first_revision status);
+              equal int64 7L (Nats_eio.Key_value.Status.last_revision status);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "direct reads expose values and tombstones" (fun () ->
@@ -388,8 +376,7 @@ let () =
                 expect_jetstream_ok (Nats_eio.Jetstream.v connection)
               in
               let value =
-                expect_kv_ok
-                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+                expect_kv_ok (Nats_eio.Key_value.bind jetstream ~bucket:"users")
               in
               let alice = key "alice" in
               expect_kv_error
@@ -429,10 +416,9 @@ let () =
                    (direct_response ~sid:2 ~bucket:"users" ~key:"alice"
                       ~sequence:5L ~operation:(Some "DEL") ""));
               expect_kv_error (Eio.Promise.await second_result) (function
-                | Nats_eio.Key_value.Error.Key_deleted tombstone ->
-                    equal int64 5L
-                      (Nats_eio.Key_value.Entry.revision tombstone);
-                    (match Nats_eio.Key_value.Entry.operation tombstone with
+                | Nats_eio.Key_value.Error.Key_deleted tombstone -> (
+                    equal int64 5L (Nats_eio.Key_value.Entry.revision tombstone);
+                    match Nats_eio.Key_value.Entry.operation tombstone with
                     | Nats_eio.Key_value.Entry.Delete -> true
                     | _ -> false)
                 | _ -> false);
@@ -457,8 +443,7 @@ let () =
                 expect_jetstream_ok (Nats_eio.Jetstream.v connection)
               in
               let value =
-                expect_kv_ok
-                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+                expect_kv_ok (Nats_eio.Key_value.bind jetstream ~bucket:"users")
               in
               let alice = key "alice" in
               let put_result, put_result_u = Eio.Promise.create () in
@@ -469,8 +454,7 @@ let () =
               require_trace ~trace ~needle:"PUB $KV.users.alice";
               Eio.Promise.resolve put_response_u
                 (Ok
-                   (publish_ack_response ~sid:1 ~stream:"KV_users"
-                      ~sequence:8L));
+                   (publish_ack_response ~sid:1 ~stream:"KV_users" ~sequence:8L));
               equal int64 8L (expect_kv_ok (Eio.Promise.await put_result));
               let delete_result, delete_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -482,8 +466,7 @@ let () =
               require_trace ~trace ~needle:"KV-Operation: DEL";
               Eio.Promise.resolve delete_response_u
                 (Ok
-                   (publish_ack_response ~sid:2 ~stream:"KV_users"
-                      ~sequence:9L));
+                   (publish_ack_response ~sid:2 ~stream:"KV_users" ~sequence:9L));
               equal int64 9L (expect_kv_ok (Eio.Promise.await delete_result));
               let purge_result, purge_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -496,8 +479,7 @@ let () =
               require_trace ~trace ~needle:"Nats-Rollup: sub";
               Eio.Promise.resolve purge_response_u
                 (Ok
-                   (publish_ack_response ~sid:3 ~stream:"KV_users"
-                      ~sequence:10L));
+                   (publish_ack_response ~sid:3 ~stream:"KV_users" ~sequence:10L));
               equal int64 10L (expect_kv_ok (Eio.Promise.await purge_result));
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
@@ -510,8 +492,7 @@ let () =
                 expect_jetstream_ok (Nats_eio.Jetstream.v connection)
               in
               let value =
-                expect_kv_ok
-                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+                expect_kv_ok (Nats_eio.Key_value.bind jetstream ~bucket:"users")
               in
               expect_kv_error (Nats_eio.Key_value.keys ~filter:"a..>" value)
                 (function
@@ -540,8 +521,7 @@ let () =
                 expect_jetstream_ok (Nats_eio.Jetstream.v connection)
               in
               let value =
-                expect_kv_ok
-                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+                expect_kv_ok (Nats_eio.Key_value.bind jetstream ~bucket:"users")
               in
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -561,16 +541,13 @@ let () =
               require_trace ~trace ~needle:"headers_only\\\":true";
               Eio.Promise.resolve fetch_response_u
                 (Ok
-                   (consumer_delivery_wire ~sid:3 ~consumer:"scan"
-                      ~key:"alice" ~stream_sequence:1L ~consumer_sequence:1L
-                      ~pending:2L ""
+                   (consumer_delivery_wire ~sid:3 ~consumer:"scan" ~key:"alice"
+                      ~stream_sequence:1L ~consumer_sequence:1L ~pending:2L ""
+                   ^ consumer_delivery_wire ~sid:3 ~consumer:"scan" ~key:"bob"
+                       ~stream_sequence:2L ~consumer_sequence:2L ~pending:1L ""
                    ^ consumer_delivery_wire ~sid:3 ~consumer:"scan"
-                       ~key:"bob" ~stream_sequence:2L ~consumer_sequence:2L
-                       ~pending:1L ""
-                   ^ consumer_delivery_wire ~sid:3 ~consumer:"scan"
-                       ~key:"charlie" ~stream_sequence:3L
-                       ~consumer_sequence:3L ~pending:0L ~operation:"DEL"
-                       ""
+                       ~key:"charlie" ~stream_sequence:3L ~consumer_sequence:3L
+                       ~pending:0L ~operation:"DEL" ""
                    ^ fetch_end_wire ~sid:3));
               yield_n 5;
               require_trace ~trace ~needle:"CONSUMER.MSG.NEXT.KV_users.scan";
@@ -585,8 +562,7 @@ let () =
                       (Format.asprintf "keys scan failed: %a"
                          Nats_eio.Key_value.Error.pp error)
               in
-              equal (list string)
-                [ "alice"; "bob" ]
+              equal (list string) [ "alice"; "bob" ]
                 (List.map Nats_eio.Key_value.Key.to_string keys);
               require_trace ~trace ~needle:"CONSUMER.DELETE.KV_users.scan";
               expect_ok (Nats_eio.Connection.close connection);
@@ -612,8 +588,7 @@ let () =
                 expect_jetstream_ok (Nats_eio.Jetstream.v connection)
               in
               let value =
-                expect_kv_ok
-                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+                expect_kv_ok (Nats_eio.Key_value.bind jetstream ~bucket:"users")
               in
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -632,15 +607,15 @@ let () =
               yield_n 5;
               Eio.Promise.resolve fetch_response_u
                 (Ok
-                   (consumer_delivery_wire ~sid:3 ~consumer:"scan"
-                      ~key:"alice" ~stream_sequence:1L ~consumer_sequence:1L
-                      ~pending:2L "one"
-                   ^ consumer_delivery_wire ~sid:3 ~consumer:"scan"
-                       ~key:"alice" ~stream_sequence:2L ~consumer_sequence:2L
-                       ~pending:1L ~operation:"DEL" ""
-                   ^ consumer_delivery_wire ~sid:3 ~consumer:"scan"
-                       ~key:"alice" ~stream_sequence:3L ~consumer_sequence:3L
-                       ~pending:0L ~operation:"PURGE" ""
+                   (consumer_delivery_wire ~sid:3 ~consumer:"scan" ~key:"alice"
+                      ~stream_sequence:1L ~consumer_sequence:1L ~pending:2L
+                      "one"
+                   ^ consumer_delivery_wire ~sid:3 ~consumer:"scan" ~key:"alice"
+                       ~stream_sequence:2L ~consumer_sequence:2L ~pending:1L
+                       ~operation:"DEL" ""
+                   ^ consumer_delivery_wire ~sid:3 ~consumer:"scan" ~key:"alice"
+                       ~stream_sequence:3L ~consumer_sequence:3L ~pending:0L
+                       ~operation:"PURGE" ""
                    ^ fetch_end_wire ~sid:3));
               yield_n 5;
               wait_for_trace ~trace
@@ -661,20 +636,21 @@ let () =
               equal (list int64) [ 1L; 2L; 3L ] revisions;
               equal string "1970-01-01T00:00:00.000000000Z"
                 (Nats_eio.Key_value.Entry.timestamp (List.hd entries));
-              (match
-                 List.map Nats_eio.Key_value.Entry.operation entries
-               with
+              (match List.map Nats_eio.Key_value.Entry.operation entries with
               | [
-                  Nats_eio.Key_value.Entry.Put;
-                  Nats_eio.Key_value.Entry.Delete;
-                  Nats_eio.Key_value.Entry.Purge;
-                ] -> ()
+               Nats_eio.Key_value.Entry.Put;
+               Nats_eio.Key_value.Entry.Delete;
+               Nats_eio.Key_value.Entry.Purge;
+              ] ->
+                  ()
               | _ -> fail "history did not retain operation order");
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "watch emits retained entries, marker, and live updates" (fun () ->
           let create_response, create_response_u = Eio.Promise.create () in
-          let first_info_response, first_info_response_u = Eio.Promise.create () in
+          let first_info_response, first_info_response_u =
+            Eio.Promise.create ()
+          in
           let delivery_response, delivery_response_u = Eio.Promise.create () in
           let delete_response, delete_response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
@@ -693,17 +669,20 @@ let () =
                 expect_jetstream_ok (Nats_eio.Jetstream.v connection)
               in
               let value =
-                expect_kv_ok
-                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+                expect_kv_ok (Nats_eio.Key_value.bind jetstream ~bucket:"users")
               in
               let watch_result, watch_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve watch_result_u
                     (Nats_eio.Key_value.Watch.v ~sw ~key:"alice" value));
               yield_n 5;
-              let deliver_subject = trace_field ~trace ~field:"deliver_subject" in
-              require_trace ~trace ~needle:"deliver_policy\\\":\\\"last_per_subject";
-              require_trace ~trace ~needle:"filter_subject\\\":\\\"$KV.users.alice";
+              let deliver_subject =
+                trace_field ~trace ~field:"deliver_subject"
+              in
+              require_trace ~trace
+                ~needle:"deliver_policy\\\":\\\"last_per_subject";
+              require_trace ~trace
+                ~needle:"filter_subject\\\":\\\"$KV.users.alice";
               Eio.Promise.resolve create_response_u
                 (Ok
                    (consumer_response_named ~sid:2 ~policy:"last_per_subject"
@@ -718,15 +697,15 @@ let () =
               let watch = expect_kv_ok (Eio.Promise.await watch_result) in
               Eio.Promise.resolve delivery_response_u
                 (Ok
-                   (consumer_delivery_wire ~sid:1 ~consumer:"watch"
-                      ~key:"alice" ~stream_sequence:1L ~consumer_sequence:1L
-                      ~pending:1L "one"
+                   (consumer_delivery_wire ~sid:1 ~consumer:"watch" ~key:"alice"
+                      ~stream_sequence:1L ~consumer_sequence:1L ~pending:1L
+                      "one"
                    ^ consumer_delivery_wire ~sid:1 ~consumer:"watch"
-                       ~key:"alice" ~stream_sequence:2L
-                       ~consumer_sequence:2L ~pending:1L ~operation:"DEL" ""
+                       ~key:"alice" ~stream_sequence:2L ~consumer_sequence:2L
+                       ~pending:1L ~operation:"DEL" ""
                    ^ consumer_delivery_wire ~sid:1 ~consumer:"watch"
-                       ~key:"alice" ~stream_sequence:3L
-                       ~consumer_sequence:3L ~pending:0L "three"));
+                       ~key:"alice" ~stream_sequence:3L ~consumer_sequence:3L
+                       ~pending:0L "three"));
               let entry =
                 match expect_kv_ok (Nats_eio.Key_value.Watch.next watch) with
                 | Nats_eio.Key_value.Watch.Entry entry -> entry
@@ -766,7 +745,9 @@ let () =
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "watch can ignore tombstones and suppress values" (fun () ->
           let create_response, create_response_u = Eio.Promise.create () in
-          let first_info_response, first_info_response_u = Eio.Promise.create () in
+          let first_info_response, first_info_response_u =
+            Eio.Promise.create ()
+          in
           let delivery_response, delivery_response_u = Eio.Promise.create () in
           let delete_response, delete_response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
@@ -785,8 +766,7 @@ let () =
                 expect_jetstream_ok (Nats_eio.Jetstream.v connection)
               in
               let value =
-                expect_kv_ok
-                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+                expect_kv_ok (Nats_eio.Key_value.bind jetstream ~bucket:"users")
               in
               let watch_result, watch_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -795,31 +775,33 @@ let () =
                        ~delivery:Nats_eio.Key_value.Watch.All
                        ~ignore_deletes:true ~meta_only:true value));
               yield_n 5;
-              let deliver_subject = trace_field ~trace ~field:"deliver_subject" in
+              let deliver_subject =
+                trace_field ~trace ~field:"deliver_subject"
+              in
               require_trace ~trace ~needle:"deliver_policy\\\":\\\"all";
               require_trace ~trace ~needle:"headers_only\\\":true";
               Eio.Promise.resolve create_response_u
                 (Ok
-                   (consumer_response_named ~sid:2 ~policy:"all" ~headers_only:true
-                      ~pending:None ~name:"watch" ~deliver_subject));
+                   (consumer_response_named ~sid:2 ~policy:"all"
+                      ~headers_only:true ~pending:None ~name:"watch"
+                      ~deliver_subject));
               yield_n 5;
               Eio.Promise.resolve first_info_response_u
                 (Ok
-                   (consumer_response_named ~sid:3 ~policy:"all" ~headers_only:true
-                      ~pending:(Some 3L) ~name:"watch" ~deliver_subject));
+                   (consumer_response_named ~sid:3 ~policy:"all"
+                      ~headers_only:true ~pending:(Some 3L) ~name:"watch"
+                      ~deliver_subject));
               let watch = expect_kv_ok (Eio.Promise.await watch_result) in
               Eio.Promise.resolve delivery_response_u
                 (Ok
-                   (consumer_delivery_wire ~sid:1 ~consumer:"watch"
-                      ~key:"alice" ~stream_sequence:1L ~consumer_sequence:1L
-                      ~pending:2L ""
+                   (consumer_delivery_wire ~sid:1 ~consumer:"watch" ~key:"alice"
+                      ~stream_sequence:1L ~consumer_sequence:1L ~pending:2L ""
                    ^ consumer_delivery_wire ~sid:1 ~consumer:"watch"
-                       ~key:"alice" ~stream_sequence:2L
-                       ~consumer_sequence:2L ~pending:1L ~operation:"DEL" ""
+                       ~key:"alice" ~stream_sequence:2L ~consumer_sequence:2L
+                       ~pending:1L ~operation:"DEL" ""
                    ^ consumer_delivery_wire ~sid:1 ~consumer:"watch"
-                       ~key:"alice" ~stream_sequence:3L
-                       ~consumer_sequence:3L ~pending:0L ~operation:"PURGE"
-                       ""));
+                       ~key:"alice" ~stream_sequence:3L ~consumer_sequence:3L
+                       ~pending:0L ~operation:"PURGE" ""));
               let entry =
                 match expect_kv_ok (Nats_eio.Key_value.Watch.next watch) with
                 | Nats_eio.Key_value.Watch.Entry entry -> entry
@@ -843,7 +825,9 @@ let () =
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "new watch emits its marker without retained messages" (fun () ->
           let create_response, create_response_u = Eio.Promise.create () in
-          let first_info_response, first_info_response_u = Eio.Promise.create () in
+          let first_info_response, first_info_response_u =
+            Eio.Promise.create ()
+          in
           let delete_response, delete_response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
           with_connection_traced
@@ -860,8 +844,7 @@ let () =
                 expect_jetstream_ok (Nats_eio.Jetstream.v connection)
               in
               let value =
-                expect_kv_ok
-                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+                expect_kv_ok (Nats_eio.Key_value.bind jetstream ~bucket:"users")
               in
               let watch_result, watch_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
@@ -869,7 +852,9 @@ let () =
                     (Nats_eio.Key_value.Watch.v ~sw
                        ~delivery:Nats_eio.Key_value.Watch.New value));
               yield_n 5;
-              let deliver_subject = trace_field ~trace ~field:"deliver_subject" in
+              let deliver_subject =
+                trace_field ~trace ~field:"deliver_subject"
+              in
               require_trace ~trace ~needle:"deliver_policy\\\":\\\"new";
               Eio.Promise.resolve create_response_u
                 (Ok
@@ -922,8 +907,7 @@ let () =
                 expect_jetstream_ok (Nats_eio.Jetstream.v connection)
               in
               let value =
-                expect_kv_ok
-                  (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+                expect_kv_ok (Nats_eio.Key_value.bind jetstream ~bucket:"users")
               in
               let alice = key "alice" in
               let update_result, update_result_u = Eio.Promise.create () in
@@ -939,8 +923,10 @@ let () =
                 ~needle:"Nats-Expected-Last-Subject-Sequence: 3";
               let update_result = Eio.Promise.await update_result in
               (match update_result with
-              | Error (Nats_eio.Key_value.Error.Revision_mismatch { expected = 3L })
-                -> ()
+              | Error
+                  (Nats_eio.Key_value.Error.Revision_mismatch { expected = 3L })
+                ->
+                  ()
               | Ok _ -> fail "update unexpectedly succeeded"
               | Error error ->
                   fail
@@ -965,8 +951,7 @@ let () =
                 ~needle:"Nats-Expected-Last-Subject-Sequence: 7";
               Eio.Promise.resolve fourth_response_u
                 (Ok
-                   (publish_ack_response ~sid:4 ~stream:"KV_users"
-                      ~sequence:8L));
+                   (publish_ack_response ~sid:4 ~stream:"KV_users" ~sequence:8L));
               let revision =
                 match Eio.Promise.await create_result with
                 | Ok revision -> revision

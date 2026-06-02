@@ -49,7 +49,8 @@ let auth () =
   | None, None, Some token when safe_credential token ->
       Some (Nats.Auth.token token)
   | Some user, Some pass, None when safe_credential user && safe_credential pass
-    -> Some (Nats.Auth.user_pass ~user ~pass)
+    ->
+      Some (Nats.Auth.user_pass ~user ~pass)
   | Some _, Some _, None ->
       failf
         "NATS_TEST_USER and NATS_TEST_PASS must be non-empty ASCII letters, \
@@ -472,8 +473,7 @@ let run_jetstream ~sw ~client ~timeout =
           let one_message label = function
             | [ message ] -> message
             | messages ->
-                failf "%s returned %d messages"
-                  label (List.length messages)
+                failf "%s returned %d messages" label (List.length messages)
           in
           let first_message =
             one_message "JetStream fetch"
@@ -499,9 +499,7 @@ let run_jetstream ~sw ~client ~timeout =
                  1L)
           then failf "JetStream fetch returned the wrong delivery count";
           if
-            Int64.compare
-              (Nats_eio.Jetstream.Msg.timestamp first_message)
-              0L
+            Int64.compare (Nats_eio.Jetstream.Msg.timestamp first_message) 0L
             <= 0
           then failf "JetStream fetch returned an invalid timestamp";
           expect_jetstream_ok "JetStream ack"
@@ -543,8 +541,8 @@ let run_jetstream ~sw ~client ~timeout =
                 (List.length messages));
           let second_ack =
             expect_jetstream_ok "second JetStream publish"
-              (Nats_eio.Jetstream.publish ~timeout ~msg_id:"integration-message-2"
-                 jetstream subject "world")
+              (Nats_eio.Jetstream.publish ~timeout
+                 ~msg_id:"integration-message-2" jetstream subject "world")
           in
           if Nats_eio.Jetstream.Publish_ack.duplicate second_ack then
             failf "second JetStream publish was marked duplicate";
@@ -819,9 +817,7 @@ let run_jetstream ~sw ~client ~timeout =
             failf "pull max-bytes publish was marked duplicate";
           with_pull ~max_bytes:1 "JetStream max-bytes pull" (fun pull ->
               match Nats_eio.Jetstream.Consumer.Pull.next pull with
-              | Error
-                  (Nats_eio.Jetstream.Error.Conflict { code = 409; _ })
-                ->
+              | Error (Nats_eio.Jetstream.Error.Conflict { code = 409; _ }) ->
                   ()
               | Ok _ -> failf "max-bytes pull returned an oversized message"
               | Error error ->
@@ -916,7 +912,8 @@ let invalid_authentication () =
 let expect_invalid_authentication ~sw ~net ~clock ~timeout endpoint =
   let config =
     expect_ok "invalid auth config"
-      (Nats_eio.Connection.Config.v ~auth:(invalid_authentication ())
+      (Nats_eio.Connection.Config.v
+         ~auth:(invalid_authentication ())
          ~max_reconnect_attempts:(Some 0) ())
   in
   let connection =
@@ -929,9 +926,7 @@ let expect_invalid_authentication ~sw ~net ~clock ~timeout endpoint =
       failf "invalid credentials did not produce a server rejection"
     else
       match next_event_with_timeout ~clock ~timeout events with
-      | Ok
-          (Nats_eio.Event.Core
-            (Nats.Event.Server_error { message }))
+      | Ok (Nats_eio.Event.Core (Nats.Event.Server_error { message }))
         when contains_substring ~needle:"authorization"
                (String.lowercase_ascii message) ->
           wait_for_rejection (remaining - 1) true
@@ -944,7 +939,8 @@ let expect_invalid_authentication ~sw ~net ~clock ~timeout endpoint =
           failf "invalid credentials terminated with %s" (error_message error)
   in
   wait_for_rejection 16 false;
-  expect_ok "close invalid auth connection" (Nats_eio.Connection.close connection)
+  expect_ok "close invalid auth connection"
+    (Nats_eio.Connection.close connection)
 
 let run env =
   Eio.Switch.run @@ fun sw ->
