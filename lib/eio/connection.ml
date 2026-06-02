@@ -671,6 +671,8 @@ type t = {
   mutable eof_seen : bool;
   mutable closed : bool;
   mutable reconnecting : bool;
+  mutable reconnect_signal : (unit, Error.t) result Eio.Promise.t;
+  mutable reconnect_signal_u : (unit, Error.t) result Eio.Promise.u;
   mutable reconnect_attempts : int;
   mutable reconnect_wait : Mtime.Span.t;
   mutable reconnect_deadline : Mtime.t option;
@@ -788,6 +790,42 @@ let write_outputs t output =
 let resolve_unit resolver value = Eio.Promise.resolve resolver value
 let resolve_ready t value = Eio.Promise.resolve t.ready value
 
+let resolve_reconnect t value =
+  let resolver = t.reconnect_signal_u in
+  let signal, signal_resolver = Eio.Promise.create () in
+  t.reconnect_signal <- signal;
+  t.reconnect_signal_u <- signal_resolver;
+  Eio.Promise.resolve resolver value
+
+let await_reconnect ?timeout t =
+  if t.closed then Error Error.Closed
+  else if not t.reconnecting then Ok ()
+  else
+    let wait =
+      match timeout with
+      | None -> Eio.Promise.await t.reconnect_signal
+      | Some timeout -> (
+          if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then
+            Error Error.Timeout
+          else
+            match Mtime.add_span (now t) timeout with
+            | None -> Error Error.Timeout
+            | Some deadline ->
+                let choose first second =
+                  match (first, second) with
+                  | (Ok _ as value), _ | _, (Ok _ as value) -> value
+                  | Error Error.Timeout, other | other, Error Error.Timeout ->
+                      other
+                  | first, _ -> first
+                in
+                Eio.Fiber.first ~combine:choose
+                  (fun () -> Eio.Promise.await t.reconnect_signal)
+                  (fun () ->
+                    t.clock.sleep_until deadline;
+                    Error Error.Timeout))
+    in
+    wait
+
 let resolve_setup t resolver value =
   t.active_request_setup <- None;
   resolve_unit resolver value
@@ -875,6 +913,7 @@ let finish t error =
     let suppress_disconnect = t.reconnecting in
     t.closed <- true;
     t.reconnecting <- false;
+    resolve_reconnect t (Error error);
     Event_stream.end_control_sequence t.events;
     fail_active_request_setup t error;
     (match error with
@@ -1005,6 +1044,7 @@ let handle_event t event =
               attach_replayed_subscriptions t;
               Event_stream.end_control_sequence t.events;
               t.reconnecting <- false;
+              resolve_reconnect t (Ok ());
               release_deferred_commands t;
               Ok ())
             else Error (Error.Slow_consumer Error.Events)
@@ -2139,6 +2179,7 @@ let create ~sw ~clock ~config ~(dial : dial) ~pool ~current_endpoint ~tls_active
   let transport = { flow; closed = false } in
   let input = Eio.Stream.create config.Config.read_capacity in
   let ready, ready_resolver = Eio.Promise.create () in
+  let reconnect_signal, reconnect_signal_u = Eio.Promise.create () in
   let connection =
     {
       sw;
@@ -2161,6 +2202,8 @@ let create ~sw ~clock ~config ~(dial : dial) ~pool ~current_endpoint ~tls_active
       eof_seen = false;
       closed = false;
       reconnecting = false;
+      reconnect_signal;
+      reconnect_signal_u;
       reconnect_attempts = 0;
       reconnect_wait = config.Config.reconnect_delay;
       reconnect_deadline = None;

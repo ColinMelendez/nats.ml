@@ -114,6 +114,11 @@ val now : t -> Mtime.t
     protocol deadlines. Use it when calculating deadlines for operations that
     combine several connection primitives. *)
 
+val await_reconnect : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
+(** [await_reconnect ?timeout connection] waits for an in-progress transport
+    recovery to complete. It returns immediately when [connection] is usable; it
+    does not initiate a reconnect or replay any caller operation. *)
+
 val fresh_inbox : t -> Nats.Subject.t
 (** [fresh_inbox connection] allocates a fresh reply subject under the
     connection's configured inbox prefix. *)

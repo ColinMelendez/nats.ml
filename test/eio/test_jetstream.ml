@@ -3352,6 +3352,121 @@ let () =
               expect_jetstream_ok (Eio.Promise.await close_result);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "ordered consumer recreates after transport reconnect" (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let first_delivery, first_delivery_u = Eio.Promise.create () in
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let reconnect_info, reconnect_info_u = Eio.Promise.create () in
+          let previous_delete, previous_delete_u = Eio.Promise.create () in
+          let recreated, recreated_u = Eio.Promise.create () in
+          let second_delivery, second_delivery_u = Eio.Promise.create () in
+          let final_delete, final_delete_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_reconnecting_connection_traced
+            ~first_reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await first_delivery;
+                `Await disconnect;
+              ]
+            ~second_reads:
+              [
+                `Await reconnect_info;
+                `Await previous_delete;
+                `Await recreated;
+                `Await second_delivery;
+                `Await final_delete;
+                `Await hold;
+              ]
+            (fun ~sw ~trace ~clock connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
+              in
+              let ordered_result, ordered_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve ordered_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ~batch:1
+                       ~expires:Mtime.Span.(10 * ms)
+                       ~idle_heartbeat:Mtime.Span.(1 * ms)
+                       stream));
+              yield_n 5;
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (ordered_create_wire ~sid:1 ~name:"ordered-1"
+                      ~deliver_policy:"all" ()));
+              let ordered =
+                expect_jetstream_ok (Eio.Promise.await ordered_result)
+              in
+              let first_result, first_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.next ordered));
+              yield_n 5;
+              Eio.Promise.resolve first_delivery_u
+                (Ok
+                   (ordered_delivery_wire ~sid:2 ~consumer:"ordered-1"
+                      ~stream_sequence:10L ~consumer_sequence:1L
+                      "before-reconnect"));
+              let first =
+                expect_jetstream_ok (Eio.Promise.await first_result)
+              in
+              equal string "before-reconnect"
+                (Nats_eio.Jetstream.Msg.payload first);
+              let second_result, second_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve second_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.next ordered));
+              yield_n 5;
+              Eio.Promise.resolve disconnect_u (Error End_of_file);
+              wait_for_trace ~clock ~trace
+                ~needle:"jetstream-reconnect-network: connect to tcp" ~count:2;
+              Eio.Promise.resolve reconnect_info_u (Ok info_wire);
+              wait_for_trace ~clock ~trace
+                ~needle:"wrote \"PUB $JS.API.CONSUMER.DELETE.ORDERS.ordered-1"
+                ~count:1;
+              Eio.Promise.resolve previous_delete_u (Ok (api_ok_wire ~sid:3));
+              wait_for_trace ~clock ~trace
+                ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS" ~count:2;
+              Eio.Promise.resolve recreated_u
+                (Ok
+                   (ordered_create_wire ~sid:4 ~name:"ordered-2"
+                      ~deliver_policy:"by_start_sequence" ~opt_start_seq:11L ()));
+              if
+                not
+                  (contains_substring ~needle:"\\\"opt_start_seq\\\":11"
+                     (Buffer.contents trace))
+              then
+                fail
+                  "ordered reconnect did not resume at the next stream sequence";
+              wait_for_trace ~clock ~trace
+                ~needle:"wrote \"PUB $JS.API.CONSUMER.MSG.NEXT.ORDERS.ordered-2"
+                ~count:1;
+              Eio.Promise.resolve second_delivery_u
+                (Ok
+                   (ordered_delivery_wire ~sid:5 ~consumer:"ordered-2"
+                      ~stream_sequence:11L ~consumer_sequence:1L
+                      "after-reconnect"));
+              let second =
+                expect_jetstream_ok (Eio.Promise.await second_result)
+              in
+              equal string "after-reconnect"
+                (Nats_eio.Jetstream.Msg.payload second);
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.close ordered));
+              wait_for_trace ~clock ~trace
+                ~needle:"wrote \"PUB $JS.API.CONSUMER.DELETE.ORDERS.ordered-2"
+                ~count:1;
+              Eio.Promise.resolve final_delete_u (Ok (api_ok_wire ~sid:6));
+              expect_jetstream_ok (Eio.Promise.await close_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "ack_sync waits for the server acknowledgement" (fun () ->
           let delivery, delivery_u = Eio.Promise.create () in
           let ack_response, ack_response_u = Eio.Promise.create () in

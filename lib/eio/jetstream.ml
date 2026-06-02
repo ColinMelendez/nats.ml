@@ -4926,16 +4926,18 @@ module Consumer = struct
           ordered.consumer <- None;
           ignore (delete ?timeout consumer)
 
-    let stop_current ordered ?deadline () =
-      stop_current_pull ordered;
-      let timeout =
-        match deadline with
-        | None -> Ok None
-        | Some deadline -> remaining_timeout ordered (Some deadline)
-      in
-      match timeout with
+    let cleanup_current_consumer ordered ~deadline =
+      match remaining_timeout ordered deadline with
       | Error _ -> ordered.consumer <- None
       | Ok timeout -> delete_current_consumer ordered ?timeout ()
+
+    let await_connection ordered ~deadline =
+      match remaining_timeout ordered deadline with
+      | Error error -> Error error
+      | Ok timeout -> (
+          match Connection.await_reconnect ?timeout ordered.connection with
+          | Ok () -> Ok ()
+          | Error error -> Error (Error.Connection error))
 
     let next_stream_sequence sequence =
       if Int64.equal sequence Int64.max_int then Int64.max_int
@@ -4962,25 +4964,18 @@ module Consumer = struct
       | Failed error -> Error error
       | Open -> (
           match consumer_config ordered with
-          | Error error ->
-              fail ordered error;
-              Error error
+          | Error error -> Error error
           | Ok config -> (
               match remaining_timeout ordered deadline with
-              | Error error ->
-                  fail ordered error;
-                  Error error
+              | Error error -> Error error
               | Ok timeout -> (
                   match create ?timeout ordered.stream config with
-                  | Error error ->
-                      fail ordered error;
-                      Error error
+                  | Error error -> Error error
                   | Ok consumer -> (
                       ordered.consumer <- Some consumer;
                       match remaining_timeout ordered deadline with
                       | Error error ->
-                          delete_current_consumer ordered ();
-                          fail ordered error;
+                          ordered.consumer <- None;
                           Error error
                       | Ok _ -> (
                           match
@@ -4990,17 +4985,35 @@ module Consumer = struct
                               ?max_bytes:ordered.max_bytes consumer
                           with
                           | Error error ->
-                              delete_current_consumer ordered ();
-                              fail ordered error;
+                              cleanup_current_consumer ordered ~deadline;
                               Error error
                           | Ok pull ->
                               ordered.pull <- Some pull;
                               ordered.consumer_sequence <- 0L;
                               Ok ())))))
 
+    let reconnectable_recreate_error = function
+      | Error.Connection
+          (Core_error.Disconnected | Core_error.Io _ | Core_error.Tls _) ->
+          true
+      | _ -> false
+
     let recreate ordered ~deadline =
-      stop_current ordered ?deadline ();
-      create_generation ordered ~deadline
+      stop_current_pull ordered;
+      let previous_consumer = ordered.consumer in
+      ordered.consumer <- None;
+      let rec attempt () =
+        match await_connection ordered ~deadline with
+        | Error error -> Error error
+        | Ok () -> (
+            ordered.consumer <- previous_consumer;
+            cleanup_current_consumer ordered ~deadline;
+            match create_generation ordered ~deadline with
+            | Ok () -> Ok ()
+            | Error error when reconnectable_recreate_error error -> attempt ()
+            | Error error -> Error error)
+      in
+      attempt ()
 
     let recoverable = function
       | Error.Missing_heartbeat | Error.Consumer_deleted -> true
@@ -5040,7 +5053,9 @@ module Consumer = struct
             | None -> (
                 match recreate ordered ~deadline with
                 | Ok () -> ()
-                | Error error -> result := Some (Error error))
+                | Error error ->
+                    fail ordered error;
+                    result := Some (Error error))
             | Some pull -> (
                 match next_from_pull ordered ~deadline pull with
                 | Ok message -> (
@@ -5052,11 +5067,14 @@ module Consumer = struct
                     | Ok false -> (
                         match recreate ordered ~deadline with
                         | Ok () -> ()
-                        | Error error -> result := Some (Error error)))
+                        | Error error ->
+                            fail ordered error;
+                            result := Some (Error error)))
                 | Error error when recoverable error -> (
                     match recreate ordered ~deadline with
                     | Ok () -> ()
                     | Error recreate_error ->
+                        fail ordered recreate_error;
                         result := Some (Error recreate_error))
                 | Error error ->
                     if not (timed_out error) then fail ordered error;
