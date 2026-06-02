@@ -4894,6 +4894,7 @@ module Consumer = struct
     let default_expires = Mtime.Span.(30 * s)
     let default_idle_heartbeat = Mtime.Span.(5 * s)
     let inactive_threshold = Mtime.Span.(5 * min)
+    let cleanup_timeout = Mtime.Span.(1 * s)
     let timeout_error = Error.Connection Core_error.Timeout
 
     let fail ordered error =
@@ -4929,7 +4930,17 @@ module Consumer = struct
     let cleanup_current_consumer ordered ~deadline =
       match remaining_timeout ordered deadline with
       | Error _ -> ordered.consumer <- None
-      | Ok timeout -> delete_current_consumer ordered ?timeout ()
+      | Ok timeout ->
+          let timeout =
+            match timeout with
+            | None -> Some cleanup_timeout
+            | Some timeout ->
+                Some
+                  (if Mtime.Span.compare timeout cleanup_timeout < 0 then
+                     timeout
+                   else cleanup_timeout)
+          in
+          delete_current_consumer ordered ?timeout ()
 
     let await_connection ordered ~deadline =
       match remaining_timeout ordered deadline with
@@ -4992,9 +5003,19 @@ module Consumer = struct
                               ordered.consumer_sequence <- 0L;
                               Ok ())))))
 
+    let reconnectable_api_error { Error.code; err_code; _ } =
+      Int.equal code 408 || Int.equal code 500 || Int.equal code 502
+      || Int.equal code 503 || Int.equal code 504
+      ||
+      match err_code with
+      | Some 10008 | Some 10023 -> true
+      | Some _ | None -> false
+
     let reconnectable_recreate_error = function
+      | Error.Api api -> reconnectable_api_error api
       | Error.Connection
-          (Core_error.Disconnected | Core_error.Io _ | Core_error.Tls _) ->
+          ( Core_error.Disconnected | Core_error.Io _ | Core_error.Tls _
+          | Core_error.Timeout | Core_error.No_responders ) ->
           true
       | _ -> false
 
@@ -5002,18 +5023,20 @@ module Consumer = struct
       stop_current_pull ordered;
       let previous_consumer = ordered.consumer in
       ordered.consumer <- None;
-      let rec attempt () =
+      let rec attempt ~cleanup_previous =
         match await_connection ordered ~deadline with
         | Error error -> Error error
         | Ok () -> (
-            ordered.consumer <- previous_consumer;
-            cleanup_current_consumer ordered ~deadline;
+            if cleanup_previous then (
+              ordered.consumer <- previous_consumer;
+              cleanup_current_consumer ordered ~deadline);
             match create_generation ordered ~deadline with
             | Ok () -> Ok ()
-            | Error error when reconnectable_recreate_error error -> attempt ()
+            | Error error when reconnectable_recreate_error error ->
+                attempt ~cleanup_previous:false
             | Error error -> Error error)
       in
-      attempt ()
+      attempt ~cleanup_previous:true
 
     let recoverable = function
       | Error.Missing_heartbeat | Error.Consumer_deleted -> true

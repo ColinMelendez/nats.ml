@@ -60,6 +60,13 @@ let consumer_info_wire_with_sid ~sid payload =
 let consumer_info_wire payload = consumer_info_wire_with_sid ~sid:1 payload
 let api_ok_wire ~sid = consumer_info_wire_with_sid ~sid "{}"
 
+let api_error_wire ~sid ~code ~err_code ~description =
+  let payload =
+    Format.asprintf {|{"error":{"code":%d,"err_code":%d,"description":%S}}|}
+      code err_code description
+  in
+  consumer_info_wire_with_sid ~sid payload
+
 let push_consumer_info_wire =
   consumer_info_wire
     {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","deliver_subject":"orders.push","deliver_group":"workers","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant"}}|}
@@ -3358,6 +3365,7 @@ let () =
           let disconnect, disconnect_u = Eio.Promise.create () in
           let reconnect_info, reconnect_info_u = Eio.Promise.create () in
           let previous_delete, previous_delete_u = Eio.Promise.create () in
+          let transient_create, transient_create_u = Eio.Promise.create () in
           let recreated, recreated_u = Eio.Promise.create () in
           let second_delivery, second_delivery_u = Eio.Promise.create () in
           let final_delete, final_delete_u = Eio.Promise.create () in
@@ -3374,6 +3382,7 @@ let () =
               [
                 `Await reconnect_info;
                 `Await previous_delete;
+                `Await transient_create;
                 `Await recreated;
                 `Await second_delivery;
                 `Await final_delete;
@@ -3432,9 +3441,15 @@ let () =
               Eio.Promise.resolve previous_delete_u (Ok (api_ok_wire ~sid:3));
               wait_for_trace ~clock ~trace
                 ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS" ~count:2;
+              Eio.Promise.resolve transient_create_u
+                (Ok
+                   (api_error_wire ~sid:4 ~code:503 ~err_code:10008
+                      ~description:"JetStream not available"));
+              wait_for_trace ~clock ~trace
+                ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS" ~count:3;
               Eio.Promise.resolve recreated_u
                 (Ok
-                   (ordered_create_wire ~sid:4 ~name:"ordered-2"
+                   (ordered_create_wire ~sid:5 ~name:"ordered-2"
                       ~deliver_policy:"by_start_sequence" ~opt_start_seq:11L ()));
               if
                 not
@@ -3448,7 +3463,7 @@ let () =
                 ~count:1;
               Eio.Promise.resolve second_delivery_u
                 (Ok
-                   (ordered_delivery_wire ~sid:5 ~consumer:"ordered-2"
+                   (ordered_delivery_wire ~sid:6 ~consumer:"ordered-2"
                       ~stream_sequence:11L ~consumer_sequence:1L
                       "after-reconnect"));
               let second =
@@ -3463,7 +3478,7 @@ let () =
               wait_for_trace ~clock ~trace
                 ~needle:"wrote \"PUB $JS.API.CONSUMER.DELETE.ORDERS.ordered-2"
                 ~count:1;
-              Eio.Promise.resolve final_delete_u (Ok (api_ok_wire ~sid:6));
+              Eio.Promise.resolve final_delete_u (Ok (api_ok_wire ~sid:7));
               expect_jetstream_ok (Eio.Promise.await close_result);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
