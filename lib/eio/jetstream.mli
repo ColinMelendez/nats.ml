@@ -734,7 +734,8 @@ module Consumer : sig
         transport loss; recreate it after receiving
         [Error (Connection Disconnected)]. A pull session is single-owner: do
         not call [next] or [next_with_timeout] concurrently on the same value.
-    *)
+        Cancellation of a blocked read propagates without closing the session;
+        explicitly call [close] when the session is no longer needed. *)
 
     val next : t -> (Msg.t, Error.t) result
     (** [next pull] waits for the next message. Empty pull batches and the
@@ -780,7 +781,9 @@ module Consumer : sig
         after transport recovery; durable consumers are checked with [info],
         while missing ephemeral consumers are recreated from their last
         configuration. The session is single-owner: do not call [next] or
-        [next_with_timeout] concurrently on one value. *)
+        [next_with_timeout] concurrently on one value. Cancellation of a blocked
+        read propagates without closing the session; explicitly call [close]
+        when the session is no longer needed. *)
 
     val create : sw:Eio.Switch.t -> Stream.t -> Config.t -> (t, Error.t) result
     (** [create ~sw stream config] creates and owns an ephemeral push consumer.
@@ -807,7 +810,9 @@ module Consumer : sig
         heartbeat that is not received within two intervals fails with
         [Missing_heartbeat]. During reconnect recovery, heartbeat deadlines are
         suspended until the subscription is replayed and the consumer is
-        confirmed or recreated. *)
+        confirmed or recreated. Cancellation of a blocked read propagates
+        without closing the session; explicitly call [close] when the session is
+        no longer needed. *)
 
     val next_with_timeout : timeout:Mtime.Span.t -> t -> (Msg.t, Error.t) result
     (** [next_with_timeout ~timeout push] bounds the wait with an absolute
@@ -854,7 +859,9 @@ module Consumer : sig
     (** [next ordered] returns the next message in consumer order. A call may
         perform consumer deletion and recreation before returning. Stream
         sequence numbers may skip when a filter is used; consumer sequence
-        numbers must remain consecutive. *)
+        numbers must remain consecutive. Cancellation propagates without closing
+        the session; explicitly call [close] when the session is no longer
+        needed. *)
 
     val next_with_timeout : timeout:Mtime.Span.t -> t -> (Msg.t, Error.t) result
     (** [next_with_timeout ~timeout ordered] uses an absolute caller deadline

@@ -195,6 +195,36 @@ let with_connection_traced ~reads f =
   in
   f ~sw ~trace connection
 
+let with_reconnecting_connection_traced ~first_reads ~second_reads f =
+  Eio_mock.Backend.run_full @@ fun env ->
+  let first = Eio_mock.Flow.make "key-value-server-first" in
+  Eio_mock.Flow.on_read first first_reads;
+  let second = Eio_mock.Flow.make "key-value-server-second" in
+  Eio_mock.Flow.on_read second second_reads;
+  let net = Eio_mock.Net.make "key-value-reconnect-network" in
+  Eio_mock.Net.on_getaddrinfo net (List.init 16 (fun _ -> `Return [ address ]));
+  Eio_mock.Net.on_connect net [ `Return first; `Return second ];
+  let trace = Buffer.create 4096 in
+  let debug = Eio.Stdenv.debug env in
+  let tracer =
+    {
+      Eio.Debug.traceln =
+        (fun ?__POS__:_ fmt ->
+          Format.kasprintf
+            (fun message ->
+              Buffer.add_string trace message;
+              Buffer.add_char trace '\n')
+            fmt);
+    }
+  in
+  Eio.Fiber.with_binding debug#traceln tracer @@ fun () ->
+  Eio.Switch.run @@ fun sw ->
+  let connection =
+    expect_ok
+      (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock [ endpoint ])
+  in
+  f ~sw ~trace ~clock:env#mono_clock connection
+
 let contains_substring ~needle value =
   let needle_length = String.length needle in
   let limit = String.length value - needle_length in
@@ -224,6 +254,34 @@ let require_trace ~trace ~needle =
     fail
       (Format.asprintf "trace did not contain %S; trace:\n%s" needle
          (Buffer.contents trace))
+
+let count_substring ~needle value =
+  let needle_length = String.length needle in
+  let limit = String.length value - needle_length in
+  let index = ref 0 in
+  let count = ref 0 in
+  while needle_length > 0 && !index <= limit do
+    if String.equal (String.sub value !index needle_length) needle then (
+      incr count;
+      index := !index + needle_length)
+    else incr index
+  done;
+  !count
+
+let wait_for_trace_count ~trace ~needle ~count =
+  let attempts = ref 0 in
+  while
+    Int.compare (count_substring ~needle (Buffer.contents trace)) count < 0
+    && Int.compare !attempts 100 < 0
+  do
+    Eio.Fiber.yield ();
+    incr attempts
+  done;
+  if Int.compare (count_substring ~needle (Buffer.contents trace)) count < 0
+  then
+    fail
+      (Format.asprintf "trace did not contain %d copies of %S; trace:\n%s" count
+         needle (Buffer.contents trace))
 
 let trace_field ~trace ~field =
   let value = Buffer.contents trace in
@@ -879,6 +937,119 @@ let () =
               wait_for_trace ~trace
                 ~needle:"PUB $JS.API.CONSUMER.DELETE.KV_users.watch";
               Eio.Promise.resolve delete_response_u (Ok (api_ok_wire ~sid:4));
+              expect_kv_ok (Eio.Promise.await close_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "watch retains live state across ephemeral consumer recovery"
+        (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let first_info_response, first_info_response_u =
+            Eio.Promise.create ()
+          in
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let reconnect_info, reconnect_info_u = Eio.Promise.create () in
+          let restore_info, restore_info_u = Eio.Promise.create () in
+          let recreate_response, recreate_response_u = Eio.Promise.create () in
+          let delivery_response, delivery_response_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_reconnecting_connection_traced
+            ~first_reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await first_info_response;
+                `Await disconnect;
+              ]
+            ~second_reads:
+              [
+                `Await reconnect_info;
+                `Await restore_info;
+                `Await recreate_response;
+                `Await delivery_response;
+                `Await delete_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace ~clock connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let value =
+                expect_kv_ok (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+              in
+              let watch_result, watch_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve watch_result_u
+                    (Nats_eio.Key_value.Watch.v ~sw
+                       ~delivery:Nats_eio.Key_value.Watch.New value));
+              yield_n 5;
+              let deliver_subject =
+                trace_field ~trace ~field:"deliver_subject"
+              in
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (consumer_response_named ~sid:2 ~policy:"new"
+                      ~headers_only:false ~pending:None ~name:"watch"
+                      ~deliver_subject));
+              yield_n 5;
+              Eio.Promise.resolve first_info_response_u
+                (Ok
+                   (consumer_response_named ~sid:3 ~policy:"new"
+                      ~headers_only:false ~pending:None ~name:"watch"
+                      ~deliver_subject));
+              let watch = expect_kv_ok (Eio.Promise.await watch_result) in
+              (match expect_kv_ok (Nats_eio.Key_value.Watch.next watch) with
+              | Nats_eio.Key_value.Watch.Initial_done -> ()
+              | Nats_eio.Key_value.Watch.Entry _ ->
+                  fail "new watch did not emit its initial marker");
+              let next_result, next_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve next_result_u
+                    (Nats_eio.Key_value.Watch.next watch));
+              yield_n 5;
+              Eio.Promise.resolve disconnect_u (Error End_of_file);
+              Eio.Time.Mono.sleep clock 0.005;
+              wait_for_trace_count ~trace
+                ~needle:"key-value-reconnect-network: connect to tcp" ~count:2;
+              Eio.Promise.resolve reconnect_info_u (Ok info_wire);
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.CONSUMER.INFO.KV_users.watch" ~count:2;
+              Eio.Promise.resolve restore_info_u
+                (Ok
+                   (publish_error_response ~sid:4 ~code:404 ~err_code:10014
+                      ~description:"consumer not found"));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.CONSUMER.CREATE.KV_users" ~count:2;
+              Eio.Promise.resolve recreate_response_u
+                (Ok
+                   (consumer_response_named ~sid:5 ~policy:"new"
+                      ~headers_only:false ~pending:None ~name:"watch"
+                      ~deliver_subject));
+              Eio.Promise.resolve delivery_response_u
+                (Ok
+                   (consumer_delivery_wire ~sid:1 ~consumer:"watch" ~key:"alice"
+                      ~stream_sequence:4L ~consumer_sequence:1L ~pending:0L
+                      "after-reconnect"));
+              let entry =
+                match Eio.Promise.await next_result with
+                | Ok (Nats_eio.Key_value.Watch.Entry entry) -> entry
+                | Ok Nats_eio.Key_value.Watch.Initial_done ->
+                    fail "watch repeated its initial marker after recovery"
+                | Error error ->
+                    fail
+                      (Format.asprintf "watch recovery failed: %a\ntrace:\n%s"
+                         Nats_eio.Key_value.Error.pp error
+                         (Buffer.contents trace))
+              in
+              equal string "after-reconnect"
+                (Nats_eio.Key_value.Entry.value entry);
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Key_value.Watch.close watch));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.CONSUMER.DELETE.KV_users.watch" ~count:1;
+              Eio.Promise.resolve delete_response_u (Ok (api_ok_wire ~sid:6));
               expect_kv_ok (Eio.Promise.await close_result);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));

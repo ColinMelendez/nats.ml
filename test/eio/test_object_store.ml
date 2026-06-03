@@ -105,6 +105,34 @@ let with_connection_traced ~reads f =
   in
   f ~sw ~trace connection
 
+let with_connection_traced_clock ~reads f =
+  Eio_mock.Backend.run_full @@ fun env ->
+  let flow = Eio_mock.Flow.make "object-store-server" in
+  Eio_mock.Flow.on_read flow reads;
+  let net = Eio_mock.Net.make "object-store-network" in
+  Eio_mock.Net.on_getaddrinfo net (List.init 16 (fun _ -> `Return [ address ]));
+  Eio_mock.Net.on_connect net [ `Return flow ];
+  let trace = Buffer.create 4096 in
+  let debug = Eio.Stdenv.debug env in
+  let tracer =
+    {
+      Eio.Debug.traceln =
+        (fun ?__POS__:_ fmt ->
+          Format.kasprintf
+            (fun message ->
+              Buffer.add_string trace message;
+              Buffer.add_char trace '\n')
+            fmt);
+    }
+  in
+  Eio.Fiber.with_binding debug#traceln tracer @@ fun () ->
+  Eio.Switch.run @@ fun sw ->
+  let connection =
+    expect_ok
+      (Nats_eio.Connection.connect ~sw ~net ~clock:env#mono_clock [ endpoint ])
+  in
+  f ~sw ~trace ~clock:env#mono_clock connection
+
 let yield_n count =
   for _ = 1 to count do
     Eio.Fiber.yield ()
@@ -259,14 +287,18 @@ let object_link_info_wire ~sid ~name ~target =
   in
   direct_response_wire ~sid ~bucket:"assets" ~name payload
 
-let object_ordered_create_wire ~sid =
-  response_wire_with_sid ~sid
-    {|{"stream_name":"OBJ_assets","name":"ordered-1","config":{"deliver_policy":"all","ack_policy":"none","replay_policy":"instant"}}|}
+let object_ordered_create_wire ~sid ?(name = "ordered-1") () =
+  let payload =
+    Format.asprintf
+      {|{"stream_name":"OBJ_assets","name":"%s","config":{"deliver_policy":"all","ack_policy":"none","replay_policy":"instant"}}|}
+      name
+  in
+  response_wire_with_sid ~sid payload
 
 let object_ordered_delivery_wire ~sid ~stream_sequence ~consumer_sequence
-    ~pending ?(nuid = "test-nuid") payload =
+    ~pending ?(consumer = "ordered-1") ?(nuid = "test-nuid") payload =
   let reply_to =
-    Format.asprintf "$JS.ACK.OBJ_assets.ordered-1.1.%Ld.%Ld.0.%Ld"
+    Format.asprintf "$JS.ACK.OBJ_assets.%s.1.%Ld.%Ld.0.%Ld" consumer
       stream_sequence consumer_sequence pending
   in
   let message =
@@ -1005,7 +1037,7 @@ let () =
               wait_for_trace_count ~trace ~needle:"CONSUMER.CREATE.OBJ_assets"
                 ~count:1;
               Eio.Promise.resolve create_response_u
-                (Ok (object_ordered_create_wire ~sid:2));
+                (Ok (object_ordered_create_wire ~sid:2 ()));
               yield_n 5;
               Eio.Promise.resolve first_delivery_u
                 (Ok
@@ -1040,6 +1072,89 @@ let () =
               require_trace ~trace ~needle:"$O.assets.C.test-nuid";
               require_trace ~trace
                 ~needle:"filter_subject\\\":\\\"$O.assets.C.test-nuid\\\""));
+      test "get deadline survives ordered consumer recreation" (fun () ->
+          let info_response, info_response_u = Eio.Promise.create () in
+          let create_response, create_response_u = Eio.Promise.create () in
+          let gap_delivery, gap_delivery_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let recreate_response, recreate_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced_clock
+            ~reads:
+              [
+                `Return info_wire;
+                `Await info_response;
+                `Await create_response;
+                `Await gap_delivery;
+                `Await delete_response;
+                `Await recreate_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace ~clock connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_object_ok
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"assets")
+              in
+              let buffer = Buffer.create 0 in
+              let writer = Bytesrw.Bytes.Writer.of_buffer buffer in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.get
+                       ~timeout:Mtime.Span.(10 * ms)
+                       bucket
+                       (object_name "images/cat.png")
+                       writer));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.DIRECT.GET.OBJ_assets" ~count:1;
+              Eio.Promise.resolve info_response_u
+                (Ok
+                   (object_info_wire ~sid:1 ~name:"images/cat.png"
+                      ~nuid:"test-nuid" ~size:5L ~chunks:2L
+                      ~digest:
+                        "SHA-256=NrvlDtloQdEEQ7y2cNZVTwo0t2G-Z-ycSorSwMRMpCw="
+                      ~chunk_size:3));
+              wait_for_trace_count ~trace ~needle:"CONSUMER.CREATE.OBJ_assets"
+                ~count:1;
+              Eio.Promise.resolve create_response_u
+                (Ok (object_ordered_create_wire ~sid:2 ()));
+              wait_for_trace_count ~trace ~needle:"CONSUMER.MSG.NEXT.OBJ_assets"
+                ~count:1;
+              Eio.Promise.resolve gap_delivery_u
+                (Ok
+                   (object_ordered_delivery_wire ~sid:3 ~stream_sequence:1L
+                      ~consumer_sequence:2L ~pending:1L "ab"));
+              wait_for_trace_count ~trace ~needle:"CONSUMER.DELETE.OBJ_assets"
+                ~count:1;
+              Eio.Promise.resolve delete_response_u
+                (Ok (response_wire_with_sid ~sid:4 "{}"));
+              wait_for_trace_count ~trace ~needle:"CONSUMER.CREATE.OBJ_assets"
+                ~count:2;
+              Eio.Time.Mono.sleep clock 0.02;
+              (match Eio.Promise.peek result with
+              | Some
+                  (Error
+                     (Nats_eio.Object_store.Error.Connection
+                        Nats_eio.Error.Timeout)) ->
+                  ()
+              | Some (Ok _) -> fail "object get ignored its absolute deadline"
+              | Some (Error error) ->
+                  fail
+                    (Format.asprintf "unexpected object get error: %a"
+                       Nats_eio.Object_store.Error.pp error)
+              | None ->
+                  fail
+                    (Format.asprintf
+                       "object get remained pending after its deadline; trace:\n\
+                        %s"
+                       (Buffer.contents trace)));
+              Eio.Promise.resolve recreate_response_u
+                (Ok (object_ordered_create_wire ~sid:5 ~name:"ordered-2" ()));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "get follows object links before streaming target chunks" (fun () ->
           let alias_info, alias_info_u = Eio.Promise.create () in
           let target_info, target_info_u = Eio.Promise.create () in
@@ -1090,7 +1205,7 @@ let () =
               wait_for_trace_count ~trace ~needle:"CONSUMER.CREATE.OBJ_assets"
                 ~count:1;
               Eio.Promise.resolve create_response_u
-                (Ok (object_ordered_create_wire ~sid:3));
+                (Ok (object_ordered_create_wire ~sid:3 ()));
               yield_n 5;
               Eio.Promise.resolve delivery_u
                 (Ok

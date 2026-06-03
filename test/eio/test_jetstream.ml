@@ -4097,6 +4097,158 @@ let () =
               expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Pull.close pull);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "cancelling pull next preserves session ownership" (fun () ->
+          let cancellation, cancellation_u = Eio.Promise.create () in
+          let result, result_u = Eio.Promise.create () in
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw connection ->
+              let pull =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Consumer.Pull.v ~sw (consumer connection))
+              in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Cancel.sub (fun cancel ->
+                      Eio.Promise.resolve cancellation_u cancel;
+                      try
+                        ignore (Nats_eio.Jetstream.Consumer.Pull.next pull);
+                        Eio.Promise.resolve result_u `Completed
+                      with Eio.Cancel.Cancelled _ ->
+                        Eio.Promise.resolve result_u `Cancelled));
+              let cancel = Eio.Promise.await cancellation in
+              yield_n 5;
+              Eio.Cancel.cancel cancel (Failure "cancel pull");
+              (match Eio.Promise.await result with
+              | `Cancelled -> ()
+              | `Completed -> fail "pull next unexpectedly completed");
+              Eio.Promise.resolve response_u (Ok (delivery_wire "after-cancel"));
+              let message =
+                expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Pull.next pull)
+              in
+              equal string "after-cancel"
+                (Nats_eio.Jetstream.Msg.payload message);
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Pull.close pull);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "cancelling push next preserves session ownership" (fun () ->
+          let info_response, info_response_u = Eio.Promise.create () in
+          let cancellation, cancellation_u = Eio.Promise.create () in
+          let result, result_u = Eio.Promise.create () in
+          let delivery, delivery_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:
+              [
+                `Return info_wire;
+                `Await info_response;
+                `Await delivery;
+                `Await hold;
+              ]
+            (fun ~sw connection ->
+              let push_result, push_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve push_result_u
+                    (Nats_eio.Jetstream.Consumer.Push.v ~sw
+                       (consumer connection)));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u (Ok push_consumer_info_wire);
+              let push = expect_jetstream_ok (Eio.Promise.await push_result) in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Cancel.sub (fun cancel ->
+                      Eio.Promise.resolve cancellation_u cancel;
+                      try
+                        ignore (Nats_eio.Jetstream.Consumer.Push.next push);
+                        Eio.Promise.resolve result_u `Completed
+                      with Eio.Cancel.Cancelled _ ->
+                        Eio.Promise.resolve result_u `Cancelled));
+              let cancel = Eio.Promise.await cancellation in
+              yield_n 5;
+              Eio.Cancel.cancel cancel (Failure "cancel push");
+              (match Eio.Promise.await result with
+              | `Cancelled -> ()
+              | `Completed -> fail "push next unexpectedly completed");
+              Eio.Promise.resolve delivery_u
+                (Ok (delivery_wire_with_sid ~sid:2 "after-cancel"));
+              let message =
+                expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Push.next push)
+              in
+              equal string "after-cancel"
+                (Nats_eio.Jetstream.Msg.payload message);
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Push.close push);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "cancelling ordered next preserves session ownership" (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let cancellation, cancellation_u = Eio.Promise.create () in
+          let result, result_u = Eio.Promise.create () in
+          let delivery, delivery_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await delivery;
+                `Await delete_response;
+                `Await hold;
+              ]
+            (fun ~sw connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
+              in
+              let ordered_result, ordered_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve ordered_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ~batch:1 stream));
+              yield_n 5;
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (ordered_create_wire ~sid:1 ~name:"ordered-1"
+                      ~deliver_policy:"all" ()));
+              let ordered =
+                expect_jetstream_ok (Eio.Promise.await ordered_result)
+              in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Cancel.sub (fun cancel ->
+                      Eio.Promise.resolve cancellation_u cancel;
+                      try
+                        ignore
+                          (Nats_eio.Jetstream.Consumer.Ordered.next ordered);
+                        Eio.Promise.resolve result_u `Completed
+                      with Eio.Cancel.Cancelled _ ->
+                        Eio.Promise.resolve result_u `Cancelled));
+              let cancel = Eio.Promise.await cancellation in
+              yield_n 5;
+              Eio.Cancel.cancel cancel (Failure "cancel ordered");
+              (match Eio.Promise.await result with
+              | `Cancelled -> ()
+              | `Completed -> fail "ordered next unexpectedly completed");
+              Eio.Promise.resolve delivery_u
+                (Ok
+                   (ordered_delivery_wire ~sid:2 ~consumer:"ordered-1"
+                      ~stream_sequence:1L ~consumer_sequence:1L "after-cancel"));
+              let message =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Consumer.Ordered.next ordered)
+              in
+              equal string "after-cancel"
+                (Nats_eio.Jetstream.Msg.payload message);
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.close ordered));
+              yield_n 5;
+              Eio.Promise.resolve delete_response_u (Ok (api_ok_wire ~sid:3));
+              expect_jetstream_ok (Eio.Promise.await close_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "idle heartbeat silence fails a pull distinctly" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
