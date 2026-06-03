@@ -2995,6 +2995,11 @@ let () =
               then fail "ordered consumer did not force memory storage";
               if
                 not
+                  (contains_substring ~needle:"num_replicas\\\":1"
+                     (Buffer.contents trace))
+              then fail "ordered consumer did not force one replica";
+              if
+                not
                   (contains_substring
                      ~needle:"inactive_threshold\\\":300000000000"
                      (Buffer.contents trace))

@@ -825,12 +825,14 @@ module Consumer : sig
       (t, Error.t) result
     (** [v ~sw stream] creates a client-managed ephemeral pull consumer. The
         initial delivery policy defaults to [All]. Ordered sessions always use
-        [No_ack], memory storage, and a five-minute inactive threshold; they
-        request idle heartbeats (five seconds by default) to detect a lost
-        consumer. The session owns its pull subscription and recreates the
-        ephemeral consumer after a consumer-sequence gap, a missing heartbeat,
-        consumer deletion, or a non-replayed transport disconnect. Recreated
-        consumers resume at the next stream sequence. *)
+        [No_ack], one-replica memory storage, and a five-minute inactive
+        threshold; they request idle heartbeats (five seconds by default) to
+        detect a lost consumer. The session owns its pull subscription and
+        recreates the ephemeral consumer after a consumer-sequence gap, a
+        missing heartbeat, consumer deletion, or a non-replayed transport
+        disconnect. Recreated consumers resume at the next stream sequence. The
+        consumer identity is not preserved across every recovery: a server-side
+        consumer leader failure can require a new ephemeral consumer. *)
 
     val next : t -> (Msg.t, Error.t) result
     (** [next ordered] returns the next message in consumer order. A call may

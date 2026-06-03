@@ -4977,7 +4977,7 @@ module Consumer = struct
       in
       match
         Config.v ~deliver_policy ~ack_policy:Config.No_ack
-          ?filter_subject:ordered.filter_subject ~inactive_threshold
+          ?filter_subject:ordered.filter_subject ~replicas:1 ~inactive_threshold
           ~mem_storage:true ()
       with
       | Ok config -> Ok config
