@@ -700,12 +700,14 @@ request/reply and subscription primitives.
 - Completed cross-SDK Ordered reconnect slice: a separate Nix-built official Go
   `nats.go` peer and OCaml client share a file-backed, three-replica stream in a
   three-node cluster. Matching and non-matching baseline messages establish
-  filtered stream and consumer sequences; after the seed node is killed, both
-  clients reconnect through discovered peer URLs, recreate their ephemeral
-  Ordered consumers from the next stream sequence, and complete coordinated
-  cleanup. The anonymous plaintext `nats:2.10.22` acceptance passes; it does not
-  yet cover authenticated/TLS, version, leader-targeted, or multi-node-loss
-  matrices.
+  filtered stream and consumer sequences; after either a seed-node or elected
+  stream-leader failure, both clients reconnect through surviving peer URLs and
+  validate Ordered progress. A one-replica consumer may either retain its
+  identity and continue at consumer sequence 3 or be recreated at sequence 1
+  when its consumer leader was also lost. The anonymous plaintext matrix
+  passes both seed and leader failures on `nats:2.10.22`, `nats:2.12.15`, and
+  `nats:2.14.5`; authenticated/TLS and multi-node-loss matrices remain
+  separate work.
 - Completed cross-SDK Push reconnect floor: a dedicated runner keeps the same
   Go and OCaml durable Push sessions across a persistent file-backed
   nats-server restart, checks recovery barriers and post-restart JetStream
@@ -722,8 +724,8 @@ request/reply and subscription primitives.
   JetStream-leader targeting, multi-node loss, or a version/authentication/TLS
   matrix.
 - Remaining: additional real cluster failure scenarios, authenticated/TLS and
-  cluster reconnect matrices, server-version feature gates, and broader
-  cross-SDK JetStream cluster coverage.
+  cluster reconnect matrices, feature gates for remaining server-version
+  differences, and broader cross-SDK JetStream cluster coverage.
 
 ### Gate G4 — JetStream API stabilization
 

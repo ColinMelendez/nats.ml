@@ -274,8 +274,8 @@ leaves the outstanding server request available for a later call.
 Ordered consumption is a sibling of `Consumer.Pull`, not a wrapper around the
 push-session API. `Consumer.Ordered.v` creates a client-managed ephemeral pull
 consumer and owns its reply subscription. The client fixes the consumer to
-no-ack, memory-backed storage, and a bounded inactive threshold; the caller
-chooses the initial delivery policy, filter, and pull limits.
+no-ack, one-replica memory-backed storage, and a bounded inactive threshold;
+the caller chooses the initial delivery policy, filter, and pull limits.
 
 The ordered state machine tracks two distinct cursors. Delivered consumer
 sequence numbers must be consecutive, while stream sequence numbers are the
@@ -288,12 +288,14 @@ an absolute timeout covers both waiting and recovery work.
 
 This behavior is covered through the local Eio mock transport and a live
 cross-SDK acceptance runner. The runner covers both a seed-node transport
-failure, where each client recreates its ephemeral consumer from the next
-stream sequence, and an elected JetStream stream-leader failure, where both
-clients remain on surviving endpoints and preserve their Ordered consumer
-identities across the election. The live cluster slice is currently pinned to
-anonymous plaintext `nats:2.10.22`; server-version, authentication, TLS, and
-broader failure matrices remain final-acceptance work.
+failure and an elected JetStream stream-leader failure. After either failure,
+each client either continues the existing Ordered consumer at the next
+consumer sequence or recreates it from the next stream sequence if the
+one-replica consumer leader was also lost. Consumer identity is therefore not
+an invariant of endpoint or stream-leader recovery. The anonymous plaintext
+matrix passes both failures on `nats:2.10.22`, `nats:2.12.15`, and
+`nats:2.14.5`; authentication, TLS, and broader failure matrices remain
+final-acceptance work.
 
 ### The protocol core as a testable boundary
 
