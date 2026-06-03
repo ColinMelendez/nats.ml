@@ -11,6 +11,14 @@ if [ "${NATS_INTEGRATION_SHELL-}" != 1 ]; then
     NATS_INTEGRATION_SHELL=1 "$script_dir/runtest-interop-jetstream-cluster.sh" "$@"
 fi
 
+integration_command() {
+  if [ "${NATS_INTEGRATION_SHELL-}" = 1 ]; then
+    "$@"
+  else
+    nix develop .#integration -c "$@"
+  fi
+}
+
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
 dune_build_dir=${NATS_TEST_DUNE_BUILD_DIR:-_build-interop}
 if [ "${NATS_TEST_JS_INTEROP_DEBUG-}" = 1 ]; then
@@ -60,6 +68,14 @@ if [ -n "${NATS_TEST_TOKEN+x}" ] || [ -n "${NATS_TEST_USER+x}" ] ||
 fi
 if [ -n "${NATS_TEST_TLS+x}" ] && [ "${NATS_TEST_TLS}" != 0 ]; then
   echo "JetStream cluster interop currently supports anonymous plaintext only" >&2
+  exit 1
+fi
+
+if ! integration_command dune build \
+    --build-dir "$dune_build_dir" \
+    test/interop/interop_jetstream_ordered_reconnect_acceptance.exe
+then
+  echo "JetStream ordered reconnect acceptance executable did not build" >&2
   exit 1
 fi
 
@@ -173,8 +189,9 @@ wait_until_ready "$tertiary"
 wait_for_routes "$primary"
 wait_for_routes "$secondary"
 wait_for_routes "$tertiary"
-# Let the JetStream meta group settle after the route mesh is formed.
-sleep 1
+# Route connections can precede JetStream meta placement; the Go peer also
+# retries stream creation until the cluster can place all replicas.
+sleep 2
 
 if [ "$failure_mode" = leader ]; then
   (
@@ -256,26 +273,28 @@ if [ "$failure_mode" = leader ]; then
   peer_server="nats://127.0.0.1:$secondary_port,nats://127.0.0.1:$cluster_base_port,nats://127.0.0.1:$tertiary_port"
 else
   peer_mode=jetstream-ordered-reconnect
-  peer_server="nats://127.0.0.1:$cluster_base_port"
+  peer_server="nats://127.0.0.1:$cluster_base_port,nats://127.0.0.1:$secondary_port,nats://127.0.0.1:$tertiary_port"
 fi
 
 if [ "$failure_mode" = leader ]; then
-  NATS_TEST_SERVER="nats://127.0.0.1:$cluster_base_port" \
+  integration_command env \
+    NATS_TEST_SERVER="nats://127.0.0.1:$cluster_base_port" \
     NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" \
     NATS_TEST_INTEROP_SIGNAL="$signal" \
-    nix develop .#integration -c nats-ocaml-interop-peer \
+    nats-ocaml-interop-peer \
     --mode "$peer_mode" \
     --server "$peer_server" \
     --prefix "$prefix" --stream "$stream" --ready-file "$peer_ready" \
     --signal-file "$signal" --leader-file "$leader_file" \
     --survivor-file "$survivor_file" >"$peer_log" 2>&1 &
 else
-  NATS_TEST_SERVER="nats://127.0.0.1:$cluster_base_port" \
+  integration_command env \
+    NATS_TEST_SERVER="nats://127.0.0.1:$cluster_base_port" \
     NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" \
     NATS_TEST_INTEROP_SIGNAL="$signal" \
-    nix develop .#integration -c nats-ocaml-interop-peer \
+    nats-ocaml-interop-peer \
     --mode "$peer_mode" \
     --server "$peer_server" \
     --prefix "$prefix" --stream "$stream" --ready-file "$peer_ready" \
@@ -334,7 +353,8 @@ if [ "$failure_mode" = leader ]; then
 fi
 
 status=0
-if NATS_TEST_SERVER="$ocaml_server" \
+if integration_command env \
+    NATS_TEST_SERVER="$ocaml_server" \
     NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" \
     NATS_TEST_INTEROP_SIGNAL="$signal" \
@@ -342,7 +362,7 @@ if NATS_TEST_SERVER="$ocaml_server" \
     NATS_TEST_JS_CLUSTER_INITIAL_NAME="$ocaml_initial_name" \
     NATS_TEST_JS_CLUSTER_RECOVERED_NAMES="$ocaml_recovered_names" \
     NATS_TEST_JS_CLUSTER_DISCOVERED="$ocaml_discovered" \
-    nix develop .#integration -c dune exec \
+    dune exec \
     --build-dir "$dune_build_dir" \
     test/interop/interop_jetstream_ordered_reconnect_acceptance.exe \
     >"$ocaml_log" 2>&1

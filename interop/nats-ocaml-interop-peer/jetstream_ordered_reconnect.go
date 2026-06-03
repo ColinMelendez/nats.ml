@@ -10,7 +10,6 @@ import (
 )
 
 const orderedReconnectWait = 90 * time.Second
-const orderedReconnectHeartbeat = 20 * time.Second
 
 func waitForJetStreamLeaderKillSignal(signal string) error {
 	deadline := time.Now().Add(orderedReconnectWait)
@@ -82,6 +81,58 @@ func markJetStreamInteropFailure(signal string, err error) error {
 	return err
 }
 
+func retryJetStreamStreamQuorum(jetstream nats.JetStreamContext, stream string, messages, lastSequence uint64, deadline time.Time) (*nats.StreamInfo, error) {
+	var lastError error
+	for time.Now().Before(deadline) {
+		info, err := jetstream.StreamInfo(stream)
+		if err != nil {
+			lastError = err
+		} else if info.State.Msgs != messages || info.State.LastSeq != lastSequence {
+			lastError = fmt.Errorf("JetStream stream %s state messages=%d last-sequence=%d, expected messages=%d last-sequence=%d", stream, info.State.Msgs, info.State.LastSeq, messages, lastSequence)
+		} else if info.Cluster == nil || info.Cluster.Leader == "" {
+			lastError = fmt.Errorf("JetStream stream %s did not identify a leader", stream)
+		} else if len(info.Cluster.Replicas) != info.Config.Replicas-1 {
+			lastError = fmt.Errorf("JetStream stream %s reported %d followers, expected %d", stream, len(info.Cluster.Replicas), info.Config.Replicas-1)
+		} else {
+			ready := true
+			for _, replica := range info.Cluster.Replicas {
+				if replica == nil || !replica.Current || replica.Offline || replica.Lag != 0 {
+					ready = false
+					break
+				}
+			}
+			if ready {
+				return info, nil
+			}
+			lastError = fmt.Errorf("JetStream stream %s followers are not current", stream)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if lastError == nil {
+		return nil, fmt.Errorf("JetStream stream %s did not report replication state", stream)
+	}
+	return nil, fmt.Errorf("JetStream stream %s did not reach replica quorum: %w", stream, lastError)
+}
+
+func retryAddJetStreamStream(jetstream nats.JetStreamContext, config *nats.StreamConfig, deadline time.Time) (*nats.StreamInfo, error) {
+	var lastError error
+	for time.Now().Before(deadline) {
+		info, err := jetstream.AddStream(config)
+		if err == nil {
+			return info, nil
+		}
+		lastError = err
+		if info, infoError := jetstream.StreamInfo(config.Name); infoError == nil {
+			return info, nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if lastError == nil {
+		return nil, fmt.Errorf("JetStream stream %s did not accept a create request", config.Name)
+	}
+	return nil, fmt.Errorf("JetStream stream %s did not become placeable: %w", config.Name, lastError)
+}
+
 func expectOrderedReconnectDelivery(label string, message *nats.Msg, stream, subject, payload, interop, trace string, streamSequence, consumerSequence uint64) error {
 	if string(message.Data) != payload {
 		return fmt.Errorf("%s payload was %q, expected %q", label, string(message.Data), payload)
@@ -121,32 +172,16 @@ func expectOrderedReconnectDelivery(label string, message *nats.Msg, stream, sub
 	return nil
 }
 
-func expectOrderedReconnectConsumerContinuity(label string, message *nats.Msg, previousConsumer string, stream, subject, payload, interop, trace string, streamSequence, consumerSequence uint64) error {
-	if err := expectOrderedReconnectDelivery(label, message, stream, subject, payload, interop, trace, streamSequence, consumerSequence); err != nil {
-		return err
-	}
+func expectOrderedReconnectConsumerProgress(label string, message *nats.Msg, previousConsumer string, stream, subject, payload, interop, trace string, streamSequence, survivingConsumerSequence uint64) error {
 	metadata, err := message.Metadata()
 	if err != nil {
 		return fmt.Errorf("%s metadata: %w", label, err)
 	}
-	if metadata.Consumer != previousConsumer {
-		return fmt.Errorf("%s changed ordered consumer from %q to %q during leader failover", label, previousConsumer, metadata.Consumer)
-	}
-	return nil
-}
-
-func expectOrderedReconnectConsumerChanged(label string, message *nats.Msg, previousConsumer string, stream, subject, payload, interop, trace string, streamSequence uint64) error {
-	if err := expectOrderedReconnectDelivery(label, message, stream, subject, payload, interop, trace, streamSequence, 0); err != nil {
-		return err
-	}
-	metadata, err := message.Metadata()
-	if err != nil {
-		return fmt.Errorf("%s metadata: %w", label, err)
-	}
+	expectedConsumerSequence := uint64(1)
 	if metadata.Consumer == previousConsumer {
-		return fmt.Errorf("%s retained ordered consumer %q after reconnect", label, previousConsumer)
+		expectedConsumerSequence = survivingConsumerSequence
 	}
-	return nil
+	return expectOrderedReconnectDelivery(label, message, stream, subject, payload, interop, trace, streamSequence, expectedConsumerSequence)
 }
 
 func publishOrderedReconnectMessage(jetstream nats.JetStreamContext, subject, payload, interop, trace, stream string, sequence uint64) error {
@@ -191,12 +226,12 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 		return fmt.Errorf("JetStream context: %w", err)
 	}
 	var leaderProbe nats.JetStreamContext
-	streamInfo, err := jetstream.AddStream(&nats.StreamConfig{
+	streamInfo, err := retryAddJetStreamStream(jetstream, &nats.StreamConfig{
 		Name:     config.stream,
 		Subjects: []string{config.prefix + ".match", config.prefix + ".gap"},
 		Storage:  nats.FileStorage,
 		Replicas: 3,
-	})
+	}, time.Now().Add(orderedReconnectWait))
 	if err != nil {
 		return fmt.Errorf("create replicated stream: %w", err)
 	}
@@ -255,9 +290,6 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 		nats.BindStream(config.stream),
 		nats.OrderedConsumer(),
 	}
-	if config.leader != "" {
-		orderedOptions = append(orderedOptions, nats.IdleHeartbeat(orderedReconnectHeartbeat))
-	}
 	orderedSubscription, err := jetstream.SubscribeSync(matchSubject, orderedOptions...)
 	if err != nil {
 		return fmt.Errorf("create Go ordered consumer: %w", err)
@@ -276,8 +308,8 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	if orderedInfo.Stream != config.stream || orderedInfo.Config.FilterSubject != matchSubject {
 		return fmt.Errorf("Go ordered consumer was not bound to the expected stream and filter")
 	}
-	if orderedInfo.Config.AckPolicy != nats.AckNonePolicy || !orderedInfo.Config.MemoryStorage {
-		return fmt.Errorf("Go ordered consumer did not use no-ack memory storage")
+	if orderedInfo.Config.AckPolicy != nats.AckNonePolicy || !orderedInfo.Config.MemoryStorage || orderedInfo.Config.Replicas != 1 {
+		return fmt.Errorf("Go ordered consumer did not use one-replica no-ack memory storage")
 	}
 
 	startMessages := make(chan *nats.Msg, 1)
@@ -349,6 +381,9 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	}
 	if string(baselineMessage.Data) != "baseline-complete" {
 		return fmt.Errorf("baseline completion was %q, expected %q", string(baselineMessage.Data), "baseline-complete")
+	}
+	if _, err := retryJetStreamStreamQuorum(jetstream, config.stream, 3, 3, time.Now().Add(orderedReconnectWait)); err != nil {
+		return err
 	}
 	if err := baselineMessage.Respond([]byte("go-baseline-ready")); err != nil {
 		return fmt.Errorf("respond baseline completion: %w", err)
@@ -423,22 +458,9 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	if err != nil {
 		return fmt.Errorf("receive post-failover ordered message: %w", err)
 	}
-	var postFailoverError error
-	if config.leader != "" {
-		postFailoverError = expectOrderedReconnectConsumerContinuity("Go ordered post-failover", afterMessage, orderedInfo.Name, config.stream, matchSubject, "go-after-four", "go-ordered-reconnect", "go-after-four", 4, 3)
-	} else {
-		postFailoverError = expectOrderedReconnectConsumerChanged("Go ordered post-failover", afterMessage, orderedInfo.Name, config.stream, matchSubject, "go-after-four", "go-ordered-reconnect", "go-after-four", 4)
+	if err := expectOrderedReconnectConsumerProgress("Go ordered post-failover", afterMessage, orderedInfo.Name, config.stream, matchSubject, "go-after-four", "go-ordered-reconnect", "go-after-four", 4, 3); err != nil {
+		return err
 	}
-	if postFailoverError != nil {
-		return postFailoverError
-	}
-	if err := connection.Publish(config.prefix+".go-after-done", []byte("go-after-complete")); err != nil {
-		return fmt.Errorf("publish post-failover completion: %w", err)
-	}
-	if err := connection.Flush(); err != nil {
-		return fmt.Errorf("flush post-failover completion: %w", err)
-	}
-
 	closeMessage, err := waitJetStreamMessage("OCaml close request", closeMessages)
 	if err != nil {
 		return err

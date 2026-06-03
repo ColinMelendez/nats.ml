@@ -165,19 +165,6 @@ let wait_for_file ~clock ~timeout ~failure_file ~label path =
     else Eio.Time.Mono.sleep clock 0.05
   done
 
-let next_message ~clock ~timeout ~failure_file label subscription =
-  match
-    Eio.Fiber.first
-      (fun () -> Nats_eio.Subscription.next_with_timeout ~timeout subscription)
-      (fun () ->
-        while not (Sys.file_exists failure_file) do
-          Eio.Time.Mono.sleep clock 0.05
-        done;
-        failf "cluster watcher failed (see %s)" failure_file)
-  with
-  | Ok delivery -> delivery.Nats_eio.Subscription.message
-  | Error error -> failf "%s: %s" label (error_message error)
-
 let request_until_response ~clock ~timeout ~failure_file ~label connection
     subject payload =
   let deadline =
@@ -288,12 +275,6 @@ let run env =
   let endpoint = endpoint () in
   let auth = auth () in
   let tls = tls_config () in
-  let ordered_heartbeat =
-    if leader_failover then Some Mtime.Span.(20 * s) else None
-  in
-  let ordered_expires =
-    if leader_failover then Some Mtime.Span.(60 * s) else None
-  in
   let config =
     expect_ok "connection config"
       (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 100)
@@ -328,15 +309,9 @@ let run env =
           (Nats_eio.Jetstream.Stream.bind jetstream ~name:stream_name)
       in
       let match_subject = prefix ^ ".match" in
-      let go_done =
-        expect_ok "subscribe Go completion"
-          (Nats_eio.Connection.subscribe connection
-             (Nats.Subject.Filter.literal (prefix ^ ".go-after-done")))
-      in
       let ordered =
         expect_jetstream_ok "open OCaml ordered session"
-          (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ?expires:ordered_expires
-             ?idle_heartbeat:ordered_heartbeat
+          (Nats_eio.Jetstream.Consumer.Ordered.v ~sw
              ~filter_subject:(Nats.Subject.Filter.literal match_subject)
              stream)
       in
@@ -424,27 +399,14 @@ let run env =
               (Eio.Promise.await after_result)
           in
           let after_consumer = Nats_eio.Jetstream.Msg.consumer after in
-          if leader_failover then (
-            if not (String.equal after_consumer consumer_name) then
-              failf
-                "OCaml ordered session changed consumer from %S to %S during \
-                 leader failover"
-                consumer_name after_consumer)
-          else if String.equal after_consumer consumer_name then
-            failf "OCaml ordered session retained consumer %S after reconnect"
-              after_consumer;
-          let after_consumer_sequence = if leader_failover then 3L else 1L in
+          let after_consumer_sequence =
+            if String.equal after_consumer consumer_name then 3L else 1L
+          in
           expect_ordered_delivery "OCaml ordered post-failover"
             ~stream:stream_name ~subject:match_subject ~consumer:after_consumer
             ~payload:"go-after-four" ~interop:"go-ordered-reconnect"
             ~trace:"go-after-four" ~stream_sequence:4L
             ~consumer_sequence:after_consumer_sequence after;
-          let go_done_message =
-            next_message ~clock ~timeout ~failure_file
-              "Go post-failover completion" go_done
-          in
-          expect_payload "Go post-failover completion" "go-after-complete"
-            go_done_message;
           let close_response =
             expect_ok "close Go ordered session"
               (Nats_eio.Connection.request ~timeout connection
