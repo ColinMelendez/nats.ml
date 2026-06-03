@@ -43,6 +43,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-interop-jetstream.sh
 ./scripts/runtest-interop-jetstream-matrix.sh
 ./scripts/runtest-interop-jetstream-reconnect.sh
+./scripts/runtest-interop-jetstream-cluster.sh
 NATS_TEST_INTEROP_JETSTREAM_MODE=push ./scripts/runtest-interop-jetstream.sh
 NATS_TEST_INTEROP_JETSTREAM_MODE=ordered ./scripts/runtest-interop-jetstream.sh
 NATS_INTEROP_JETSTREAM_MATRIX_SCENARIOS=ordered ./scripts/runtest-interop-jetstream-matrix.sh
@@ -122,8 +123,14 @@ subset of `anonymous`, `anonymous-tls`, `token`, `token-tls`, `user-pass`, and
 both pull and Push on each pinned release. Ordered is an opt-in matrix scenario:
 set `NATS_INTEROP_JETSTREAM_MATRIX_SCENARIOS=ordered` (or include `ordered` in
 the comma-separated scenario list). Its full six-mode sweep also passes on all
-three pinned releases. Cluster interop and Ordered reconnect remain separate
-work for the matrix runner. The optional `NATS_TEST_TOKEN` or paired
+three pinned releases. The separate Ordered reconnect cluster runner starts a
+three-node file-backed JetStream cluster and an official Go `nats.go` peer,
+kills the initial node after a filtered sequence baseline, and verifies both
+clients reconnect to a discovered peer, recreate their ephemeral Ordered
+consumers from the next stream sequence, and complete cleanup. It currently
+covers anonymous plaintext on `nats:2.10.22`; authenticated/TLS, version, and
+broader cluster-failure matrices remain separate work. The optional
+`NATS_TEST_TOKEN` or paired
 `NATS_TEST_USER`/`NATS_TEST_PASS` values only replace the built-in credentials
 for their selected modes; they do not select modes. Set
 `NATS_TEST_INTEROP_JETSTREAM_MODE=push` to run the separate durable Push slice:
@@ -142,7 +149,8 @@ Push consumers on one persistent server container, kills and restarts that
 container, and verifies both the OCaml and Go Push legs recover and exchange
 new messages without recreating their sessions. Anonymous plaintext passes on
 all three pinned releases; the runner currently rejects authentication and TLS
-variables, and cluster/Ordered reconnect remain separate work.
+variables. Ordered reconnect has a separate three-node failover runner as
+described above.
 The Core interop matrix runner (`./scripts/runtest-interop-matrix.sh`) is a
 bounded Core gate: by
 default it spans the established `nats:2.10.22` floor, `nats:2.12.15`, and the
@@ -189,7 +197,8 @@ watches. `Nats_eio.Service` provides typed endpoint workers, queue groups,
 statistics, replayable subscriptions, and service-local draining. The
 dedicated JetStream cluster slice is intentionally narrower than a full
 failure matrix; advanced cluster scenarios and cross-SDK interoperability
-coverage remain in the final acceptance phase.
+coverage remain in the final acceptance phase. The Ordered reconnect cluster
+slice is currently limited to one anonymous plaintext seed-node failure.
 
 The project uses Dune package management. No compatibility layer for NATS
 Streaming is planned.

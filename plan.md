@@ -91,7 +91,9 @@ absolute caller timeouts across control traffic. Ordered sessions now use
 client-managed ephemeral pull consumers, force no-ack memory-backed
 configuration, validate consumer sequence continuity, and recreate consumers
 after gaps, liveness loss, deletion, or non-replayed disconnects while resuming
-from the next stream sequence. Key-Value now provides typed bucket management,
+from the next stream sequence. Reconnection waits for the connection replay
+barrier and retries transient JetStream availability failures without repeating
+stale-consumer cleanup. Key-Value now provides typed bucket management,
 compare-and-set mutations, finite scans, history, and cancellable watches.
 Services now provide typed endpoint/group values, queue-backed workers,
 request/service-error replies, `$SRV.*` monitoring and fan-out discovery,
@@ -449,7 +451,8 @@ The separate JetStream Push reconnect runner uses a file-backed stream and
 durable consumers on one persistent server container, restarts that container,
 and checks both the Go and OCaml Push legs after reconnect. Anonymous
 plaintext passes on all three pinned releases; authentication/TLS and cluster
-restart remain separate work.
+restart remain separate work. Ordered reconnect has a separate three-node
+cluster acceptance slice below.
 
 - Core publish/subscribe, queue-group load balancing, headers, and replies.
 - Request success, timeout, no responders, cancellation, and a pending-request
@@ -693,8 +696,16 @@ request/reply and subscription primitives.
   delivery metadata and headers, AckNone/memory-backed consumer configuration,
   publish acknowledgements, and coordinated unsubscribe/deletion cleanup. The
   dedicated matrix scenario passes in anonymous, token, and username/password
-  plaintext/TLS modes on all three pinned releases. Ordered reconnect remains
-  separate acceptance work.
+  plaintext/TLS modes on all three pinned releases.
+- Completed cross-SDK Ordered reconnect slice: a separate Nix-built official Go
+  `nats.go` peer and OCaml client share a file-backed, three-replica stream in a
+  three-node cluster. Matching and non-matching baseline messages establish
+  filtered stream and consumer sequences; after the seed node is killed, both
+  clients reconnect through discovered peer URLs, recreate their ephemeral
+  Ordered consumers from the next stream sequence, and complete coordinated
+  cleanup. The anonymous plaintext `nats:2.10.22` acceptance passes; it does not
+  yet cover authenticated/TLS, version, leader-targeted, or multi-node-loss
+  matrices.
 - Completed cross-SDK Push reconnect floor: a dedicated runner keeps the same
   Go and OCaml durable Push sessions across a persistent file-backed
   nats-server restart, checks recovery barriers and post-restart JetStream
@@ -711,8 +722,8 @@ request/reply and subscription primitives.
   JetStream-leader targeting, multi-node loss, or a version/authentication/TLS
   matrix.
 - Remaining: additional real cluster failure scenarios, authenticated/TLS and
-  cluster reconnect matrices, server-version feature gates, and Ordered
-  reconnect.
+  cluster reconnect matrices, server-version feature gates, and broader
+  cross-SDK JetStream cluster coverage.
 
 ### Gate G4 — JetStream API stabilization
 
