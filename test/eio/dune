@@ -15,4 +15,5 @@
   mirage-crypto-rng.unix
   windtrap
   base64
+  jsont
   ptime))

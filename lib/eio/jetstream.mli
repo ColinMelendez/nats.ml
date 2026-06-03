@@ -24,7 +24,16 @@ module Error : sig
     | Invalid_consumer_priority_update
     | Invalid_consumer_policy of { field : string; value : string }
 
-  type api = { code : int; err_code : int option; description : string }
+  type api = {
+    code : int;
+    err_code : int option;
+    description : string;
+    metadata : Jsont.json;
+  }
+  (** A structured error returned by a JetStream API endpoint. [metadata] is a
+      JSON object containing fields not interpreted by this version of the
+      client. *)
+
   type list_kind = Streams | Consumers
 
   type t =
@@ -331,11 +340,18 @@ module Msg : sig
   val stream_sequence : t -> int64
   val consumer_sequence : t -> int64
   val num_pending : t -> int64
+
   val ack : t -> (unit, Error.t) result
+  (** [ack message] publishes [+ACK] without waiting for a server response.
+      [Ok ()] means that the acknowledgement was accepted by the local
+      connection. The server's acknowledgement policy is not inferred from the
+      availability of this function; in particular, ordered consumers use
+      [No_ack]. *)
 
   val ack_sync : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
   (** [ack_sync ?timeout message] sends [+ACK] and waits for the server to
-      acknowledge receiving it. [timeout] defaults to the connection request
+      acknowledge receiving it. This response is a request-level confirmation,
+      not a durability guarantee. [timeout] defaults to the connection request
       timeout. A missing response returns [Error (Connection Timeout)] and a
       server without a responder returns [Error (Connection No_responders)]. *)
 

@@ -1236,6 +1236,33 @@ let () =
                 | _ -> false);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "consumer info preserves API error metadata" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw connection ->
+              let consumer = consumer connection in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.info consumer));
+              yield_n 5;
+              Eio.Promise.resolve response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"error":{"code":404,"err_code":10014,"description":"consumer not found","retryable":false,"server":"js-a"}}|}));
+              expect_jetstream_error (Eio.Promise.await result) (function
+                | Nats_eio.Jetstream.Error.Api { metadata; _ } -> (
+                    match metadata with
+                    | Jsont.Object (members, _) ->
+                        List.exists
+                          (fun ((name, _), _) -> String.equal name "retryable")
+                          members
+                    | _ -> false)
+                | _ -> false);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream create emits retained config fields" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
@@ -3570,6 +3597,33 @@ let () =
                 ~count:1;
               Eio.Promise.resolve final_delete_u (Ok (api_ok_wire ~sid:6));
               expect_jetstream_ok (Eio.Promise.await close_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "ack publishes without waiting for a response" (fun () ->
+          let delivery, delivery_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await delivery; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let pull =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Consumer.Pull.v ~sw (consumer connection))
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.Pull.next pull));
+              yield_n 5;
+              Eio.Promise.resolve delivery_u (Ok (delivery_wire "payload"));
+              let message = expect_jetstream_ok (Eio.Promise.await result) in
+              expect_jetstream_ok (Nats_eio.Jetstream.Msg.ack message);
+              if
+                not
+                  (contains_substring
+                     ~needle:"wrote \"PUB $JS.ACK.ORDERS.worker"
+                     (Buffer.contents trace))
+              then fail "ack did not publish its acknowledgement subject";
+              expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Pull.close pull);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "ack_sync waits for the server acknowledgement" (fun () ->

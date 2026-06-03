@@ -25,7 +25,13 @@ module Error = struct
     | Invalid_consumer_priority_update
     | Invalid_consumer_policy of { field : string; value : string }
 
-  type api = { code : int; err_code : int option; description : string }
+  type api = {
+    code : int;
+    err_code : int option;
+    description : string;
+    metadata : Jsont.json;
+  }
+
   type list_kind = Streams | Consumers
 
   type t =
@@ -114,7 +120,7 @@ module Error = struct
     | Invalid_consumer_policy { field; value } ->
         Format.fprintf ppf "invalid consumer %s policy %S" field value
 
-  let pp_api ppf { code; err_code; description } =
+  let pp_api ppf { code; err_code; description; _ } =
     match err_code with
     | None -> Format.fprintf ppf "JetStream API error %d: %s" code description
     | Some err_code ->
@@ -245,14 +251,18 @@ let encode codec value =
   | Error error -> Error (Error.Encode error)
 
 let api_error_codec =
-  Jsont.Object.map ~kind:"JetStream API error" (fun code err_code description ->
-      { Error.code; err_code; description })
+  Jsont.Object.map ~kind:"JetStream API error"
+    (fun code err_code description metadata ->
+      { Error.code; err_code; description; metadata })
   |> Jsont.Object.mem "code" Jsont.int ~enc:(fun value -> value.Error.code)
   |> Jsont.Object.opt_mem "err_code" Jsont.int ~enc:(fun value ->
       value.Error.err_code)
   |> Jsont.Object.mem "description" Jsont.string ~enc:(fun value ->
       value.Error.description)
-  |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+  |> Jsont.Object.keep_unknown
+       ~enc:(fun value -> value.Error.metadata)
+       Jsont.json_mems
+  |> Jsont.Object.finish
 
 module Stream = struct
   module Config = struct
