@@ -286,9 +286,14 @@ the next stream sequence. The initial delivery policy is used only for the
 first generation. A normal caller timeout leaves the current generation open;
 an absolute timeout covers both waiting and recovery work.
 
-This behavior is currently covered through the local Eio mock transport. Real
-server-version, cluster, and cross-SDK ordered-consumer interoperability tests
-belong to the final acceptance phase.
+This behavior is covered through the local Eio mock transport and a live
+cross-SDK acceptance runner. The runner covers both a seed-node transport
+failure, where each client recreates its ephemeral consumer from the next
+stream sequence, and an elected JetStream stream-leader failure, where both
+clients remain on surviving endpoints and preserve their Ordered consumer
+identities across the election. The live cluster slice is currently pinned to
+anonymous plaintext `nats:2.10.22`; server-version, authentication, TLS, and
+broader failure matrices remain final-acceptance work.
 
 ### The protocol core as a testable boundary
 
