@@ -3576,13 +3576,15 @@ module Consumer = struct
   let pull_status_result status =
     let code = status.Nats.Op.code in
     let description = status.Nats.Op.description in
-    match classify_status status with
-    | Status_request_expired | Status_batch_completed -> Ok ()
-    | Status_max_bytes | Status_pin_lost | Status_conflict ->
-        Error (Error.Conflict { code; description })
-    | Status_consumer_deleted -> Error Error.Consumer_deleted
-    | Status_idle_heartbeat | Status_flow_control | Status_unexpected ->
-        Error (Error.Unexpected_status { code; description })
+    if Int.equal code 503 then Error (Error.Connection Core_error.No_responders)
+    else
+      match classify_status status with
+      | Status_request_expired | Status_batch_completed -> Ok ()
+      | Status_max_bytes | Status_pin_lost | Status_conflict ->
+          Error (Error.Conflict { code; description })
+      | Status_consumer_deleted -> Error Error.Consumer_deleted
+      | Status_idle_heartbeat | Status_flow_control | Status_unexpected ->
+          Error (Error.Unexpected_status { code; description })
 
   let push_status_error status =
     let code = status.Nats.Op.code in
