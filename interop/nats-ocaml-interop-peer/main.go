@@ -13,12 +13,14 @@ import (
 const waitTimeout = 10 * time.Second
 
 type options struct {
-	server string
-	prefix string
-	stream string
-	ready  string
-	signal string
-	mode   string
+	server   string
+	prefix   string
+	stream   string
+	ready    string
+	signal   string
+	leader   string
+	survivor string
+	mode     string
 }
 
 func waitMessage(label string, messages <-chan *nats.Msg) (*nats.Msg, error) {
@@ -219,13 +221,20 @@ func main() {
 	flag.StringVar(&config.stream, "stream", "", "JetStream stream name")
 	flag.StringVar(&config.ready, "ready-file", "", "file created after subscriptions are ready")
 	flag.StringVar(&config.signal, "signal-file", "", "file written to trigger reconnect in reconnect mode")
-	flag.StringVar(&config.mode, "mode", "core", "interop mode: core, reconnect, jetstream, jetstream-push, jetstream-ordered, jetstream-push-reconnect, or jetstream-ordered-reconnect")
+	flag.StringVar(&config.leader, "leader-file", "", "file written with the JetStream stream leader")
+	flag.StringVar(&config.survivor, "survivor-file", "", "file containing the endpoints for the post-failover client")
+	flag.StringVar(&config.mode, "mode", "core", "interop mode: core, reconnect, jetstream, jetstream-push, jetstream-ordered, jetstream-push-reconnect, jetstream-ordered-reconnect, or jetstream-ordered-leader-failover")
 	flag.Parse()
 	if err := validateOptions(config); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 	if err := runMode(config); err != nil {
+		if config.signal != "" {
+			if markerError := os.WriteFile(config.signal+".failed", []byte("failed\n"), 0600); markerError != nil {
+				fmt.Fprintf(os.Stderr, "interop peer: write failure marker: %s\n", markerError)
+			}
+		}
 		fmt.Fprintf(os.Stderr, "interop peer: %s\n", err)
 		os.Exit(1)
 	}

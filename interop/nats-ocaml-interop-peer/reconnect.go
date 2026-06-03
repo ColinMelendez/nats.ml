@@ -262,6 +262,20 @@ func runMode(config options) error {
 			return fmt.Errorf("stream is required in jetstream-ordered-reconnect mode")
 		}
 		return runJetStreamOrderedReconnectPeer(config)
+	case "jetstream-ordered-leader-failover":
+		if config.signal == "" {
+			return fmt.Errorf("signal-file is required in jetstream-ordered-leader-failover mode")
+		}
+		if config.stream == "" {
+			return fmt.Errorf("stream is required in jetstream-ordered-leader-failover mode")
+		}
+		if config.leader == "" {
+			return fmt.Errorf("leader-file is required in jetstream-ordered-leader-failover mode")
+		}
+		if config.survivor == "" {
+			return fmt.Errorf("survivor-file is required in jetstream-ordered-leader-failover mode")
+		}
+		return runJetStreamOrderedReconnectPeer(config)
 	default:
 		return fmt.Errorf("unknown mode %q", config.mode)
 	}

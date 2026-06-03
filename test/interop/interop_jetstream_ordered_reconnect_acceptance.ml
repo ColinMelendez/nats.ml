@@ -19,6 +19,14 @@ let required name =
   | Some value when not (String.equal value "") -> value
   | Some _ | None -> failf "%s is required" name
 
+let leader_failover () =
+  match Sys.getenv_opt "NATS_TEST_JS_CLUSTER_FAILURE_MODE" with
+  | None | Some "seed" -> false
+  | Some "leader" -> true
+  | Some value ->
+      failf "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed or leader, got %S"
+        value
+
 let endpoint () =
   let value = required "NATS_TEST_SERVER" in
   match Nats.Endpoint.of_string value with
@@ -141,6 +149,22 @@ let expect_reconnected ~clock ~timeout ~failure_file events =
        (function Nats_eio.Event.Reconnected -> true | _ -> false)
        events)
 
+let wait_for_file ~clock ~timeout ~failure_file ~label path =
+  let deadline =
+    match Mtime.add_span (Eio.Time.Mono.now clock) timeout with
+    | Some value -> value
+    | None -> Mtime.max_stamp
+  in
+  let found = ref false in
+  while not !found do
+    if Sys.file_exists failure_file then
+      failf "cluster watcher failed (see %s)" failure_file
+    else if Sys.file_exists path then found := true
+    else if Mtime.compare (Eio.Time.Mono.now clock) deadline >= 0 then
+      failf "timed out waiting for %s" label
+    else Eio.Time.Mono.sleep clock 0.05
+  done
+
 let next_message ~clock ~timeout ~failure_file label subscription =
   match
     Eio.Fiber.first
@@ -248,6 +272,7 @@ let run env =
   let prefix = required "NATS_TEST_INTEROP_PREFIX" in
   let stream_name = required "NATS_TEST_INTEROP_STREAM" in
   let signal = required "NATS_TEST_INTEROP_SIGNAL" in
+  let leader_failover = leader_failover () in
   let failure_file = signal ^ ".failed" in
   let initial_name = required "NATS_TEST_JS_CLUSTER_INITIAL_NAME" in
   let recovered_names =
@@ -263,6 +288,12 @@ let run env =
   let endpoint = endpoint () in
   let auth = auth () in
   let tls = tls_config () in
+  let ordered_heartbeat =
+    if leader_failover then Some Mtime.Span.(20 * s) else None
+  in
+  let ordered_expires =
+    if leader_failover then Some Mtime.Span.(60 * s) else None
+  in
   let config =
     expect_ok "connection config"
       (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 100)
@@ -304,7 +335,8 @@ let run env =
       in
       let ordered =
         expect_jetstream_ok "open OCaml ordered session"
-          (Nats_eio.Jetstream.Consumer.Ordered.v ~sw
+          (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ?expires:ordered_expires
+             ?idle_heartbeat:ordered_heartbeat
              ~filter_subject:(Nats.Subject.Filter.literal match_subject)
              stream)
       in
@@ -357,18 +389,22 @@ let run env =
           expect_payload "baseline response" "go-baseline-ready"
             baseline_response;
           touch (signal ^ ".1");
-          expect_disconnected ~clock ~timeout:reconnect_timeout ~failure_file
-            events;
-          let recovered_info =
-            expect_server_info ~clock ~timeout:reconnect_timeout ~failure_file
-              ~names:recovered_names events
-          in
-          expect_reconnected ~clock ~timeout:reconnect_timeout ~failure_file
-            events;
-          (match Nats.Info.server_name recovered_info with
-          | Some value when not (String.equal value initial_name) -> ()
-          | Some value -> failf "reconnected to killed server %S" value
-          | None -> failf "reconnect INFO had no server name");
+          if leader_failover then
+            wait_for_file ~clock ~timeout:reconnect_timeout ~failure_file
+              ~label:"leader kill" (signal ^ ".killed")
+          else (
+            expect_disconnected ~clock ~timeout:reconnect_timeout ~failure_file
+              events;
+            let recovered_info =
+              expect_server_info ~clock ~timeout:reconnect_timeout ~failure_file
+                ~names:recovered_names events
+            in
+            expect_reconnected ~clock ~timeout:reconnect_timeout ~failure_file
+              events;
+            match Nats.Info.server_name recovered_info with
+            | Some value when not (String.equal value initial_name) -> ()
+            | Some value -> failf "reconnected to killed server %S" value
+            | None -> failf "reconnect INFO had no server name");
           let after_result, after_result_u = Eio.Promise.create () in
           Eio.Fiber.fork ~sw (fun () ->
               Eio.Promise.resolve after_result_u
@@ -378,7 +414,8 @@ let run env =
             request_until_response ~clock ~timeout:reconnect_timeout
               ~failure_file ~label:"confirm OCaml reconnect" connection
               (Nats.Subject.literal (prefix ^ ".recovery-ready"))
-              "ocaml-reconnected"
+              (if leader_failover then "ocaml-leader-failover"
+               else "ocaml-reconnected")
           in
           expect_payload "recovery response" "go-recovery-ready"
             recovery_response;
@@ -387,14 +424,21 @@ let run env =
               (Eio.Promise.await after_result)
           in
           let after_consumer = Nats_eio.Jetstream.Msg.consumer after in
-          if String.equal after_consumer consumer_name then
-            failf "OCaml ordered session retained consumer %S after failover"
+          if leader_failover then (
+            if not (String.equal after_consumer consumer_name) then
+              failf
+                "OCaml ordered session changed consumer from %S to %S during \
+                 leader failover"
+                consumer_name after_consumer)
+          else if String.equal after_consumer consumer_name then
+            failf "OCaml ordered session retained consumer %S after reconnect"
               after_consumer;
+          let after_consumer_sequence = if leader_failover then 3L else 1L in
           expect_ordered_delivery "OCaml ordered post-failover"
             ~stream:stream_name ~subject:match_subject ~consumer:after_consumer
             ~payload:"go-after-four" ~interop:"go-ordered-reconnect"
-            ~trace:"go-after-four" ~stream_sequence:4L ~consumer_sequence:1L
-            after;
+            ~trace:"go-after-four" ~stream_sequence:4L
+            ~consumer_sequence:after_consumer_sequence after;
           let go_done_message =
             next_message ~clock ~timeout ~failure_file
               "Go post-failover completion" go_done

@@ -3,12 +3,84 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
 )
 
 const orderedReconnectWait = 90 * time.Second
+const orderedReconnectHeartbeat = 20 * time.Second
+
+func waitForJetStreamLeaderKillSignal(signal string) error {
+	deadline := time.Now().Add(orderedReconnectWait)
+	path := signal + ".killed"
+	failurePath := signal + ".failed"
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(failurePath); err == nil {
+			return fmt.Errorf("leader kill watcher failed (see %s)", failurePath)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("check leader kill watcher failure: %w", err)
+		}
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("check leader kill signal: %w", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out waiting for leader kill signal %s", path)
+}
+
+func waitForJetStreamSurvivorFile(signal, path string) (string, error) {
+	deadline := time.Now().Add(orderedReconnectWait)
+	failurePath := signal + ".failed"
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(failurePath); err == nil {
+			return "", fmt.Errorf("leader routing watcher failed (see %s)", failurePath)
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("check leader routing watcher failure: %w", err)
+		}
+		data, err := os.ReadFile(path)
+		if err == nil {
+			endpoint := strings.TrimSpace(string(data))
+			if endpoint != "" {
+				return endpoint, nil
+			}
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("read JetStream survivor endpoints: %w", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return "", fmt.Errorf("timed out waiting for JetStream survivor endpoints %s", path)
+}
+
+func retryJetStreamLeaderChange(jetstream nats.JetStreamContext, stream, previous string, deadline time.Time) (*nats.StreamInfo, error) {
+	var lastError error
+	for time.Now().Before(deadline) {
+		info, err := jetstream.StreamInfo(stream)
+		if err == nil && info.Cluster != nil && info.Cluster.Leader != "" && info.Cluster.Leader != previous {
+			return info, nil
+		}
+		if err != nil {
+			lastError = err
+		} else {
+			lastError = fmt.Errorf("JetStream stream %s still had leader %q", stream, previous)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if lastError == nil {
+		return nil, fmt.Errorf("JetStream stream %s did not report a leader", stream)
+	}
+	return nil, fmt.Errorf("JetStream stream %s did not elect a new leader: %w", stream, lastError)
+}
+
+func markJetStreamInteropFailure(signal string, err error) error {
+	if markerError := os.WriteFile(signal+".failed", []byte("failed\n"), 0600); markerError != nil {
+		return fmt.Errorf("%w (write failure marker: %v)", err, markerError)
+	}
+	return err
+}
 
 func expectOrderedReconnectDelivery(label string, message *nats.Msg, stream, subject, payload, interop, trace string, streamSequence, consumerSequence uint64) error {
 	if string(message.Data) != payload {
@@ -49,6 +121,20 @@ func expectOrderedReconnectDelivery(label string, message *nats.Msg, stream, sub
 	return nil
 }
 
+func expectOrderedReconnectConsumerContinuity(label string, message *nats.Msg, previousConsumer string, stream, subject, payload, interop, trace string, streamSequence, consumerSequence uint64) error {
+	if err := expectOrderedReconnectDelivery(label, message, stream, subject, payload, interop, trace, streamSequence, consumerSequence); err != nil {
+		return err
+	}
+	metadata, err := message.Metadata()
+	if err != nil {
+		return fmt.Errorf("%s metadata: %w", label, err)
+	}
+	if metadata.Consumer != previousConsumer {
+		return fmt.Errorf("%s changed ordered consumer from %q to %q during leader failover", label, previousConsumer, metadata.Consumer)
+	}
+	return nil
+}
+
 func expectOrderedReconnectConsumerChanged(label string, message *nats.Msg, previousConsumer string, stream, subject, payload, interop, trace string, streamSequence uint64) error {
 	if err := expectOrderedReconnectDelivery(label, message, stream, subject, payload, interop, trace, streamSequence, 0); err != nil {
 		return err
@@ -58,7 +144,7 @@ func expectOrderedReconnectConsumerChanged(label string, message *nats.Msg, prev
 		return fmt.Errorf("%s metadata: %w", label, err)
 	}
 	if metadata.Consumer == previousConsumer {
-		return fmt.Errorf("%s retained ordered consumer %q after failover", label, previousConsumer)
+		return fmt.Errorf("%s retained ordered consumer %q after reconnect", label, previousConsumer)
 	}
 	return nil
 }
@@ -98,12 +184,13 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
-	defer connection.Close()
+	defer func() { connection.Close() }()
 
-	jetstream, err := connection.JetStream()
+	jetstream, err := connection.JetStream(nats.MaxWait(orderedReconnectWait))
 	if err != nil {
 		return fmt.Errorf("JetStream context: %w", err)
 	}
+	var leaderProbe nats.JetStreamContext
 	streamInfo, err := jetstream.AddStream(&nats.StreamConfig{
 		Name:     config.stream,
 		Subjects: []string{config.prefix + ".match", config.prefix + ".gap"},
@@ -119,13 +206,59 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	if streamInfo.Config.Storage != nats.FileStorage || streamInfo.Config.Replicas != 3 {
 		return fmt.Errorf("created stream storage=%v replicas=%d, expected file-backed with three replicas", streamInfo.Config.Storage, streamInfo.Config.Replicas)
 	}
+	leaderName := ""
+	if config.leader != "" {
+		leaderDeadline := time.Now().Add(orderedReconnectWait)
+		streamInfo, err = retryJetStreamStreamInfo(jetstream, config.stream, leaderDeadline)
+		if err != nil {
+			return err
+		}
+		if streamInfo.Cluster == nil || streamInfo.Cluster.Leader == "" {
+			return fmt.Errorf("created stream did not identify a JetStream leader")
+		}
+		leaderName = streamInfo.Cluster.Leader
+		if err := os.WriteFile(config.leader, []byte(leaderName+"\n"), 0600); err != nil {
+			return fmt.Errorf("write JetStream leader: %w", err)
+		}
+		survivorServer, err := waitForJetStreamSurvivorFile(config.signal, config.survivor)
+		if err != nil {
+			return err
+		}
+		connection.Close()
+		connection, err = nats.Connect(survivorServer, connectionOptions...)
+		if err != nil {
+			return fmt.Errorf("connect to JetStream survivor %q: %w", survivorServer, err)
+		}
+		jetstream, err = connection.JetStream(nats.MaxWait(orderedReconnectWait))
+		if err != nil {
+			return fmt.Errorf("JetStream survivor context: %w", err)
+		}
+		leaderProbe, err = connection.JetStream()
+		if err != nil {
+			return fmt.Errorf("JetStream leader probe context: %w", err)
+		}
+		streamInfo, err = retryJetStreamStreamInfo(leaderProbe, config.stream, time.Now().Add(orderedReconnectWait))
+		if err != nil {
+			return err
+		}
+		if streamInfo.Cluster == nil || streamInfo.Cluster.Leader != leaderName {
+			actualLeader := ""
+			if streamInfo.Cluster != nil {
+				actualLeader = streamInfo.Cluster.Leader
+			}
+			return markJetStreamInteropFailure(config.signal, fmt.Errorf("JetStream leader changed during setup from %q to %q", leaderName, actualLeader))
+		}
+	}
 
 	matchSubject := config.prefix + ".match"
-	orderedSubscription, err := jetstream.SubscribeSync(
-		matchSubject,
+	orderedOptions := []nats.SubOpt{
 		nats.BindStream(config.stream),
 		nats.OrderedConsumer(),
-	)
+	}
+	if config.leader != "" {
+		orderedOptions = append(orderedOptions, nats.IdleHeartbeat(orderedReconnectHeartbeat))
+	}
+	orderedSubscription, err := jetstream.SubscribeSync(matchSubject, orderedOptions...)
 	if err != nil {
 		return fmt.Errorf("create Go ordered consumer: %w", err)
 	}
@@ -224,11 +357,44 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	if err := waitForJetStreamReconnectSignal(config.signal); err != nil {
 		return err
 	}
-	if err := waitJetStreamReconnect(reconnected); err != nil {
+	var recoveryDeadline time.Time
+	if config.leader != "" {
+		streamInfo, err = retryJetStreamStreamInfo(leaderProbe, config.stream, time.Now().Add(orderedReconnectWait))
+		if err != nil {
+			return markJetStreamInteropFailure(config.signal, err)
+		}
+		if streamInfo.Cluster == nil || streamInfo.Cluster.Leader != leaderName {
+			actualLeader := ""
+			if streamInfo.Cluster != nil {
+				actualLeader = streamInfo.Cluster.Leader
+			}
+			return markJetStreamInteropFailure(config.signal, fmt.Errorf("JetStream leader before kill was %q, expected %q", actualLeader, leaderName))
+		}
+		if err := os.WriteFile(config.leader, []byte(leaderName+"\n"), 0600); err != nil {
+			return markJetStreamInteropFailure(config.signal, fmt.Errorf("write current JetStream leader: %w", err))
+		}
+		if err := os.WriteFile(config.signal+".kill-ready", []byte("ready\n"), 0600); err != nil {
+			return markJetStreamInteropFailure(config.signal, fmt.Errorf("write leader kill barrier: %w", err))
+		}
+		if err := waitForJetStreamLeaderKillSignal(config.signal); err != nil {
+			return err
+		}
+		recoveryDeadline = time.Now().Add(orderedReconnectWait)
+		streamInfo, err = retryJetStreamLeaderChange(leaderProbe, config.stream, leaderName, recoveryDeadline)
+	} else if err := waitJetStreamReconnect(reconnected); err != nil {
+		return err
+	} else {
+		recoveryDeadline = time.Now().Add(orderedReconnectWait)
+	}
+	if err != nil {
+		if config.leader != "" {
+			return markJetStreamInteropFailure(config.signal, err)
+		}
 		return err
 	}
-	recoveryDeadline := time.Now().Add(orderedReconnectWait)
-	streamInfo, err = retryJetStreamStreamInfo(jetstream, config.stream, recoveryDeadline)
+	if config.leader == "" {
+		streamInfo, err = retryJetStreamStreamInfo(jetstream, config.stream, recoveryDeadline)
+	}
 	if err != nil {
 		return err
 	}
@@ -240,8 +406,12 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	if err != nil {
 		return err
 	}
-	if string(recoveryMessage.Data) != "ocaml-reconnected" {
-		return fmt.Errorf("recovery readiness was %q, expected %q", string(recoveryMessage.Data), "ocaml-reconnected")
+	recoveryPayload := "ocaml-reconnected"
+	if config.leader != "" {
+		recoveryPayload = "ocaml-leader-failover"
+	}
+	if string(recoveryMessage.Data) != recoveryPayload {
+		return fmt.Errorf("recovery readiness was %q, expected %q", string(recoveryMessage.Data), recoveryPayload)
 	}
 	if err := recoveryMessage.Respond([]byte("go-recovery-ready")); err != nil {
 		return fmt.Errorf("respond recovery readiness: %w", err)
@@ -253,8 +423,14 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	if err != nil {
 		return fmt.Errorf("receive post-failover ordered message: %w", err)
 	}
-	if err := expectOrderedReconnectConsumerChanged("Go ordered post-failover", afterMessage, orderedInfo.Name, config.stream, matchSubject, "go-after-four", "go-ordered-reconnect", "go-after-four", 4); err != nil {
-		return err
+	var postFailoverError error
+	if config.leader != "" {
+		postFailoverError = expectOrderedReconnectConsumerContinuity("Go ordered post-failover", afterMessage, orderedInfo.Name, config.stream, matchSubject, "go-after-four", "go-ordered-reconnect", "go-after-four", 4, 3)
+	} else {
+		postFailoverError = expectOrderedReconnectConsumerChanged("Go ordered post-failover", afterMessage, orderedInfo.Name, config.stream, matchSubject, "go-after-four", "go-ordered-reconnect", "go-after-four", 4)
+	}
+	if postFailoverError != nil {
+		return postFailoverError
 	}
 	if err := connection.Publish(config.prefix+".go-after-done", []byte("go-after-complete")); err != nil {
 		return fmt.Errorf("publish post-failover completion: %w", err)
