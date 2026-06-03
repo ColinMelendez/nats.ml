@@ -30,6 +30,9 @@ func expectOrderedReconnectDelivery(label string, message *nats.Msg, stream, sub
 	if metadata.Stream != stream {
 		return fmt.Errorf("%s metadata named stream %q, expected %q", label, metadata.Stream, stream)
 	}
+	if metadata.Consumer == "" {
+		return fmt.Errorf("%s metadata did not identify a consumer", label)
+	}
 	if metadata.Sequence.Stream != streamSequence {
 		return fmt.Errorf("%s metadata had stream sequence=%d, expected %d", label, metadata.Sequence.Stream, streamSequence)
 	}
@@ -42,6 +45,20 @@ func expectOrderedReconnectDelivery(label string, message *nats.Msg, stream, sub
 	}
 	if metadata.NumDelivered != 1 {
 		return fmt.Errorf("%s metadata had delivery count %d, expected one", label, metadata.NumDelivered)
+	}
+	return nil
+}
+
+func expectOrderedReconnectConsumerChanged(label string, message *nats.Msg, previousConsumer string, stream, subject, payload, interop, trace string, streamSequence uint64) error {
+	if err := expectOrderedReconnectDelivery(label, message, stream, subject, payload, interop, trace, streamSequence, 0); err != nil {
+		return err
+	}
+	metadata, err := message.Metadata()
+	if err != nil {
+		return fmt.Errorf("%s metadata: %w", label, err)
+	}
+	if metadata.Consumer == previousConsumer {
+		return fmt.Errorf("%s retained ordered consumer %q after failover", label, previousConsumer)
 	}
 	return nil
 }
@@ -119,6 +136,9 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	orderedInfo, err := orderedSubscription.ConsumerInfo()
 	if err != nil {
 		return fmt.Errorf("read Go ordered consumer info: %w", err)
+	}
+	if orderedInfo.Name == "" {
+		return fmt.Errorf("Go ordered consumer info did not identify a consumer")
 	}
 	if orderedInfo.Stream != config.stream || orderedInfo.Config.FilterSubject != matchSubject {
 		return fmt.Errorf("Go ordered consumer was not bound to the expected stream and filter")
@@ -233,7 +253,7 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	if err != nil {
 		return fmt.Errorf("receive post-failover ordered message: %w", err)
 	}
-	if err := expectOrderedReconnectDelivery("Go ordered post-failover", afterMessage, config.stream, matchSubject, "go-after-four", "go-ordered-reconnect", "go-after-four", 4, 0); err != nil {
+	if err := expectOrderedReconnectConsumerChanged("Go ordered post-failover", afterMessage, orderedInfo.Name, config.stream, matchSubject, "go-after-four", "go-ordered-reconnect", "go-after-four", 4); err != nil {
 		return err
 	}
 	if err := connection.Publish(config.prefix+".go-after-done", []byte("go-after-complete")); err != nil {
