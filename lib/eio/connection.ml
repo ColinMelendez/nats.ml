@@ -494,8 +494,9 @@ module Subscription = struct
           let current = t.recovery in
           if not (equal_recovery current from) then Ok current
           else
+            let signal = t.recovery_signal in
             let wait_signal () =
-              Eio.Promise.await t.recovery_signal;
+              Eio.Promise.await signal;
               Ok ()
             in
             let wait_result =
@@ -801,9 +802,10 @@ let await_reconnect ?timeout t =
   if t.closed then Error Error.Closed
   else if not t.reconnecting then Ok ()
   else
+    let signal = t.reconnect_signal in
     let wait =
       match timeout with
-      | None -> Eio.Promise.await t.reconnect_signal
+      | None -> Eio.Promise.await signal
       | Some timeout -> (
           if Mtime.Span.compare timeout Mtime.Span.zero <= 0 then
             Error Error.Timeout
@@ -819,7 +821,7 @@ let await_reconnect ?timeout t =
                   | first, _ -> first
                 in
                 Eio.Fiber.first ~combine:choose
-                  (fun () -> Eio.Promise.await t.reconnect_signal)
+                  (fun () -> Eio.Promise.await signal)
                   (fun () ->
                     t.clock.sleep_until deadline;
                     Error Error.Timeout))
