@@ -131,6 +131,93 @@ non-terminal `Disconnected`/`Reconnected` events; and defers unsubscribe
 commands until the replacement session is ready. It does not replay
 arbitrary publishes or pending requests.
 
+### Production-readiness acceptance program
+
+The remaining work is now primarily acceptance and operational confidence,
+not another broad feature pass. Existing opt-in server and Go interop runners
+are the foundation; this program extends them in place and keeps the fast
+local mock suite independent from Docker.
+
+#### A. Make the acceptance harness reproducible
+
+Keep all binary dependencies in the `integration` Nix shell. Docker or Colima
+is the only host-level prerequisite. Each runner must use a pinned NATS image
+by default, derive names from a unique run id, create only resources it owns,
+wait for server readiness and cluster formation explicitly, and clean up those
+resources on success, interruption, or failure. A failed run must preserve
+OCaml, peer, server, and launcher diagnostics in a caller-selected artifact
+directory; the default path may remain temporary. Cleanup must use returned
+Docker ids or ownership labels, never a guessed name that could belong to a
+different run. The first harness slice must also prove that two concurrent
+runs do not collide, that interruption preserves the signal status, and that
+every process and readiness phase has a deadline. The harness must not rely on
+global Docker cleanup or a large VM, and the documented local Colima baseline
+is a 10 GiB disk with room to increase only when evidence requires it.
+
+Expose the layers as explicit commands rather than attaching Docker work to
+the default `dune runtest` alias:
+
+```text
+dune runtest                         # deterministic local suite
+./scripts/runtest-server.sh          # one-server black-box acceptance
+./scripts/runtest-interop*.sh        # cross-SDK acceptance
+./scripts/runtest-*-cluster*.sh      # fault-injection and cluster suites
+```
+
+#### B. Close the single-server contract matrix
+
+Run the Core, JetStream, Key-Value, Object Store, and Services user-facing
+scenarios against the pinned server-version matrix. For every applicable
+surface, cover anonymous, token, username/password, NKey/JWT, server-required
+TLS, and mTLS in the smallest useful progression: first connection, then
+reconnect and cleanup. Record unsupported combinations as explicit skips or
+tracked gaps, never as an accidental absence of coverage.
+
+#### C. Expand cluster failure injection
+
+Reuse the existing three-node route and JetStream runners. Elected
+stream-leader loss and ordered-session recovery already have a bounded
+anonymous plaintext matrix; the remaining cases are each-node loss where the
+replica count allows it, changed advertised client URLs, reconnect during
+management and delivery operations, consumer recreation under more failure
+modes, and authenticated/TLS cluster paths. Keep the failure trigger
+synchronized with a flushed, observable barrier so a test failure identifies
+the lost invariant rather than a startup race.
+
+#### D. Make cross-SDK behavior the wire-level oracle
+
+Use the maintained official Go SDK peer first, then add other Tier 1 SDKs only
+when they clarify a protocol contract. Alternate publisher, subscriber,
+requester, consumer, and management ownership between OCaml and the peer.
+Assert headers, metadata, acknowledgement semantics, status/error envelopes,
+consumer recovery, KV revisions, and Object Store chunk/digest behavior from
+both directions. Keep resource names and cleanup ownership explicit so a
+failed case cannot contaminate the next one.
+
+#### E. Exercise authentication and TLS as a matrix
+
+Complete single-server auth/TLS cases before combining them with cluster
+failure. The first matrix is anonymous, token, username/password, NKey/JWT,
+TLS, and mTLS; each selected case must include invalid credentials or
+certificates and a reconnect/close path. Then add only the high-value cluster
+combinations, with server version and feature-gate differences documented.
+
+#### F. Define release gates
+
+The local suite must pass on every change. Single-server acceptance is the
+normal production-readiness gate, while cluster, cross-SDK, and auth/TLS
+matrices are explicit pre-release gates until their runtime is small and
+stable enough for continuous execution. A release claim requires the pinned
+server matrix, failure artifacts for negative cases, no known unclassified
+wire-behavior differences against the Go peer, and an outside review of the
+staged boundary and evidence.
+
+Implementation order is deliberately incremental: (1) harness diagnostics and
+ownership, (2) single-server KV/Object Store/Services acceptance, (3) missing
+cluster failures, (4) cross-SDK role reversal and durable-feature coverage,
+(5) NKey/JWT and mTLS, and (6) release automation and final evidence. Each
+slice lands as a small semantic commit and is reviewed independently.
+
 ## Working principles
 
 These are implementation invariants, not optional preferences.
@@ -869,16 +956,16 @@ JetStream acknowledgement/consumer model.
 
 Do not freeze these before their phase needs them:
 
-- subscription and event queue sizes and exact overflow policy;
-- single protocol-owner fiber versus a coordinated reader/writer topology;
-- public timeout/duration type;
 - NKey/JWT package boundary and private-key parsing;
-- unknown JetStream JSON-field preservation policy;
 - optional Core reconnect buffering;
 - callback bridge shape;
 - WebSocket and second-runtime package boundaries;
 - metrics/probe naming and payload policy.
 
-The following are not deferred: Core-first stabilization, client-assigned sids,
+The following are already chosen and must not be reopened by harness work:
+single protocol-owner fiber, bounded subscription and event queues with
+explicit slow-consumer behavior, `Mtime.Span.t` as the public timeout type,
+unknown JetStream JSON-field preservation, Core-first stabilization,
+client-assigned sids,
 the `Op`/`Message` split, explicit deliveries, reader ownership, no silent
 publish replay, structured errors, and distinct drain/close semantics.
