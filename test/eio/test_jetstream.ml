@@ -79,6 +79,15 @@ let owned_push_consumer_info_wire_with_sid ~sid =
   consumer_info_wire_with_sid ~sid
     {|{"stream_name":"ORDERS","name":"worker","config":{"deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"none","replay_policy":"instant"}}|}
 
+let owned_push_create_wire_with_sid ~sid ~num_pending
+    ~delivered_consumer_sequence =
+  let payload =
+    Format.asprintf
+      {|{"stream_name":"ORDERS","name":"worker","delivered":{"consumer_seq":%Ld,"stream_seq":%Ld},"num_pending":%Ld,"config":{"deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"none","replay_policy":"instant"}}|}
+      delivered_consumer_sequence delivered_consumer_sequence num_pending
+  in
+  consumer_info_wire_with_sid ~sid payload
+
 let push_consumer_info_wire_with_sid_and_subject ~sid ~subject =
   let payload =
     Format.asprintf
@@ -2223,11 +2232,15 @@ let () =
               if Int.compare subscription_position create_position >= 0 then
                 fail "owned push created its consumer before subscribing";
               Eio.Promise.resolve create_response_u
-                (Ok (owned_push_consumer_info_wire_with_sid ~sid:2));
+                (Ok
+                   (owned_push_create_wire_with_sid ~sid:2 ~num_pending:3L
+                      ~delivered_consumer_sequence:2L));
               yield_n 5;
               Eio.Promise.resolve info_response_u
                 (Ok (owned_push_consumer_info_wire_with_sid ~sid:3));
               let push = expect_jetstream_ok (Eio.Promise.await result) in
+              equal int64 5L
+                (Nats_eio.Jetstream.Consumer.Push.initial_pending push);
               equal string "worker"
                 (Nats_eio.Jetstream.Consumer.name
                    (Nats_eio.Jetstream.Consumer.Push.consumer push));

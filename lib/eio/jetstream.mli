@@ -799,8 +799,11 @@ module Consumer : sig
         consumer may change after recovery. *)
 
     val initial_pending : t -> int64
-    (** [initial_pending push] is the server-reported pending count from the
-        consumer setup that created [push]. *)
+    (** [initial_pending push] is the pending count established by the setup.
+        For [Push.create], this is the consumer-create response's pending count,
+        including deliveries already reported by that response before setup
+        completed. For [Push.v], it is the later consumer-info response's
+        pending count. *)
 
     val next : t -> (Msg.t, Error.t) result
     (** [next push] waits for the next delivered message. Messages are not

@@ -3353,6 +3353,7 @@ module Consumer = struct
     jetstream : jetstream;
     stream : stream;
     name : string;
+    created_pending : int64 option;
     pause_until : Ptime.t option ref;
     priority_pins : string String_map.t ref;
   }
@@ -4098,6 +4099,7 @@ module Consumer = struct
             jetstream = stream.jetstream;
             stream;
             name;
+            created_pending = None;
             pause_until = ref None;
             priority_pins = ref String_map.empty;
           }
@@ -4105,6 +4107,7 @@ module Consumer = struct
 
   let name value = value.name
   let stream value = value.stream
+  let created_pending value = value.created_pending
 
   let create ?timeout (stream : Stream.t) config =
     let jetstream = stream.jetstream in
@@ -4129,7 +4132,14 @@ module Consumer = struct
             | Ok { name = None; _ } -> Error (Error.Missing_field "name")
             | Ok { name = Some name; config = None; _ } ->
                 Error (Error.Missing_field "config")
-            | Ok { name = Some name; config = Some response_config; _ } -> (
+            | Ok
+                {
+                  name = Some name;
+                  config = Some response_config;
+                  delivered;
+                  num_pending;
+                  _;
+                } -> (
                 match Config.durable_name config with
                 | Some expected when not (String.equal expected name) ->
                     Error
@@ -4138,11 +4148,24 @@ module Consumer = struct
                 | _ -> (
                     match config_of_wire response_config with
                     | Ok (actual_config, _) ->
+                        let delivered_pending =
+                          Option.bind delivered (fun sequence ->
+                              sequence.consumer_sequence)
+                        in
+                        let created_pending =
+                          match (num_pending, delivered_pending) with
+                          | None, None -> None
+                          | Some pending, None | None, Some pending ->
+                              Some pending
+                          | Some pending, Some delivered ->
+                              Some (Int64.add pending delivered)
+                        in
                         Ok
                           {
                             jetstream;
                             stream;
                             name;
+                            created_pending;
                             pause_until = ref (Config.pause_until actual_config);
                             priority_pins = ref String_map.empty;
                           }
@@ -4866,10 +4889,14 @@ module Consumer = struct
                                 match subscription_result with
                                 | Error error -> Error error
                                 | Ok subscription -> (
+                                    let initial_pending =
+                                      match created_pending consumer with
+                                      | Some value -> value
+                                      | None -> Info.num_pending info
+                                    in
                                     match
                                       make ~sw ~owns_consumer:true
-                                        ~initial_pending:(Info.num_pending info)
-                                        ~consumer ~subscription
+                                        ~initial_pending ~consumer ~subscription
                                         ~config:actual_config
                                     with
                                     | Error error -> Error error
