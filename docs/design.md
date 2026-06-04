@@ -736,13 +736,15 @@ These modules should be layered over `Connection.request` and
   cleanup, sealing, typed bucket policy, read-modify-write updates, and
   structured operation deadlines.
 - `Nats_eio.Key_value` provides revisioned values, compare-and-set mutations,
-  finite scans, history, and cancellable watches over the same connection.
+  finite scans, history, and cancellable watches over the same connection. The
+  opt-in live-server runner covers bucket status, direct reads, CAS failures,
+  history, tombstones, filtered keys, and a live watch.
 - `Nats_eio.Service` provides typed service identity, endpoint/group values,
   queue-backed workers, request and service-error replies, `$SRV.PING`,
   `$SRV.INFO`, and `$SRV.STATS` monitoring, replayable subscriptions, service
   statistics, service-local draining, and resource-free fan-out discovery with
-  typed response decoding. Real-server and cross-SDK acceptance remain
-  stability work for these durable and service layers.
+  typed response decoding. Object Store and Services real-server acceptance,
+  plus cross-SDK acceptance across these layers, remain stability work.
 
 JetStream consumers deserve particular care. Pull consumption is the default
 for new code because it makes demand and backpressure explicit; push consumers
@@ -801,10 +803,11 @@ through individual helper functions:
   consumer inventory, unknown-config preservation, publish acknowledgements,
   duplicate message ids, one-shot and persistent pull delivery,
   idle-heartbeat behavior, timeout/expiry behavior, max-bytes errors, and
-  cleanup. Object Store's local transfer, metadata lifecycle, watch/list, link,
-  seal, and bucket configuration-update behavior is implemented;
-  real-server/cross-SDK acceptance for KV, Object Store, and Services remains
-  later work.
+  cleanup. The same opt-in runner also covers Key-Value bucket status, direct
+  reads, CAS failures, history, tombstones, filtered keys, and a live watch.
+  Object Store's local transfer, metadata lifecycle, watch/list, link, seal,
+  and bucket configuration-update behavior is implemented; live Object Store
+  and Services coverage plus cross-SDK acceptance remain later work.
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 

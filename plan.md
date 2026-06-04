@@ -94,7 +94,9 @@ after gaps, liveness loss, deletion, or non-replayed disconnects while resuming
 from the next stream sequence. Reconnection waits for the connection replay
 barrier and retries transient JetStream availability failures without repeating
 stale-consumer cleanup. Key-Value now provides typed bucket management,
-compare-and-set mutations, finite scans, history, and cancellable watches.
+compare-and-set mutations, finite scans, history, and cancellable watches. The
+opt-in single-server runner now exercises these behaviors against a live
+JetStream bucket as well.
 Services now provide typed endpoint/group values, queue-backed workers,
 request/service-error replies, `$SRV.*` monitoring and fan-out discovery,
 statistics, replayable subscriptions, and service-local draining. Object Store
@@ -830,7 +832,8 @@ semantics before calling the feature complete.
   cancellable watches.
 - Preserve watch ordering and expose bucket/key/value/revision/timestamp/
   operation without requiring callers to parse JetStream messages.
-- Remaining: real-server and cross-SDK acceptance.
+- Remaining: cross-SDK acceptance and the wider authenticated, TLS, and
+  cluster-failure matrix.
 
 ### Workstream 5B — Object Store
 
@@ -852,6 +855,9 @@ semantics before calling the feature complete.
 - KV CAS success/failure, revisions, history, TTL, deletes/purges, finite
   scans, and watches are covered locally through the Eio mock transport.
 - Watch cancellation and ordering under reconnect are covered locally.
+- The opt-in single-server runner covers bucket status, direct reads, CAS
+  failures, history, tombstones, filtered keys, and a live watch against
+  nats-server.
 - Large Object Store transfer, metadata, replacement/deletion ordering,
   interrupted-transfer cleanup, listing/watch boundaries, links, rename,
   sealing, and bucket configuration updates are covered locally; server

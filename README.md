@@ -93,7 +93,9 @@ cleanup, auto-unsubscribe limits, bounded subscription slow-consumer behavior,
 subscription drain, connection drain, and parent-switch cleanup.
 With `NATS_TEST_JETSTREAM=1`, it also runs a separate consumer acceptance
 executable covering durable and owned Push consumers, Ordered filtering, and
-Ordered consumer deletion/recreation against the live server.
+Ordered consumer deletion/recreation against the live server, followed by a
+Key-Value acceptance executable covering bucket status, direct reads, CAS
+mutations, history, tombstones, filtered keys, and a live watch.
 The server matrix runner repeats the server, cluster, and lame-duck runners for
 `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` (nine sequential cases by
 default); set `NATS_SERVER_IMAGES` or `NATS_SERVER_MATRIX_SCENARIOS` to select
@@ -177,9 +179,9 @@ sequentially; set `NATS_SERVER_IMAGES` to a comma-separated image list or
 `reconnect`, `tls-core`, and `tls-reconnect`. The matrix defaults to anonymous
 authentication; set the token or username/password variables described above
 to repeat the selected matrix with that authentication mode. It does not
-claim full server conformance: broader failure-injection matrices, plus
-broader JetStream/KV/Object Store/Services interoperability, remain separate
-acceptance work. The cross-SDK reconnect runner
+claim full server conformance: broader failure-injection matrices, JetStream
+interoperability, KV cross-SDK behavior, and live or cross-SDK Object Store and
+Services coverage remain separate acceptance work. The cross-SDK reconnect runner
 starts three independent NATS servers, kills the first and then the second
 after flushed exchanges, and checks that the Go and OCaml clients recover twice,
 replay their subscriptions, and exchange messages after each failover. It

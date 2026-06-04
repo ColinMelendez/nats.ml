@@ -134,7 +134,14 @@ then
           NATS_TEST_JETSTREAM_RUN_ID="$jetstream_run_id" nix develop .#integration \
           -c dune exec test/server/server_jetstream_consumers.exe >>"$log" 2>&1
       then
-        :
+        if NATS_TEST_SERVER="$server" \
+            NATS_TEST_JETSTREAM_RUN_ID="$jetstream_run_id" nix develop .#integration \
+            -c dune exec test/server/server_key_value.exe >>"$log" 2>&1
+        then
+          :
+        else
+          status=$?
+        fi
       else
         status=$?
       fi
