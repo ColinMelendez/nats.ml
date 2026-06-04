@@ -196,10 +196,10 @@ let direct_message_wire_with_sequence_header ~sid ~stream ~subject
     match
       Nats.Header.of_list
         [
-          ("JSStream", stream);
-          ("JSSequence", sequence_value);
-          ("JSTimeStamp", timestamp);
-          ("JSSubject", subject);
+          ("Nats-Stream", stream);
+          ("Nats-Sequence", sequence_value);
+          ("Nats-Time-Stamp", timestamp);
+          ("Nats-Subject", subject);
         ]
     with
     | Ok headers -> headers
@@ -1453,7 +1453,7 @@ let () =
               expect_jetstream_error
                 (Nats_eio.Jetstream.Stream.get stream ~sequence:(-1L)) (function
                 | Nats_eio.Jetstream.Error.Invalid_message_header
-                    { name = "JSSequence"; value = "-1" } ->
+                    { name = "Nats-Sequence"; value = "-1" } ->
                     true
                 | _ -> false);
               let first_result, first_result_u = Eio.Promise.create () in
@@ -1479,7 +1479,7 @@ let () =
                       ~timestamp:"2026-08-11T12:00:00.000000000Z" "malformed"));
               expect_jetstream_error (Eio.Promise.await second_result) (function
                 | Nats_eio.Jetstream.Error.Invalid_message_header
-                    { name = "JSSequence"; value = "not-a-number" } ->
+                    { name = "Nats-Sequence"; value = "not-a-number" } ->
                     true
                 | _ -> false);
               expect_ok (Nats_eio.Connection.close connection);

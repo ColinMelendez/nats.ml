@@ -1179,7 +1179,8 @@ module Stream = struct
   let message_sequence value =
     match Int64.of_string_opt value with
     | Some sequence when Int64.compare sequence 0L >= 0 -> Ok sequence
-    | _ -> Error (Error.Invalid_message_header { name = "JSSequence"; value })
+    | _ ->
+        Error (Error.Invalid_message_header { name = "Nats-Sequence"; value })
 
   let stored_message (stream : t) message =
     let headers = Nats.Message.headers message in
@@ -1191,21 +1192,21 @@ module Stream = struct
       let ( let* ) value f =
         match value with Error error -> Error error | Ok value -> f value
       in
-      let* response_stream = message_header message "JSStream" in
+      let* response_stream = message_header message "Nats-Stream" in
       if not (String.equal response_stream stream.name) then
         Error
           (Error.Unexpected_stream_name
              { expected = stream.name; actual = response_stream })
       else
-        let* sequence_header = message_header message "JSSequence" in
+        let* sequence_header = message_header message "Nats-Sequence" in
         let* sequence = message_sequence sequence_header in
-        let* subject_header = message_header message "JSSubject" in
+        let* subject_header = message_header message "Nats-Subject" in
         let* subject =
           match Nats.Subject.of_string subject_header with
           | Ok subject -> Ok subject
           | Error error -> Error (Error.Invalid_subject error)
         in
-        let* timestamp = message_header message "JSTimeStamp" in
+        let* timestamp = message_header message "Nats-Time-Stamp" in
         Ok
           {
             Message.subject;
@@ -1219,7 +1220,7 @@ module Stream = struct
     if Int64.compare sequence 0L < 0 then
       Error
         (Error.Invalid_message_header
-           { name = "JSSequence"; value = Int64.to_string sequence })
+           { name = "Nats-Sequence"; value = Int64.to_string sequence })
     else
       match encode message_get_request_codec { sequence } with
       | Error error -> Error error

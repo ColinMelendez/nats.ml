@@ -136,10 +136,10 @@ let direct_response ~sid ~bucket ~key ~sequence ~operation payload =
   let headers =
     let values =
       [
-        ("JSStream", "KV_" ^ bucket);
-        ("JSSequence", Int64.to_string sequence);
-        ("JSTimeStamp", "2026-08-12T12:00:00.000000000Z");
-        ("JSSubject", "$KV." ^ bucket ^ "." ^ key);
+        ("Nats-Stream", "KV_" ^ bucket);
+        ("Nats-Sequence", Int64.to_string sequence);
+        ("Nats-Time-Stamp", "2026-08-12T12:00:00.000000000Z");
+        ("Nats-Subject", "$KV." ^ bucket ^ "." ^ key);
       ]
     in
     let values =

@@ -44,10 +44,10 @@ let direct_response_wire ~sid ~bucket ~name payload =
     match
       Nats.Header.of_list
         [
-          ("JSStream", "OBJ_" ^ bucket);
-          ("JSSequence", "12");
-          ("JSTimeStamp", "2026-08-12T12:00:00.000000000Z");
-          ("JSSubject", "$O." ^ bucket ^ ".M." ^ encoded_name);
+          ("Nats-Stream", "OBJ_" ^ bucket);
+          ("Nats-Sequence", "12");
+          ("Nats-Time-Stamp", "2026-08-12T12:00:00.000000000Z");
+          ("Nats-Subject", "$O." ^ bucket ^ ".M." ^ encoded_name);
         ]
     with
     | Ok headers -> headers
