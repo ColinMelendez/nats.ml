@@ -25,6 +25,9 @@ peer_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-peer.XXXXXX")
 ocaml_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-ocaml.XXXXXX")
 rm -f "$ready"
 prefix="ocaml.interop.$$"
+# shellcheck disable=SC1091 # script_dir points at this file's directory.
+. "$script_dir/test-artifacts.sh"
+artifact_init interop "$$"
 
 case "$tls_enabled" in
   0|1) ;;
@@ -34,11 +37,21 @@ case "$tls_enabled" in
     ;;
 esac
 
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap.
 cleanup() {
+  status=$?
   if [ -n "$peer_pid" ]; then
     kill "$peer_pid" >/dev/null 2>&1 || true
     wait "$peer_pid" >/dev/null 2>&1 || true
   fi
+  artifact_save_file "$status" "$peer_log" go-peer.log
+  artifact_save_file "$status" "$ocaml_log" ocaml.log
+  artifact_save_docker_log "$status" "$container" nats-server.log
+  artifact_save_docker_state "$status" "$container" nats-server.state
+  artifact_save_image "$status" "$image" nats-server.image
+  artifact_save_text "$status" run.txt \
+    "runner=interop" "image=$image" "tls=$tls_enabled" \
+    "auth_mode=$auth_mode" "status=$status"
   if [ -n "$container" ]; then
     docker rm -f "$container" >/dev/null 2>&1 || true
   fi
@@ -48,7 +61,9 @@ cleanup() {
   rm -f "$ready" "$peer_log" "$ocaml_log"
 }
 
-trap 'cleanup' EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [ -n "${NATS_TEST_TOKEN+x}" ]; then
   if [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
@@ -221,6 +236,4 @@ else
   cat "$ocaml_log" >&2 || true
   cat "$peer_log" >&2 || true
 fi
-trap - EXIT
-cleanup
 exit "$status"

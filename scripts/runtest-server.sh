@@ -12,16 +12,29 @@ jetstream=${NATS_TEST_JETSTREAM-}
 jetstream_run_id=${NATS_TEST_JETSTREAM_RUN_ID:-$$}
 container=
 log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-server.XXXXXX")
+# shellcheck disable=SC1091 # script_dir points at this file's directory.
+. "$script_dir/test-artifacts.sh"
+artifact_init server "$$"
 
 # shellcheck disable=SC2329 # Invoked indirectly by the EXIT/INT/TERM trap.
 cleanup() {
+  status=$?
+  artifact_save_file "$status" "$log" ocaml.log
+  artifact_save_docker_log "$status" "$container" nats-server.log
+  artifact_save_docker_state "$status" "$container" nats-server.state
+  artifact_save_image "$status" "$image" nats-server.image
+  artifact_save_text "$status" run.txt \
+    "runner=server" "image=$image" "jetstream=$jetstream" \
+    "status=$status"
   if [ -n "$container" ]; then
     docker rm -f "$container" >/dev/null 2>&1 || true
   fi
   rm -f "$log"
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 case "$jetstream" in
   ""|0) jetstream_arg= ;;
