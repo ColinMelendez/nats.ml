@@ -949,6 +949,7 @@ let finish t error =
     | Some _ -> ()
     | None -> resolve_ready t (Error error));
     Event_stream.terminate t.events error;
+    stop_reader t;
     close_transport t.flow)
 
 let remove_finished_subscriptions t =
