@@ -740,7 +740,9 @@ These modules should be layered over `Connection.request` and
 - `Nats_eio.Key_value` provides revisioned values, compare-and-set mutations,
   finite scans, history, and cancellable watches over the same connection. The
   opt-in live-server runner covers bucket status, direct reads, CAS failures,
-  history, tombstones, filtered keys, and a live watch.
+  history, tombstones, filtered keys, and a live watch. A dedicated
+  cross-SDK runner also alternates these operations with the official Go
+  `nats.go` `jetstream.KeyValue` API, including purge markers and cleanup.
 - `Nats_eio.Service` provides typed service identity, endpoint/group values,
   queue-backed workers, request and service-error replies, `$SRV.PING`,
   `$SRV.INFO`, and `$SRV.STATS` monitoring, replayable subscriptions, service
@@ -790,7 +792,7 @@ while application subjects remain ordinary Core NATS subjects. KV, Object
 Store, and Services now compose over the same connection; their local
 discovery, lifecycle, and data-path behavior is implemented, while their wider
 real-server and cross-SDK matrices remain later stability work beyond the
-baseline Service interop slice described above.
+baseline Service and Key-Value interop slices described above.
 
 ## 6. Testing and interoperability
 
@@ -825,8 +827,12 @@ through individual helper functions:
   queue-group routing, and Service endpoint/monitoring recovery through the
   live reconnect runner. The dedicated Service interop runner also checks the
   OCaml/official-Go wire contract for endpoint requests, service errors,
-  discovery, metadata, queue groups, statistics, and coordinated draining;
-  broader cross-SDK matrices remain later work.
+  discovery, metadata, queue groups, statistics, and coordinated draining. The
+  dedicated Key-Value interop runner checks revisions, stale CAS, tombstones,
+  watches, purge markers, and cleanup against the official Go `nats.go`
+  `jetstream.KeyValue` API across the pinned server/authentication matrix;
+  broader cluster/reconnect, credential, and Object Store cross-SDK matrices
+  remain later work.
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 

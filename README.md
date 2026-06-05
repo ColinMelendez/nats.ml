@@ -43,6 +43,8 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-interop-service.sh
 ./scripts/runtest-interop-jetstream.sh
 ./scripts/runtest-interop-jetstream-matrix.sh
+./scripts/runtest-interop-key-value.sh
+./scripts/runtest-interop-key-value-matrix.sh
 ./scripts/runtest-interop-jetstream-reconnect.sh
 ./scripts/runtest-interop-jetstream-cluster.sh
 ./scripts/runtest-interop-jetstream-cluster-matrix.sh
@@ -171,6 +173,13 @@ interleaved non-matching messages, verify AckNone configuration and exact
 stream/consumer sequences, and coordinate cleanup. The anonymous, token, and
 username/password plaintext/TLS Ordered modes pass on all three pinned
 releases.
+The dedicated Key-Value interop runner uses the official Go `nats.go`
+`jetstream.KeyValue` API as the peer. It alternates bucket creation, revisioned
+updates, stale CAS validation, tombstones, watches, purge markers, and cleanup
+between Go and OCaml. Its matrix covers the same six anonymous/authenticated
+plaintext/TLS modes across all three pinned releases; all 18 baseline cases
+pass. Cluster/reconnect, NKey/JWT, mTLS, and Object Store cross-SDK coverage
+remain separate acceptance work.
 The separate JetStream reconnect runner uses a file-backed stream and durable
 Push consumers on one persistent server container, kills and restarts that
 container, and verifies both the OCaml and Go Push legs recover and exchange
@@ -189,8 +198,8 @@ sequentially; set `NATS_SERVER_IMAGES` to a comma-separated image list or
 `reconnect`, `tls-core`, and `tls-reconnect`. The matrix defaults to anonymous
 authentication; set the token or username/password variables described above
 to repeat the selected matrix with that authentication mode. It does not
-claim full server conformance: broader failure-injection matrices, JetStream
-interoperability, KV cross-SDK behavior, Object Store cross-SDK behavior, and
+claim full server conformance: broader failure-injection matrices, KV
+cluster/reconnect and credential coverage, Object Store cross-SDK behavior, and
 the wider Services cross-SDK/version matrix remain separate acceptance work.
 The cross-SDK reconnect runner
 starts three independent NATS servers, kills the first and then the second
@@ -227,7 +236,9 @@ metadata updates and links, snapshot/live watches, listing, deletion,
 replacement cleanup, sealing, and bucket policy updates for replicas, placement,
 compression, and stream metadata. `Nats_eio.Key_value` provides revisioned
 values, compare-and-set mutations, finite scans, history, and cancellable
-watches. `Nats_eio.Service` provides typed endpoint workers, queue groups,
+watches, while the dedicated Key-Value interop runner cross-checks revision,
+CAS, tombstone, watch, purge, and cleanup behavior against the official Go
+`nats.go` API. `Nats_eio.Service` provides typed endpoint workers, queue groups,
 `$SRV.*` monitoring and fan-out discovery, request/service-error replies,
 statistics, replayable subscriptions, and service-local draining. The
 dedicated JetStream cluster slice is intentionally narrower than a full

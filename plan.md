@@ -199,8 +199,12 @@ when they clarify a protocol contract. Alternate publisher, subscriber,
 requester, consumer, and management ownership between OCaml and the peer.
 Assert headers, metadata, acknowledgement semantics, status/error envelopes,
 consumer recovery, KV revisions, and Object Store chunk/digest behavior from
-both directions. Keep resource names and cleanup ownership explicit so a
-failed case cannot contaminate the next one.
+both directions. The baseline KV slice now alternates bucket creation,
+revisioned updates, stale CAS, tombstones, watches, purge markers, and cleanup
+with the official Go `nats.go` `jetstream.KeyValue` API across three pinned
+server releases and six single-server authentication/TLS modes. Keep resource
+names and cleanup ownership explicit so a failed case cannot contaminate the
+next one.
 
 #### E. Exercise authentication and TLS as a matrix
 
@@ -221,10 +225,11 @@ wire-behavior differences against the Go peer, and an outside review of the
 staged boundary and evidence.
 
 Implementation order is deliberately incremental: (1) harness diagnostics and
-ownership, (2) single-server KV/Object Store/Services acceptance, (3) missing
-cluster failures, (4) cross-SDK role reversal and durable-feature coverage,
-(5) NKey/JWT and mTLS, and (6) release automation and final evidence. Each
-slice lands as a small semantic commit and is reviewed independently.
+ownership, (2) single-server KV/Object Store/Services acceptance, (3) the
+baseline single-server KV cross-SDK role reversal, (4) missing cluster
+failures, (5) remaining durable-feature cross-SDK coverage, (6) NKey/JWT and
+mTLS, and (7) release automation and final evidence. Each slice lands as a
+small semantic commit and is reviewed independently.
 
 ## Working principles
 
@@ -838,8 +843,13 @@ semantics before calling the feature complete.
   cancellable watches.
 - Preserve watch ordering and expose bucket/key/value/revision/timestamp/
   operation without requiring callers to parse JetStream messages.
-- Remaining: cross-SDK acceptance and the wider authenticated, TLS, and
-  cluster-failure matrix.
+- Completed cross-SDK baseline: a Nix-built official Go `nats.go` peer and the
+  OCaml client alternate bucket creation, revisioned updates, stale CAS,
+  tombstones, watches, purge markers, and cleanup. The matrix passes across
+  `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` in anonymous, token,
+  username/password, and corresponding server-required TLS modes.
+- Remaining: KV reconnect and cluster-failure coverage, NKey/JWT and mTLS,
+  and broader server/version combinations.
 
 ### Workstream 5B — Object Store
 
@@ -865,6 +875,9 @@ semantics before calling the feature complete.
 - The opt-in single-server runner covers bucket status, direct reads, CAS
   failures, history, tombstones, filtered keys, and a live watch against
   nats-server.
+- The dedicated cross-SDK runner covers Go/OCaml revision ownership, stale CAS,
+  delete and purge tombstones, watch ordering, and cleanup across the pinned
+  single-server authentication/TLS matrix.
 - The same runner covers Object Store chunked content, metadata, links,
   listing, deletion and tombstones, watches, sealing, and cleanup against
   nats-server.
