@@ -69,8 +69,12 @@ slow-consumer handling, reconnect recovery, and three-node cluster
 discovery/failover with subscription recovery. Authentication capabilities now
 cover anonymous,
 token, username/password, NKey, and JWT credentials; nonce signing is repeated
-for every INFO, while private-key parsing and NKey/JWT server acceptance remain
-later work. The JetStream foundation now adds a typed, resource-free capability
+for every INFO. The auth acceptance harness now generates ephemeral NKey/JWT
+credentials and mTLS certificates, exercises the existing signer and TLS
+configuration seams, and checks both successful and rejected connections from
+the OCaml client and the official Go peer. Private-key parsing remains an
+optional caller-side concern rather than a public Core dependency. The
+JetStream foundation now adds a typed, resource-free capability
 over the connection, stream configuration/info including per-subject limits and
 direct/rollup flags, stream create/bind/update/list/info/delete and direct
 stored-message reads, publish acknowledgements with message ids, API error
@@ -208,11 +212,13 @@ next one.
 
 #### E. Exercise authentication and TLS as a matrix
 
-Complete single-server auth/TLS cases before combining them with cluster
-failure. The first matrix is anonymous, token, username/password, NKey/JWT,
-TLS, and mTLS; each selected case must include invalid credentials or
-certificates and a reconnect/close path. Then add only the high-value cluster
-combinations, with server version and feature-gate differences documented.
+Completed single-server Core auth/TLS coverage now includes anonymous, token,
+username/password, NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS. The
+dedicated positive matrix passes all five non-anonymous modes across the three
+pinned server releases; its companion negative matrix passes invalid NKey/JWT
+signatures and missing mTLS client certificates across the same releases for
+both SDKs. Reconnect and cluster combinations remain a later acceptance
+increment, with server-version and feature-gate differences documented there.
 
 #### F. Define release gates
 
@@ -227,9 +233,10 @@ staged boundary and evidence.
 Implementation order is deliberately incremental: (1) harness diagnostics and
 ownership, (2) single-server KV/Object Store/Services acceptance, (3) the
 baseline single-server KV cross-SDK role reversal, (4) missing cluster
-failures, (5) remaining durable-feature cross-SDK coverage, (6) NKey/JWT and
-mTLS, and (7) release automation and final evidence. Each slice lands as a
-small semantic commit and is reviewed independently.
+failures, (5) remaining durable-feature cross-SDK coverage, and (6) release
+automation and final evidence. The single-server NKey/JWT/mTLS slice is now
+complete. Each slice lands as a small semantic commit and is reviewed
+independently.
 
 ## Working principles
 
@@ -642,6 +649,12 @@ Completed authentication matrix: those three CONNECT authentication modes have
 each been exercised across all twelve image/scenario cells, for 36 cross-SDK
 acceptance combinations. Server authentication here is orthogonal to TLS
 transport policy.
+Completed NKey/JWT/mTLS slice: the dedicated auth matrix exercises NKey, JWT,
+NKey-over-TLS, JWT-over-TLS, and mTLS against all three pinned server releases,
+for fifteen positive cross-SDK cases. The negative matrix repeats those cells
+with a mismatched NKey/JWT signing seed or no client certificate and requires
+both the Go peer and OCaml client to fail authentication, for fifteen negative
+cases. Credentials and certificates are ephemeral and never committed.
 The bounded version/scenario matrix and repeated failure cases for the
 documented Core contracts are now in place. Broader failure-injection campaigns
 and JetStream, Key-Value, Object Store, and the remaining Services
@@ -848,8 +861,8 @@ semantics before calling the feature complete.
   tombstones, watches, purge markers, and cleanup. The matrix passes across
   `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` in anonymous, token,
   username/password, and corresponding server-required TLS modes.
-- Remaining: KV reconnect and cluster-failure coverage, NKey/JWT and mTLS,
-  and broader server/version combinations.
+- Remaining: KV reconnect and cluster-failure coverage, and broader
+  server/version combinations beyond the pinned auth/TLS matrix.
 
 ### Workstream 5B — Object Store
 

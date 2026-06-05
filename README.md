@@ -40,6 +40,8 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-tls.sh
 ./scripts/runtest-lameduck.sh
 ./scripts/runtest-interop.sh
+./scripts/runtest-interop-auth-matrix.sh
+./scripts/runtest-interop-auth-negative-matrix.sh
 ./scripts/runtest-interop-service.sh
 ./scripts/runtest-interop-jetstream.sh
 ./scripts/runtest-interop-jetstream-matrix.sh
@@ -88,6 +90,13 @@ authentication, set both `NATS_TEST_USER` and `NATS_TEST_PASS` to non-empty
 ephemeral credentials before running the script. The credentials must use only
 ASCII letters, digits, underscores, and hyphens; choose exactly one
 authentication mode.
+The dedicated auth interop matrix generates ephemeral NKey/JWT material with
+the Nix-provided `nsc`, generates a short-lived certificate authority and
+client certificates with OpenSSL, and checks NKey, JWT, NKey-over-TLS,
+JWT-over-TLS, and mTLS against `nats:2.10.22`, `nats:2.12.15`, and
+`nats:2.14.5`. Its companion negative matrix checks rejected NKey/JWT
+signatures and missing mTLS client certificates from both the OCaml client and
+the official Go peer.
 The harness then requires anonymous connection rejection as well as successful
 authenticated traffic. To enable the JetStream acceptance slice, also set
 `NATS_TEST_JETSTREAM=1`; this starts the server with JetStream enabled and
@@ -179,7 +188,8 @@ updates, stale CAS validation, tombstones, watches, purge markers, and cleanup
 between Go and OCaml. Its matrix covers the same six anonymous/authenticated
 plaintext/TLS modes across all three pinned releases; all 18 baseline cases
 pass. Cluster/reconnect, NKey/JWT, mTLS, and Object Store cross-SDK coverage
-remain separate acceptance work.
+remain separate acceptance work; the dedicated auth matrix covers those
+authentication and TLS contracts for Core traffic.
 The separate JetStream reconnect runner uses a file-backed stream and durable
 Push consumers on one persistent server container, kills and restarts that
 container, and verifies both the OCaml and Go Push legs recover and exchange
@@ -199,7 +209,7 @@ sequentially; set `NATS_SERVER_IMAGES` to a comma-separated image list or
 authentication; set the token or username/password variables described above
 to repeat the selected matrix with that authentication mode. It does not
 claim full server conformance: broader failure-injection matrices, KV
-cluster/reconnect and credential coverage, Object Store cross-SDK behavior, and
+cluster/reconnect, Object Store cross-SDK behavior, and
 the wider Services cross-SDK/version matrix remain separate acceptance work.
 The cross-SDK reconnect runner
 starts three independent NATS servers, kills the first and then the second

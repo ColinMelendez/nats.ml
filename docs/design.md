@@ -707,8 +707,10 @@ The opt-in real-server harness now exercises token and username/password authent
 server-required TLS, reconnect recovery, pending-request disconnect failure,
 bounded slow-consumer handling, parent-switch cleanup, and lame-duck INFO/event
 handling alongside single-server Core NATS headers, queue groups, request/reply,
-and no-responders. NKey/JWT server
-acceptance remains a later Core milestone.
+and no-responders. A dedicated auth harness now generates ephemeral NKey/JWT
+credentials and mTLS certificates and cross-checks successful and rejected
+NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS connections against the
+official Go client peer across three pinned server releases.
 
 ### JetStream, KV, Object Store, and Services
 
@@ -831,7 +833,7 @@ through individual helper functions:
   dedicated Key-Value interop runner checks revisions, stale CAS, tombstones,
   watches, purge markers, and cleanup against the official Go `nats.go`
   `jetstream.KeyValue` API across the pinned server/authentication matrix;
-  broader cluster/reconnect, credential, and Object Store cross-SDK matrices
+  broader cluster/reconnect and Object Store cross-SDK matrices
   remain later work.
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
