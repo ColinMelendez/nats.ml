@@ -749,8 +749,9 @@ These modules should be layered over `Connection.request` and
   endpoint and group registration, monitoring discovery, successful and
   service-error replies, handler failure isolation, statistics, service-local
   draining, and parent-connection usability. A companion live slice verifies
-  two instances sharing a queue group; live reconnect and cross-SDK acceptance
-  remain stability work.
+  two instances sharing a queue group, while the Core reconnect runner also
+  verifies Service endpoint and monitoring recovery; cross-SDK acceptance
+  remains stability work.
 
 JetStream consumers deserve particular care. Pull consumption is the default
 for new code because it makes demand and backpressure explicit; push consumers
@@ -815,8 +816,8 @@ through individual helper functions:
   listing, deletion and tombstones, watches, sealing, and cleanup. The same
   runner covers single-service monitoring, endpoint/group requests, service
   errors, failure isolation, statistics, and drain behavior, plus two-instance
-  queue-group routing; live reconnect and cross-SDK acceptance remain later
-  work.
+  queue-group routing, and Service endpoint/monitoring recovery through the
+  live reconnect runner; cross-SDK acceptance remains later work.
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 

@@ -105,8 +105,9 @@ reads, incremental Bytesrw transfers, digest/size/chunk verification,
 deletion, replacement cleanup, bucket policy projection and updates, and
 structured timeout and cleanup errors. The opt-in single-server runner now
 exercises single-service monitoring, endpoint/group requests, service errors,
-failure isolation, statistics, and service-local draining. It also
-exercises two-instance queue-group routing and aggregate worker statistics. It
+failure isolation, statistics, and service-local draining. It also exercises
+two-instance queue-group routing and aggregate worker statistics, verifies
+Service endpoint and monitoring recovery across a two-server reconnect, and
 exercises chunked content, metadata, links, listing, deletion and tombstones,
 watches, sealing, and cleanup. Push reconnect restoration is
 implemented through replayable subscription
@@ -902,7 +903,7 @@ subscriptions, queue groups, and request/reply.
 - Completed locally: query `$SRV.PING`, `$SRV.INFO`, and `$SRV.STATS` for all
   services, named services, or individual instances through bounded fan-out
   collection windows with typed JSON response decoding.
-- Remaining: live reconnect and cross-SDK acceptance.
+- Remaining: cross-SDK acceptance.
 
 ### Acceptance tests and gate G6
 
@@ -912,10 +913,11 @@ request/service-error replies, statistics, reconnect replay, service-local
 drain, and parent-connection isolation. The opt-in server runner now covers one
 live service's monitoring, endpoint/group requests, service errors, failure
 isolation, statistics, and drain behavior, plus two-instance queue-group
-routing. Run reconnect and cross-SDK tests against a real server before G6.
-Services may start after G2 and do not block JetStream, KV, or Object Store.
-Stabilize only after confirming that all service behavior composes with the
-Core connection ownership model.
+routing. The two-server reconnect runner also checks Service endpoint and
+monitoring recovery after active-server loss. Run cross-SDK tests against a
+real server before G6. Services may start after G2 and do not block JetStream,
+KV, or Object Store. Stabilize only after confirming that all service behavior
+composes with the Core connection ownership model.
 
 ## Phase 7 — Operational polish and optional integrations
 

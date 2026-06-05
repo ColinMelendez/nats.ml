@@ -63,7 +63,8 @@ default; set `COLIMA_DISK_GIB` only when a larger disk is actually needed. Set
 `NATS_SERVER_IMAGE` to try another server image. Cluster, TLS, and reconnect
 scenarios are split into focused runners; the server reconnect runner starts
 two single-node servers, kills the active one, checks pending-request failure,
-and checks subscription recovery.
+checks Core subscription recovery, and checks Service endpoint and monitoring
+recovery through the same failover.
 The cluster runner starts a three-node route mesh, connects only to the seed,
 checks the advertised client URLs, kills the seed, verifies recovery to a
 discovered peer, then kills that active peer and verifies recovery to the last
@@ -189,7 +190,7 @@ authentication; set the token or username/password variables described above
 to repeat the selected matrix with that authentication mode. It does not
 claim full server conformance: broader failure-injection matrices, JetStream
 interoperability, KV cross-SDK behavior, Object Store cross-SDK behavior, and
-Services reconnect and cross-SDK behavior remain separate acceptance work.
+Services cross-SDK behavior remains separate acceptance work.
 The cross-SDK reconnect runner
 starts three independent NATS servers, kills the first and then the second
 after flushed exchanges, and checks that the Go and OCaml clients recover twice,
