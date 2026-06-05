@@ -745,9 +745,11 @@ These modules should be layered over `Connection.request` and
   queue-backed workers, request and service-error replies, `$SRV.PING`,
   `$SRV.INFO`, and `$SRV.STATS` monitoring, replayable subscriptions, service
   statistics, service-local draining, and resource-free fan-out discovery with
-  typed response decoding. Services real-server acceptance and cross-SDK
-  acceptance across these layers remain stability work; the live Object Store
-  slice is still single-server only.
+  typed response decoding. The opt-in live-server runner covers one service's
+  endpoint and group registration, monitoring discovery, successful and
+  service-error replies, handler failure isolation, statistics, service-local
+  draining, and parent-connection usability; multi-instance queue balancing,
+  live reconnect, and cross-SDK acceptance remain stability work.
 
 JetStream consumers deserve particular care. Pull consumption is the default
 for new code because it makes demand and backpressure explicit; push consumers
@@ -779,8 +781,8 @@ operations consume server pagination and fail explicitly on an incomplete
 page. The management prefix is configurable for JetStream domains,
 while application subjects remain ordinary Core NATS subjects. KV, Object
 Store, and Services now compose over the same connection; their local
-discovery, lifecycle, and data-path behavior is implemented, while real-server
-and cross-SDK acceptance remains later stability work.
+discovery, lifecycle, and data-path behavior is implemented, while their wider
+real-server and cross-SDK acceptance remains later stability work.
 
 ## 6. Testing and interoperability
 
@@ -809,8 +811,10 @@ through individual helper functions:
   cleanup. The same opt-in runner also covers Key-Value bucket status, direct
   reads, CAS failures, history, tombstones, filtered keys, and a live watch.
   The same runner covers Object Store chunked content, metadata, links,
-  listing, deletion and tombstones, watches, sealing, and cleanup. Services
-  live coverage and cross-SDK acceptance remain later work.
+  listing, deletion and tombstones, watches, sealing, and cleanup. The same
+  runner covers single-service monitoring, endpoint/group requests, service
+  errors, failure isolation, statistics, and drain behavior; multi-instance
+  queue balancing, live reconnect, and cross-SDK acceptance remain later work.
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 
