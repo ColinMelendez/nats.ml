@@ -748,8 +748,9 @@ These modules should be layered over `Connection.request` and
   typed response decoding. The opt-in live-server runner covers one service's
   endpoint and group registration, monitoring discovery, successful and
   service-error replies, handler failure isolation, statistics, service-local
-  draining, and parent-connection usability; multi-instance queue balancing,
-  live reconnect, and cross-SDK acceptance remain stability work.
+  draining, and parent-connection usability. A companion live slice verifies
+  two instances sharing a queue group; live reconnect and cross-SDK acceptance
+  remain stability work.
 
 JetStream consumers deserve particular care. Pull consumption is the default
 for new code because it makes demand and backpressure explicit; push consumers
@@ -813,8 +814,9 @@ through individual helper functions:
   The same runner covers Object Store chunked content, metadata, links,
   listing, deletion and tombstones, watches, sealing, and cleanup. The same
   runner covers single-service monitoring, endpoint/group requests, service
-  errors, failure isolation, statistics, and drain behavior; multi-instance
-  queue balancing, live reconnect, and cross-SDK acceptance remain later work.
+  errors, failure isolation, statistics, and drain behavior, plus two-instance
+  queue-group routing; live reconnect and cross-SDK acceptance remain later
+  work.
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 

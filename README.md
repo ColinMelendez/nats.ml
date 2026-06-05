@@ -95,6 +95,8 @@ The server runner also executes a Services acceptance executable covering
 endpoint and group registration, `$SRV.PING`, `$SRV.INFO`, and `$SRV.STATS`
 discovery, successful and service-error replies, handler failure isolation,
 statistics, service-local drain, and parent-connection usability.
+It also checks two live service instances sharing a queue group for one-reply
+per-request routing and aggregate worker statistics.
 With `NATS_TEST_JETSTREAM=1`, it also runs a separate consumer acceptance
 executable covering durable and owned Push consumers, Ordered filtering, and
 Ordered consumer deletion/recreation against the live server, followed by a
@@ -187,8 +189,7 @@ authentication; set the token or username/password variables described above
 to repeat the selected matrix with that authentication mode. It does not
 claim full server conformance: broader failure-injection matrices, JetStream
 interoperability, KV cross-SDK behavior, Object Store cross-SDK behavior, and
-Services queue-balancing, reconnect, and cross-SDK behavior remain separate
-acceptance work.
+Services reconnect and cross-SDK behavior remain separate acceptance work.
 The cross-SDK reconnect runner
 starts three independent NATS servers, kills the first and then the second
 after flushed exchanges, and checks that the Go and OCaml clients recover twice,

@@ -44,6 +44,11 @@
  (libraries nats nats-eio eio eio_main))
 
 (executable
+ (name server_service_queue)
+ (modules server_service_queue)
+ (libraries nats nats-eio eio eio_main))
+
+(executable
  (name server_jetstream_cluster)
  (modules server_jetstream_cluster)
  (libraries nats nats-eio eio eio_main unix))
