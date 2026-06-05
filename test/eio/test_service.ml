@@ -450,6 +450,48 @@ let () =
               | Ok _ -> fail "malformed discovery response was accepted");
               expect_connection_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "discovery accepts stats without endpoint metadata" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw ~clock:_ ~trace connection ->
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Service.Discovery.stats
+                       ~timeout:Mtime.Span.(1 * ms)
+                       connection));
+              wait_for_trace_yields ~trace ~needle:"wrote \"SUB _INBOX.ocaml."
+                ~expected:1;
+              let inbox = subscribed_inbox ~trace ~occurrence:1 in
+              let sid = subscribed_sid ~trace ~occurrence:1 in
+              Eio.Promise.resolve response_u
+                (Ok
+                   (delivery_wire ~sid ~subject:inbox
+                      {|{"type":"io.nats.micro.v1.stats_response","name":"orders","id":"a","version":"1.2.3","metadata":{},"started":"2026-01-01T00:00:00.000000000Z","endpoints":[{"name":"created","subject":"created","queue_group":"q","num_requests":1,"num_errors":0,"last_error":"","processing_time":1,"average_processing_time":1}]}|}));
+              (match Eio.Promise.await result with
+              | Ok [ stats ] -> (
+                  equal string "orders" (Nats_eio.Service.Stats.name stats);
+                  match Nats_eio.Service.Stats.endpoints stats with
+                  | [ endpoint ] -> (
+                      match
+                        Nats_eio.Service.Stats.endpoint_metadata endpoint
+                      with
+                      | None -> ()
+                      | Some _ ->
+                          fail
+                            "absent endpoint metadata was not preserved as None"
+                      )
+                  | _ ->
+                      fail
+                        "stats response returned an unexpected endpoint count")
+              | Ok _ ->
+                  fail "stats response returned an unexpected service count"
+              | Error error ->
+                  fail (Format.asprintf "%a" Nats_eio.Service.Error.pp error));
+              expect_connection_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "monitoring, queue policy, request replies, and stats" (fun () ->
           let ping, ping_u = Eio.Promise.create () in
           let info_request, info_request_u = Eio.Promise.create () in

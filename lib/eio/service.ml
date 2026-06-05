@@ -769,7 +769,8 @@ let wire_endpoint_stats_codec =
   |> Jsont.Object.mem "subject" Jsont.string ~enc:(fun value -> value.subject)
   |> Jsont.Object.mem "queue_group" Jsont.string ~enc:(fun value ->
       value.queue_group)
-  |> Jsont.Object.mem "metadata" Jsont.json ~enc:(fun value -> value.metadata)
+  |> Jsont.Object.mem "metadata" Jsont.json ~dec_absent:(Jsont.Json.null ())
+       ~enc:(fun value -> value.metadata)
   |> Jsont.Object.mem "num_requests" Jsont.int64 ~enc:(fun value ->
       value.num_requests)
   |> Jsont.Object.mem "num_errors" Jsont.int64 ~enc:(fun value ->
