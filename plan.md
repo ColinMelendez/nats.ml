@@ -103,7 +103,9 @@ statistics, replayable subscriptions, and service-local draining. Object Store
 now has a first Eio slice with validated bucket management, direct metadata
 reads, incremental Bytesrw transfers, digest/size/chunk verification,
 deletion, replacement cleanup, bucket policy projection and updates, and
-structured timeout and cleanup errors. Push reconnect restoration is
+structured timeout and cleanup errors. The opt-in single-server runner now
+exercises chunked content, metadata, links, listing, deletion and tombstones,
+watches, sealing, and cleanup. Push reconnect restoration is
 implemented through replayable subscription
 recovery, including durable confirmation and ephemeral recreation. Advanced
 cluster failure scenarios and the broader cross-SDK acceptance matrix are
@@ -843,7 +845,8 @@ semantics before calling the feature complete.
   recursive link reads, deletion, replacement cleanup, snapshot/live watches,
   listing, sealing, typed bucket policy configuration and read-modify-write
   updates, and structured operation deadlines.
-- Remaining: real-server/cross-SDK acceptance.
+- Remaining: cross-SDK acceptance and the wider authenticated, TLS, and
+  cluster-failure matrix.
 - Keep transfer chunks incremental; never require a whole object as one
   `string`.
 - Preserve the metadata rollup as the commit point and define cancellation,
@@ -858,10 +861,14 @@ semantics before calling the feature complete.
 - The opt-in single-server runner covers bucket status, direct reads, CAS
   failures, history, tombstones, filtered keys, and a live watch against
   nats-server.
+- The same runner covers Object Store chunked content, metadata, links,
+  listing, deletion and tombstones, watches, sealing, and cleanup against
+  nats-server.
 - Large Object Store transfer, metadata, replacement/deletion ordering,
   interrupted-transfer cleanup, listing/watch boundaries, links, rename,
-  sealing, and bucket configuration updates are covered locally; server
-  interoperability remains acceptance work.
+  sealing, and bucket configuration updates are covered locally; cross-SDK
+  interoperability and the wider authenticated, TLS, and cluster-failure
+  matrix remain acceptance work.
 - No direct dependence by these modules on a private socket or private
   connection lifecycle.
 

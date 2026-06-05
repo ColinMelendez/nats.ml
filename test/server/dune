@@ -34,6 +34,11 @@
  (libraries nats nats-eio eio eio_main))
 
 (executable
+ (name server_object_store)
+ (modules server_object_store)
+ (libraries nats nats-eio eio eio_main bytesrw))
+
+(executable
  (name server_jetstream_cluster)
  (modules server_jetstream_cluster)
  (libraries nats nats-eio eio eio_main unix))

@@ -734,7 +734,9 @@ These modules should be layered over `Connection.request` and
   incremental Bytesrw transfers, digest/size/chunk verification, metadata
   updates and links, snapshot/live watches, listing, deletion, replacement
   cleanup, sealing, typed bucket policy, read-modify-write updates, and
-  structured operation deadlines.
+  structured operation deadlines. The opt-in live-server runner covers
+  chunked content, metadata, links, listing, deletion and tombstones, watches,
+  sealing, and cleanup.
 - `Nats_eio.Key_value` provides revisioned values, compare-and-set mutations,
   finite scans, history, and cancellable watches over the same connection. The
   opt-in live-server runner covers bucket status, direct reads, CAS failures,
@@ -743,8 +745,9 @@ These modules should be layered over `Connection.request` and
   queue-backed workers, request and service-error replies, `$SRV.PING`,
   `$SRV.INFO`, and `$SRV.STATS` monitoring, replayable subscriptions, service
   statistics, service-local draining, and resource-free fan-out discovery with
-  typed response decoding. Object Store and Services real-server acceptance,
-  plus cross-SDK acceptance across these layers, remain stability work.
+  typed response decoding. Services real-server acceptance and cross-SDK
+  acceptance across these layers remain stability work; the live Object Store
+  slice is still single-server only.
 
 JetStream consumers deserve particular care. Pull consumption is the default
 for new code because it makes demand and backpressure explicit; push consumers
@@ -805,9 +808,9 @@ through individual helper functions:
   idle-heartbeat behavior, timeout/expiry behavior, max-bytes errors, and
   cleanup. The same opt-in runner also covers Key-Value bucket status, direct
   reads, CAS failures, history, tombstones, filtered keys, and a live watch.
-  Object Store's local transfer, metadata lifecycle, watch/list, link, seal,
-  and bucket configuration-update behavior is implemented; live Object Store
-  and Services coverage plus cross-SDK acceptance remain later work.
+  The same runner covers Object Store chunked content, metadata, links,
+  listing, deletion and tombstones, watches, sealing, and cleanup. Services
+  live coverage and cross-SDK acceptance remain later work.
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 

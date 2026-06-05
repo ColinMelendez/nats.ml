@@ -95,7 +95,9 @@ With `NATS_TEST_JETSTREAM=1`, it also runs a separate consumer acceptance
 executable covering durable and owned Push consumers, Ordered filtering, and
 Ordered consumer deletion/recreation against the live server, followed by a
 Key-Value acceptance executable covering bucket status, direct reads, CAS
-mutations, history, tombstones, filtered keys, and a live watch.
+mutations, history, tombstones, filtered keys, and a live watch, followed by
+an Object Store acceptance executable covering chunked content, metadata,
+links, listing, deletion, watches, sealing, and cleanup.
 The server matrix runner repeats the server, cluster, and lame-duck runners for
 `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` (nine sequential cases by
 default); set `NATS_SERVER_IMAGES` or `NATS_SERVER_MATRIX_SCENARIOS` to select
@@ -180,7 +182,7 @@ sequentially; set `NATS_SERVER_IMAGES` to a comma-separated image list or
 authentication; set the token or username/password variables described above
 to repeat the selected matrix with that authentication mode. It does not
 claim full server conformance: broader failure-injection matrices, JetStream
-interoperability, KV cross-SDK behavior, and live or cross-SDK Object Store and
+interoperability, KV cross-SDK behavior, Object Store cross-SDK behavior, and
 Services coverage remain separate acceptance work. The cross-SDK reconnect runner
 starts three independent NATS servers, kills the first and then the second
 after flushed exchanges, and checks that the Go and OCaml clients recover twice,
