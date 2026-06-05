@@ -26,13 +26,15 @@ ocaml_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-jetstream-ocaml.XXXXXX")
 rm -f "$ready"
 prefix="ocaml.interop.jetstream.$$"
 stream="OCAML_INTEROP_JS_$$"
+bucket="OCAML_INTEROP_KV_$$"
 
 case "$jetstream_mode" in
   pull) peer_mode=jetstream ;;
   push) peer_mode=jetstream-push ;;
   ordered) peer_mode=jetstream-ordered ;;
+  kv) peer_mode=jetstream-kv ;;
   *)
-    echo "NATS_TEST_INTEROP_JETSTREAM_MODE must be pull, push, or ordered" >&2
+    echo "NATS_TEST_INTEROP_JETSTREAM_MODE must be pull, push, ordered, or kv" >&2
     exit 1
     ;;
 esac
@@ -184,9 +186,10 @@ else
 fi
 NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
   NATS_TEST_INTEROP_STREAM="$stream" \
+  NATS_TEST_INTEROP_BUCKET="$bucket" \
   nix develop .#integration -c nats-ocaml-interop-peer \
   --mode "$peer_mode" --server "$server" --prefix "$prefix" \
-  --stream "$stream" \
+  --stream "$stream" --bucket "$bucket" \
   --ready-file "$ready" >"$peer_log" 2>&1 &
 peer_pid=$!
 
@@ -212,9 +215,11 @@ case "$jetstream_mode" in
   pull) acceptance_executable=test/interop/interop_jetstream_acceptance.exe ;;
   push) acceptance_executable=test/interop/interop_jetstream_push_acceptance.exe ;;
   ordered) acceptance_executable=test/interop/interop_jetstream_ordered_acceptance.exe ;;
+  kv) acceptance_executable=test/interop/interop_key_value_acceptance.exe ;;
 esac
 if NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
-    NATS_TEST_INTEROP_STREAM="$stream" nix develop .#integration -c dune exec \
+    NATS_TEST_INTEROP_STREAM="$stream" NATS_TEST_INTEROP_BUCKET="$bucket" \
+    nix develop .#integration -c dune exec \
     "$acceptance_executable" >"$ocaml_log" 2>&1
 then
   :
