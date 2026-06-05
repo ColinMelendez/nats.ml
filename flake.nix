@@ -47,6 +47,7 @@
               base_packages
               ++ (with pkgs; [
                 openssl
+                nsc
                 shellcheck
                 interop_peer
               ])

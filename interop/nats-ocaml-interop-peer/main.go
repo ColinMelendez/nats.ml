@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nkeys"
 )
 
 const waitTimeout = 10 * time.Second
@@ -66,15 +68,52 @@ func connectOptions() ([]nats.Option, error) {
 	token, tokenSet := os.LookupEnv("NATS_TEST_TOKEN")
 	user, userSet := os.LookupEnv("NATS_TEST_USER")
 	password, passwordSet := os.LookupEnv("NATS_TEST_PASS")
+	nkeySeedFile, nkeySet := os.LookupEnv("NATS_TEST_NKEY_SEED_FILE")
+	userJWTFile, userJWTSet := os.LookupEnv("NATS_TEST_USER_JWT_FILE")
+	userSeedFile, userSeedSet := os.LookupEnv("NATS_TEST_USER_SEED_FILE")
 	var options []nats.Option
 	switch {
-	case tokenSet && (userSet || passwordSet):
-		return nil, errors.New("NATS_TEST_TOKEN cannot be combined with username/password")
+	case tokenSet && (userSet || passwordSet || nkeySet || userJWTSet || userSeedSet):
+		return nil, errors.New("NATS_TEST_TOKEN cannot be combined with another authentication mode")
+	case nkeySet && (userSet || passwordSet || userJWTSet || userSeedSet):
+		return nil, errors.New("NATS_TEST_NKEY_SEED_FILE cannot be combined with another authentication mode")
+	case (userJWTSet || userSeedSet) && (userSet || passwordSet || nkeySet):
+		return nil, errors.New("NATS_TEST_USER_JWT_FILE and NATS_TEST_USER_SEED_FILE cannot be combined with another authentication mode")
 	case tokenSet:
 		if token == "" {
 			return nil, errors.New("NATS_TEST_TOKEN must be non-empty")
 		}
 		options = append(options, nats.Token(token))
+	case nkeySet:
+		if nkeySeedFile == "" {
+			return nil, errors.New("NATS_TEST_NKEY_SEED_FILE must be non-empty")
+		}
+		seed, err := os.ReadFile(nkeySeedFile)
+		if err != nil {
+			return nil, fmt.Errorf("read NKey seed: %w", err)
+		}
+		keyPair, err := nkeys.FromSeed(bytes.TrimSpace(seed))
+		if err != nil {
+			return nil, fmt.Errorf("parse NKey seed: %w", err)
+		}
+		publicKey, err := keyPair.PublicKey()
+		if err != nil {
+			return nil, fmt.Errorf("derive NKey public key: %w", err)
+		}
+		options = append(options, nats.Nkey(publicKey, func(nonce []byte) ([]byte, error) {
+			return keyPair.Sign(nonce)
+		}))
+	case userJWTSet || userSeedSet:
+		if !userJWTSet || !userSeedSet || userJWTFile == "" || userSeedFile == "" {
+			return nil, errors.New("NATS_TEST_USER_JWT_FILE and NATS_TEST_USER_SEED_FILE must both be non-empty")
+		}
+		if _, err := os.ReadFile(userJWTFile); err != nil {
+			return nil, fmt.Errorf("read user JWT: %w", err)
+		}
+		if _, err := os.ReadFile(userSeedFile); err != nil {
+			return nil, fmt.Errorf("read user NKey seed: %w", err)
+		}
+		options = append(options, nats.UserCredentials(userJWTFile, userSeedFile))
 	case userSet || passwordSet:
 		if user == "" || password == "" {
 			return nil, errors.New("NATS_TEST_USER and NATS_TEST_PASS must both be non-empty")
@@ -86,6 +125,14 @@ func connectOptions() ([]nats.Option, error) {
 			return nil, errors.New("NATS_TEST_TLS_CA must be non-empty")
 		}
 		options = append(options, nats.RootCAs(caFile))
+	}
+	clientCert, clientCertSet := os.LookupEnv("NATS_TEST_TLS_CERT")
+	clientKey, clientKeySet := os.LookupEnv("NATS_TEST_TLS_KEY")
+	if clientCertSet || clientKeySet {
+		if clientCert == "" || clientKey == "" {
+			return nil, errors.New("NATS_TEST_TLS_CERT and NATS_TEST_TLS_KEY must both be non-empty")
+		}
+		options = append(options, nats.ClientCert(clientCert, clientKey))
 	}
 	return options, nil
 }

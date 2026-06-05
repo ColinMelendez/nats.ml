@@ -10,6 +10,8 @@
   x509
   domain-name
   mirage-crypto-rng.unix
+  mirage-crypto-ec
+  base64
   ptime))
 
 (executable

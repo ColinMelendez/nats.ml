@@ -14,6 +14,8 @@ fi
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
 tls_enabled=${NATS_TEST_TLS-0}
 interop_mode=${NATS_TEST_INTEROP_MODE:-core}
+interop_auth_mode=${NATS_TEST_INTEROP_AUTH_MODE-}
+negative_mode=${NATS_TEST_INTEROP_AUTH_NEGATIVE-}
 auth_user=${NATS_TEST_USER-}
 auth_pass=${NATS_TEST_PASS-}
 auth_token=${NATS_TEST_TOKEN-}
@@ -21,6 +23,7 @@ auth_mode=anonymous
 container=
 peer_pid=
 cert_dir=
+auth_dir=
 ready=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-ready.XXXXXX")
 peer_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-peer.XXXXXX")
 ocaml_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-ocaml.XXXXXX")
@@ -65,12 +68,15 @@ cleanup() {
   artifact_save_image "$status" "$image" nats-server.image
   artifact_save_text "$status" run.txt \
     "runner=interop" "mode=$interop_mode" "image=$image" "tls=$tls_enabled" \
-    "auth_mode=$auth_mode" "status=$status"
+    "auth_mode=$auth_mode" "negative=$negative_mode" "status=$status"
   if [ -n "$container" ]; then
     docker rm -f "$container" >/dev/null 2>&1 || true
   fi
   if [ -n "$cert_dir" ]; then
     rm -rf "$cert_dir"
+  fi
+  if [ -n "$auth_dir" ]; then
+    rm -rf "$auth_dir"
   fi
   rm -f "$ready" "$peer_log" "$ocaml_log"
 }
@@ -79,7 +85,22 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if [ -n "${NATS_TEST_TOKEN+x}" ]; then
+if [ -n "$interop_auth_mode" ]; then
+  case "$interop_auth_mode" in
+    nkey|jwt|mtls)
+      if [ -n "${NATS_TEST_TOKEN+x}" ] || [ -n "${NATS_TEST_USER+x}" ] || \
+          [ -n "${NATS_TEST_PASS+x}" ]; then
+        echo "NATS_TEST_INTEROP_AUTH_MODE cannot be combined with token or username/password credentials" >&2
+        exit 1
+      fi
+      auth_mode=$interop_auth_mode
+      ;;
+    *)
+      echo "NATS_TEST_INTEROP_AUTH_MODE must be nkey, jwt, or mtls" >&2
+      exit 1
+      ;;
+  esac
+elif [ -n "${NATS_TEST_TOKEN+x}" ]; then
   if [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
     echo "NATS_TEST_TOKEN cannot be combined with NATS_TEST_USER or NATS_TEST_PASS" >&2
     exit 1
@@ -109,6 +130,88 @@ elif [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
   auth_mode=user_pass
 fi
 
+prepare_nkey_material() {
+  auth_dir=$(mktemp -d "$script_dir/.nats-interop-auth.XXXXXX")
+  nsc init --all-dirs "$auth_dir" --dir "$auth_dir/store" --name interop \
+    >/dev/null
+  (
+    cd "$auth_dir/store/interop"
+    NKEYS_PATH="$auth_dir" NSC_CWD_ONLY=1 nsc generate config \
+      --mem-resolver --config-file "$auth_dir/nats.conf" >/dev/null
+    NKEYS_PATH="$auth_dir" NSC_CWD_ONLY=1 nsc generate creds \
+      --account interop --name interop --output-file "$auth_dir/user.creds" \
+      >/dev/null
+  )
+  awk '/BEGIN NATS USER JWT/{getline; print; exit}' "$auth_dir/user.creds" \
+    >"$auth_dir/user.jwt"
+  awk '/BEGIN USER NKEY SEED/{getline; print; exit}' "$auth_dir/user.creds" \
+    >"$auth_dir/user.seed"
+  jwt=$(cat "$auth_dir/user.jwt")
+  payload=$(printf '%s' "$jwt" | cut -d. -f2 | tr '_-' '/+')
+  case $((${#payload} % 4)) in
+    2) payload="$payload==" ;;
+    3) payload="$payload=" ;;
+  esac
+  nkey_public=$(printf '%s' "$payload" | openssl base64 -d -A |
+    sed -n 's/.*"sub":"\([^"]*\)".*/\1/p')
+  if [ -z "$nkey_public" ]; then
+    echo "could not extract the generated NKey public key" >&2
+    exit 1
+  fi
+  export NATS_TEST_NKEY_PUBLIC="$nkey_public"
+  if [ "$auth_mode" = jwt ]; then
+    unset NATS_TEST_NKEY_SEED_FILE
+    export NATS_TEST_USER_JWT_FILE="$auth_dir/user.jwt"
+    export NATS_TEST_USER_SEED_FILE="$auth_dir/user.seed"
+  else
+    export NATS_TEST_NKEY_SEED_FILE="$auth_dir/user.seed"
+    unset NATS_TEST_USER_JWT_FILE NATS_TEST_USER_SEED_FILE
+  fi
+  if [ "$negative_mode" = credentials ]; then
+    nsc generate nkey -u | sed -n '1p' >"$auth_dir/bad.seed"
+    if [ ! -s "$auth_dir/bad.seed" ]; then
+      echo "could not generate the invalid authentication seed" >&2
+      exit 1
+    fi
+  fi
+}
+
+if [ "$auth_mode" = nkey ] || [ "$auth_mode" = jwt ]; then
+  prepare_nkey_material
+else
+  unset NATS_TEST_NKEY_PUBLIC NATS_TEST_NKEY_SEED_FILE
+  unset NATS_TEST_USER_JWT_FILE NATS_TEST_USER_SEED_FILE
+fi
+
+if [ "$auth_mode" = mtls ]; then
+  tls_enabled=1
+fi
+
+case "$negative_mode" in
+  "")
+    ;;
+  credentials)
+    case "$auth_mode" in
+      nkey|jwt)
+        ;;
+      *)
+        echo "credential negatives require nkey or jwt authentication" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  certificate)
+    if [ "$auth_mode" != mtls ]; then
+      echo "certificate negatives require mtls authentication" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "NATS_TEST_INTEROP_AUTH_NEGATIVE must be credentials or certificate" >&2
+    exit 1
+    ;;
+esac
+
 run_server() {
   if [ "$tls_enabled" -eq 1 ]; then
     case "$auth_mode" in
@@ -124,6 +227,18 @@ run_server() {
         config_file="$script_dir/nats-server-auth-tls.conf"
         auth_options="--env NATS_TEST_USER --env NATS_TEST_PASS"
         ;;
+      nkey)
+        config_file="$script_dir/nats-server-nkey-tls.conf"
+        auth_options="--env NATS_TEST_NKEY_PUBLIC"
+        ;;
+      jwt)
+        config_file="$auth_dir/nats-tls.conf"
+        auth_options=
+        ;;
+      mtls)
+        config_file="$script_dir/nats-server-mtls.conf"
+        auth_options=
+        ;;
     esac
     # shellcheck disable=SC2086 # auth_options intentionally expands to option words.
     docker run --detach --rm $auth_options \
@@ -137,6 +252,15 @@ run_server() {
     docker run --detach --rm \
       --env NATS_TEST_USER --env NATS_TEST_PASS \
       --volume "$script_dir/nats-server-auth.conf:/etc/nats/nats.conf:ro" \
+      --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf
+  elif [ "$auth_mode" = nkey ]; then
+    docker run --detach --rm \
+      --env NATS_TEST_NKEY_PUBLIC \
+      --volume "$script_dir/nats-server-nkey.conf:/etc/nats/nats.conf:ro" \
+      --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf
+  elif [ "$auth_mode" = jwt ]; then
+    docker run --detach --rm \
+      --volume "$auth_dir/nats.conf:/etc/nats/nats.conf:ro" \
       --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf
   else
     docker run --detach --rm --publish 127.0.0.1::4222 "$image"
@@ -157,8 +281,34 @@ if [ "$tls_enabled" -eq 1 ]; then
     -CAcreateserial -out "$cert_dir/server.pem" -days 1 -sha256 \
     -copy_extensions copy >/dev/null
   export NATS_TEST_TLS_CA="$cert_dir/ca.pem"
+  if [ "$auth_mode" = mtls ]; then
+    openssl req -newkey rsa:2048 -nodes \
+      -keyout "$cert_dir/client-key.pem" -out "$cert_dir/client.csr" \
+      -subj "/CN=ocaml-nats-interop-client" \
+      -addext "extendedKeyUsage=clientAuth" >/dev/null
+    openssl x509 -req -in "$cert_dir/client.csr" \
+      -CA "$cert_dir/ca.pem" -CAkey "$cert_dir/ca-key.pem" \
+      -CAcreateserial -out "$cert_dir/client.pem" -days 1 -sha256 \
+      -copy_extensions copy >/dev/null
+    export NATS_TEST_TLS_CERT="$cert_dir/client.pem"
+    export NATS_TEST_TLS_KEY="$cert_dir/client-key.pem"
+  else
+    unset NATS_TEST_TLS_CERT NATS_TEST_TLS_KEY
+  fi
 else
-  unset NATS_TEST_TLS_CA
+  unset NATS_TEST_TLS_CA NATS_TEST_TLS_CERT NATS_TEST_TLS_KEY
+fi
+
+if [ "$auth_mode" = jwt ] && [ "$tls_enabled" -eq 1 ]; then
+  cp "$auth_dir/nats.conf" "$auth_dir/nats-tls.conf"
+  cat >>"$auth_dir/nats-tls.conf" <<'EOF'
+port: 4222
+
+tls {
+  cert_file: "/etc/nats/certs/server.pem"
+  key_file: "/etc/nats/certs/server-key.pem"
+}
+EOF
 fi
 
 container=$(run_server)
@@ -201,6 +351,95 @@ if [ "$tls_enabled" -eq 1 ]; then
 else
   server="nats://127.0.0.1:$port"
 fi
+
+run_negative_go() {
+  case "$negative_mode" in
+    credentials)
+      if [ "$auth_mode" = nkey ]; then
+        NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
+          NATS_TEST_NKEY_SEED_FILE="$auth_dir/bad.seed" \
+          nix develop .#integration -c nats-ocaml-interop-peer \
+          --server "$server" --prefix "$prefix" --ready-file "$ready" \
+          --mode "$interop_mode" >"$peer_log" 2>&1
+      else
+        NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
+          NATS_TEST_USER_SEED_FILE="$auth_dir/bad.seed" \
+          nix develop .#integration -c nats-ocaml-interop-peer \
+          --server "$server" --prefix "$prefix" --ready-file "$ready" \
+          --mode "$interop_mode" >"$peer_log" 2>&1
+      fi
+      ;;
+    certificate)
+      (
+        unset NATS_TEST_TLS_CERT NATS_TEST_TLS_KEY
+        NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
+          nix develop .#integration -c nats-ocaml-interop-peer \
+          --server "$server" --prefix "$prefix" --ready-file "$ready" \
+          --mode "$interop_mode" >"$peer_log" 2>&1
+      )
+      ;;
+  esac
+}
+
+run_negative_ocaml() {
+  case "$negative_mode" in
+    credentials)
+      if [ "$auth_mode" = nkey ]; then
+        NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
+          NATS_TEST_NKEY_SEED_FILE="$auth_dir/bad.seed" \
+          nix develop .#integration -c dune exec "$acceptance_executable" \
+          >"$ocaml_log" 2>&1
+      else
+        NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
+          NATS_TEST_USER_SEED_FILE="$auth_dir/bad.seed" \
+          nix develop .#integration -c dune exec "$acceptance_executable" \
+          >"$ocaml_log" 2>&1
+      fi
+      ;;
+    certificate)
+      (
+        unset NATS_TEST_TLS_CERT NATS_TEST_TLS_KEY
+        NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
+          nix develop .#integration -c dune exec "$acceptance_executable" \
+          >"$ocaml_log" 2>&1
+      )
+      ;;
+  esac
+}
+
+if [ -n "$negative_mode" ]; then
+  status=0
+  if run_negative_go; then
+    echo "Go peer unexpectedly connected with invalid $negative_mode material" >&2
+    status=1
+  fi
+  if run_negative_ocaml; then
+    echo "OCaml client unexpectedly connected with invalid $negative_mode material" >&2
+    status=1
+  fi
+  if [ "$negative_mode" = credentials ]; then
+    if ! grep -q "Authorization Violation" "$peer_log"; then
+      echo "Go peer did not report an authorization violation" >&2
+      status=1
+    fi
+    if ! grep -q "connection disconnected" "$ocaml_log"; then
+      echo "OCaml client did not report an authentication disconnect" >&2
+      status=1
+    fi
+  else
+    if ! grep -q "certificate required" "$peer_log"; then
+      echo "Go peer did not report a missing client certificate" >&2
+      status=1
+    fi
+    if ! grep -q "TLS error" "$ocaml_log"; then
+      echo "OCaml client did not report a TLS failure" >&2
+      status=1
+    fi
+  fi
+  cat "$ocaml_log" "$peer_log" >&2 || true
+  exit "$status"
+fi
+
 NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
   nix develop .#integration -c nats-ocaml-interop-peer \
   --server "$server" --prefix "$prefix" --ready-file "$ready" \

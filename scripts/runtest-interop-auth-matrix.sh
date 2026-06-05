@@ -1,0 +1,144 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH=; export CDPATH; cd "$(dirname "$0")" && pwd)
+cd "$script_dir/.."
+
+images=${NATS_SERVER_IMAGES:-nats:2.10.22,nats:2.12.15,nats:2.14.5}
+modes=${NATS_INTEROP_AUTH_MATRIX_MODES:-nkey,nkey-tls,jwt,jwt-tls,mtls}
+
+case "$modes" in
+  ""|,*|*,|*,,*)
+    echo "NATS_INTEROP_AUTH_MATRIX_MODES must contain nkey, nkey-tls, jwt, jwt-tls, and/or mtls with no empty entries" >&2
+    exit 1
+    ;;
+esac
+
+old_ifs=$IFS
+IFS=','
+# shellcheck disable=SC2086
+set -- $modes
+IFS=$old_ifs
+
+if [ "$#" -eq 0 ]; then
+  echo "NATS_INTEROP_AUTH_MATRIX_MODES must contain at least one mode" >&2
+  exit 1
+fi
+
+mode_list=
+for mode do
+  case "$mode" in
+    nkey|nkey-tls|jwt|jwt-tls|mtls)
+      ;;
+    *)
+      echo "unknown auth interop matrix mode: $mode" >&2
+      exit 1
+      ;;
+  esac
+  mode_list="$mode_list${mode_list:+ }$mode"
+done
+
+old_ifs=$IFS
+IFS=', 	'
+# shellcheck disable=SC2086
+set -- $images
+IFS=$old_ifs
+
+if [ "$#" -eq 0 ]; then
+  echo "NATS_SERVER_IMAGES must contain at least one image" >&2
+  exit 1
+fi
+
+run_case() {
+  run_image=$1
+  run_mode=$2
+  case "$run_mode" in
+    nkey)
+      (
+        unset NATS_TEST_TOKEN NATS_TEST_USER NATS_TEST_PASS NATS_TEST_TLS_CA
+        unset NATS_TEST_TLS_CERT NATS_TEST_TLS_KEY NATS_TEST_NKEY_SEED_FILE
+        unset NATS_TEST_NKEY_PUBLIC NATS_TEST_USER_JWT_FILE NATS_TEST_USER_SEED_FILE
+        unset NATS_TEST_INTEROP_AUTH_NEGATIVE
+        NATS_TEST_TLS=0 NATS_TEST_INTEROP_AUTH_MODE=nkey \
+          NATS_SERVER_IMAGE="$run_image" ./scripts/runtest-interop-auth.sh
+      )
+      ;;
+    nkey-tls)
+      (
+        unset NATS_TEST_TOKEN NATS_TEST_USER NATS_TEST_PASS NATS_TEST_TLS_CA
+        unset NATS_TEST_TLS_CERT NATS_TEST_TLS_KEY NATS_TEST_NKEY_SEED_FILE
+        unset NATS_TEST_NKEY_PUBLIC NATS_TEST_USER_JWT_FILE NATS_TEST_USER_SEED_FILE
+        unset NATS_TEST_INTEROP_AUTH_NEGATIVE
+        NATS_TEST_TLS=1 NATS_TEST_INTEROP_AUTH_MODE=nkey \
+          NATS_SERVER_IMAGE="$run_image" ./scripts/runtest-interop-auth.sh
+      )
+      ;;
+    jwt)
+      (
+        unset NATS_TEST_TOKEN NATS_TEST_USER NATS_TEST_PASS NATS_TEST_TLS_CA
+        unset NATS_TEST_TLS_CERT NATS_TEST_TLS_KEY NATS_TEST_NKEY_SEED_FILE
+        unset NATS_TEST_NKEY_PUBLIC NATS_TEST_USER_JWT_FILE NATS_TEST_USER_SEED_FILE
+        unset NATS_TEST_INTEROP_AUTH_NEGATIVE
+        NATS_TEST_TLS=0 NATS_TEST_INTEROP_AUTH_MODE=jwt \
+          NATS_SERVER_IMAGE="$run_image" ./scripts/runtest-interop-auth.sh
+      )
+      ;;
+    jwt-tls)
+      (
+        unset NATS_TEST_TOKEN NATS_TEST_USER NATS_TEST_PASS NATS_TEST_TLS_CA
+        unset NATS_TEST_TLS_CERT NATS_TEST_TLS_KEY NATS_TEST_NKEY_SEED_FILE
+        unset NATS_TEST_NKEY_PUBLIC NATS_TEST_USER_JWT_FILE NATS_TEST_USER_SEED_FILE
+        unset NATS_TEST_INTEROP_AUTH_NEGATIVE
+        NATS_TEST_TLS=1 NATS_TEST_INTEROP_AUTH_MODE=jwt \
+          NATS_SERVER_IMAGE="$run_image" ./scripts/runtest-interop-auth.sh
+      )
+      ;;
+    mtls)
+      (
+        unset NATS_TEST_TOKEN NATS_TEST_USER NATS_TEST_PASS NATS_TEST_TLS_CA
+        unset NATS_TEST_TLS_CERT NATS_TEST_TLS_KEY NATS_TEST_NKEY_SEED_FILE
+        unset NATS_TEST_NKEY_PUBLIC NATS_TEST_USER_JWT_FILE NATS_TEST_USER_SEED_FILE
+        unset NATS_TEST_INTEROP_AUTH_NEGATIVE
+        NATS_TEST_TLS=1 NATS_TEST_INTEROP_AUTH_MODE=mtls \
+          NATS_SERVER_IMAGE="$run_image" ./scripts/runtest-interop-auth.sh
+      )
+      ;;
+    *)
+      echo "unknown auth interop matrix mode: $run_mode" >&2
+      return 2
+      ;;
+  esac
+}
+
+status=0
+case_number=0
+echo "auth interop matrix images: $*"
+echo "auth interop matrix modes: $mode_list"
+for image do
+  if [ -z "$image" ]; then
+    echo "NATS_SERVER_IMAGES contains an empty image name" >&2
+    status=1
+    continue
+  fi
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    echo "auth interop matrix: pulling $image"
+    if ! docker pull "$image"; then
+      status=1
+      echo "auth interop matrix could not pull image: $image" >&2
+      continue
+    fi
+  fi
+  # shellcheck disable=SC2086
+  for mode in $mode_list; do
+    case_number=$((case_number + 1))
+    echo "auth interop matrix case $case_number: $image ($mode)"
+    if run_case "$image" "$mode"; then
+      :
+    else
+      status=1
+      echo "auth interop matrix case $case_number failed: $image ($mode)" >&2
+    fi
+  done
+done
+
+exit "$status"
