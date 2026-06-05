@@ -639,9 +639,9 @@ acceptance combinations. Server authentication here is orthogonal to TLS
 transport policy.
 The bounded version/scenario matrix and repeated failure cases for the
 documented Core contracts are now in place. Broader failure-injection campaigns
-and JetStream, Key-Value, Object Store, and Services interoperability remain
-later product-surface acceptance work rather than requirements of this Core
-gate.
+and JetStream, Key-Value, Object Store, and the remaining Services
+interoperability matrix remain later product-surface acceptance work rather
+than requirements of this Core gate.
 
 ### Gate G3 — Core completeness
 
@@ -903,7 +903,9 @@ subscriptions, queue groups, and request/reply.
 - Completed locally: query `$SRV.PING`, `$SRV.INFO`, and `$SRV.STATS` for all
   services, named services, or individual instances through bounded fan-out
   collection windows with typed JSON response decoding.
-- Remaining: cross-SDK acceptance.
+- Remaining: broader cross-SDK/version acceptance, including reconnect,
+  NKey/JWT, mTLS, and feature-family matrix coverage. The baseline official-Go
+  Service wire contract is covered by the dedicated Service interop runner.
 
 ### Acceptance tests and gate G6
 
@@ -914,8 +916,14 @@ drain, and parent-connection isolation. The opt-in server runner now covers one
 live service's monitoring, endpoint/group requests, service errors, failure
 isolation, statistics, and drain behavior, plus two-instance queue-group
 routing. The two-server reconnect runner also checks Service endpoint and
-monitoring recovery after active-server loss. Run cross-SDK tests against a
-real server before G6. Services may start after G2 and do not block JetStream,
+monitoring recovery after active-server loss. The dedicated Service interop
+runner now cross-checks the OCaml implementation against the official Go
+`nats.go` `micro` SDK for bidirectional endpoint requests, service-error
+headers, named INFO/STATS discovery, queue and metadata declarations, exact
+counters, and a request/reply completion barrier under anonymous, token,
+username/password, and server-required TLS modes. Run the remaining
+cross-SDK/version and failure-matrix tests against a real server before G6.
+Services may start after G2 and do not block JetStream,
 KV, or Object Store. Stabilize only after confirming that all service behavior
 composes with the Core connection ownership model.
 

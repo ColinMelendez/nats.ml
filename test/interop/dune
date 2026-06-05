@@ -13,6 +13,20 @@
   ptime))
 
 (executable
+ (name interop_service_acceptance)
+ (modules interop_service_acceptance)
+ (libraries
+  nats
+  nats-eio
+  eio
+  eio_main
+  tls
+  x509
+  domain-name
+  mirage-crypto-rng.unix
+  ptime))
+
+(executable
  (name interop_reconnect_acceptance)
  (modules interop_reconnect_acceptance)
  (libraries

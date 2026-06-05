@@ -750,8 +750,13 @@ These modules should be layered over `Connection.request` and
   service-error replies, handler failure isolation, statistics, service-local
   draining, and parent-connection usability. A companion live slice verifies
   two instances sharing a queue group, while the Core reconnect runner also
-  verifies Service endpoint and monitoring recovery; cross-SDK acceptance
-  remains stability work.
+  verifies Service endpoint and monitoring recovery. The dedicated Service
+  interop runner cross-checks the wire behavior with the official Go
+  `nats.go` `micro` SDK, including bidirectional requests, service-error
+  headers, named INFO/STATS discovery, queue/metadata declarations, exact
+  counters, and an ordered completion barrier under anonymous, token,
+  username/password, and server-required TLS modes; broader version,
+  credential, cluster, and feature-family matrices remain stability work.
 
 JetStream consumers deserve particular care. Pull consumption is the default
 for new code because it makes demand and backpressure explicit; push consumers
@@ -784,7 +789,8 @@ page. The management prefix is configurable for JetStream domains,
 while application subjects remain ordinary Core NATS subjects. KV, Object
 Store, and Services now compose over the same connection; their local
 discovery, lifecycle, and data-path behavior is implemented, while their wider
-real-server and cross-SDK acceptance remains later stability work.
+real-server and cross-SDK matrices remain later stability work beyond the
+baseline Service interop slice described above.
 
 ## 6. Testing and interoperability
 
@@ -817,7 +823,10 @@ through individual helper functions:
   runner covers single-service monitoring, endpoint/group requests, service
   errors, failure isolation, statistics, and drain behavior, plus two-instance
   queue-group routing, and Service endpoint/monitoring recovery through the
-  live reconnect runner; cross-SDK acceptance remains later work.
+  live reconnect runner. The dedicated Service interop runner also checks the
+  OCaml/official-Go wire contract for endpoint requests, service errors,
+  discovery, metadata, queue groups, statistics, and coordinated draining;
+  broader cross-SDK matrices remain later work.
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 

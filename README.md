@@ -40,6 +40,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-tls.sh
 ./scripts/runtest-lameduck.sh
 ./scripts/runtest-interop.sh
+./scripts/runtest-interop-service.sh
 ./scripts/runtest-interop-jetstream.sh
 ./scripts/runtest-interop-jetstream-matrix.sh
 ./scripts/runtest-interop-jetstream-reconnect.sh
@@ -190,7 +191,7 @@ authentication; set the token or username/password variables described above
 to repeat the selected matrix with that authentication mode. It does not
 claim full server conformance: broader failure-injection matrices, JetStream
 interoperability, KV cross-SDK behavior, Object Store cross-SDK behavior, and
-Services cross-SDK behavior remains separate acceptance work.
+the wider Services cross-SDK/version matrix remain separate acceptance work.
 The cross-SDK reconnect runner
 starts three independent NATS servers, kills the first and then the second
 after flushed exchanges, and checks that the Go and OCaml clients recover twice,
@@ -200,6 +201,13 @@ accepts the same anonymous, token, and username/password modes; set
 `NATS_TEST_TLS=1` to generate an ephemeral CA and run the same two-failover
 scenario through the server-required TLS upgrade; the CA and hostname policy
 are supplied to both SDKs.
+The Service interop runner starts the official Go `nats.go` `micro` peer beside
+the OCaml client and checks bidirectional endpoint requests, response headers,
+service-error headers, named INFO/STATS discovery, queue and metadata
+declarations, exact endpoint counters, and a request/reply completion barrier.
+It supports anonymous, token, username/password, and server-required TLS modes
+against the pinned `nats:2.10.22` image. The wider server-version, NKey/JWT,
+mTLS, reconnect, and feature-family cross-SDK matrices remain separate work.
 
 The first JetStream layer is available through `Nats_eio.Jetstream`: typed
 stream and consumer configuration and management, including consumer metadata,

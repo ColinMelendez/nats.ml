@@ -13,6 +13,7 @@ fi
 
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
 tls_enabled=${NATS_TEST_TLS-0}
+interop_mode=${NATS_TEST_INTEROP_MODE:-core}
 auth_user=${NATS_TEST_USER-}
 auth_pass=${NATS_TEST_PASS-}
 auth_token=${NATS_TEST_TOKEN-}
@@ -28,6 +29,19 @@ prefix="ocaml.interop.$$"
 # shellcheck disable=SC1091 # script_dir points at this file's directory.
 . "$script_dir/test-artifacts.sh"
 artifact_init interop "$$"
+
+case "$interop_mode" in
+  core)
+    acceptance_executable=test/interop/interop_acceptance.exe
+    ;;
+  service)
+    acceptance_executable=test/interop/interop_service_acceptance.exe
+    ;;
+  *)
+    echo "NATS_TEST_INTEROP_MODE must be core or service" >&2
+    exit 1
+    ;;
+esac
 
 case "$tls_enabled" in
   0|1) ;;
@@ -50,7 +64,7 @@ cleanup() {
   artifact_save_docker_state "$status" "$container" nats-server.state
   artifact_save_image "$status" "$image" nats-server.image
   artifact_save_text "$status" run.txt \
-    "runner=interop" "image=$image" "tls=$tls_enabled" \
+    "runner=interop" "mode=$interop_mode" "image=$image" "tls=$tls_enabled" \
     "auth_mode=$auth_mode" "status=$status"
   if [ -n "$container" ]; then
     docker rm -f "$container" >/dev/null 2>&1 || true
@@ -190,6 +204,7 @@ fi
 NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
   nix develop .#integration -c nats-ocaml-interop-peer \
   --server "$server" --prefix "$prefix" --ready-file "$ready" \
+  --mode "$interop_mode" \
   >"$peer_log" 2>&1 &
 peer_pid=$!
 
@@ -212,7 +227,7 @@ fi
 
 status=0
 if NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
-    nix develop .#integration -c dune exec test/interop/interop_acceptance.exe \
+    nix develop .#integration -c dune exec "$acceptance_executable" \
     >"$ocaml_log" 2>&1
 then
   :

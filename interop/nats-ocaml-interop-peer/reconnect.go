@@ -226,6 +226,8 @@ func runMode(config options) error {
 	switch config.mode {
 	case "core":
 		return runPeer(config)
+	case "service":
+		return runServicePeer(config)
 	case "reconnect":
 		if config.signal == "" {
 			return fmt.Errorf("signal-file is required in reconnect mode")

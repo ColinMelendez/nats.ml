@@ -33,7 +33,7 @@
             pname = "nats-ocaml-interop-peer";
             version = "0.1.0";
             src = ./interop/nats-ocaml-interop-peer;
-            vendorHash = "sha256-642/GXc90xVafKJ62minBhp6ZB7eULH9vvj1dQ2NqeM=";
+            vendorHash = "sha256-NO10dFxq96gpJzUWpDvbnIFmWGlkKA1P43d2j55xQNg=";
             ldflags = [ "-s" "-w" ];
           };
           shell_hook = ''
