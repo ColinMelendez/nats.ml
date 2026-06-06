@@ -10,6 +10,7 @@ import (
 
 const jetStreamReconnectWait = 90 * time.Second
 const jetStreamReconnectMessageWait = jetStreamReconnectWait
+const jetStreamAttemptWait = time.Second
 
 func waitJetStreamMessage(label string, messages <-chan *nats.Msg) (*nats.Msg, error) {
 	timer := time.NewTimer(jetStreamReconnectMessageWait)
@@ -56,7 +57,7 @@ func waitForJetStreamReconnectSignal(signal string) error {
 func retryJetStreamConsumerInfo(jetstream nats.JetStreamContext, stream, consumer string, deadline time.Time) (*nats.ConsumerInfo, error) {
 	var lastError error
 	for time.Now().Before(deadline) {
-		info, err := jetstream.ConsumerInfo(stream, consumer)
+		info, err := jetstream.ConsumerInfo(stream, consumer, nats.MaxWait(jetStreamAttemptWait))
 		if err == nil {
 			return info, nil
 		}
@@ -69,7 +70,7 @@ func retryJetStreamConsumerInfo(jetstream nats.JetStreamContext, stream, consume
 func retryJetStreamStreamInfo(jetstream nats.JetStreamContext, stream string, deadline time.Time) (*nats.StreamInfo, error) {
 	var lastError error
 	for time.Now().Before(deadline) {
-		info, err := jetstream.StreamInfo(stream)
+		info, err := jetstream.StreamInfo(stream, nats.MaxWait(jetStreamAttemptWait))
 		if err == nil {
 			return info, nil
 		}

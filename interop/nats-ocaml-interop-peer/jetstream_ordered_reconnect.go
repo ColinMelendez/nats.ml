@@ -57,7 +57,7 @@ func waitForJetStreamSurvivorFile(signal, path string) (string, error) {
 func retryJetStreamLeaderChange(jetstream nats.JetStreamContext, stream, previous string, deadline time.Time) (*nats.StreamInfo, error) {
 	var lastError error
 	for time.Now().Before(deadline) {
-		info, err := jetstream.StreamInfo(stream)
+		info, err := jetstream.StreamInfo(stream, nats.MaxWait(jetStreamAttemptWait))
 		if err == nil && info.Cluster != nil && info.Cluster.Leader != "" && info.Cluster.Leader != previous {
 			return info, nil
 		}
@@ -84,7 +84,7 @@ func markJetStreamInteropFailure(signal string, err error) error {
 func retryJetStreamStreamQuorum(jetstream nats.JetStreamContext, stream string, messages, lastSequence uint64, deadline time.Time) (*nats.StreamInfo, error) {
 	var lastError error
 	for time.Now().Before(deadline) {
-		info, err := jetstream.StreamInfo(stream)
+		info, err := jetstream.StreamInfo(stream, nats.MaxWait(jetStreamAttemptWait))
 		if err != nil {
 			lastError = err
 		} else if info.State.Msgs != messages || info.State.LastSeq != lastSequence {
@@ -117,12 +117,12 @@ func retryJetStreamStreamQuorum(jetstream nats.JetStreamContext, stream string, 
 func retryAddJetStreamStream(jetstream nats.JetStreamContext, config *nats.StreamConfig, deadline time.Time) (*nats.StreamInfo, error) {
 	var lastError error
 	for time.Now().Before(deadline) {
-		info, err := jetstream.AddStream(config)
+		info, err := jetstream.AddStream(config, nats.MaxWait(jetStreamAttemptWait))
 		if err == nil {
 			return info, nil
 		}
 		lastError = err
-		if info, infoError := jetstream.StreamInfo(config.Name); infoError == nil {
+		if info, infoError := jetstream.StreamInfo(config.Name, nats.MaxWait(jetStreamAttemptWait)); infoError == nil {
 			return info, nil
 		}
 		time.Sleep(250 * time.Millisecond)
@@ -385,6 +385,9 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	if _, err := retryJetStreamStreamQuorum(jetstream, config.stream, 3, 3, time.Now().Add(orderedReconnectWait)); err != nil {
 		return err
 	}
+	// A quorum response can precede the final consumer/meta placement events.
+	// Let those events settle before the harness removes the seed server.
+	time.Sleep(3 * time.Second)
 	if err := baselineMessage.Respond([]byte("go-baseline-ready")); err != nil {
 		return fmt.Errorf("respond baseline completion: %w", err)
 	}

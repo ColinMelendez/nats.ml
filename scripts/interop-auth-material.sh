@@ -10,6 +10,8 @@ prepare_nkey_material() {
     >/dev/null
   (
     cd "$auth_dir/store/interop" || exit
+    NKEYS_PATH="$auth_dir" NSC_CWD_ONLY=1 nsc edit account \
+      --name interop --js-enable 0 >/dev/null
     NKEYS_PATH="$auth_dir" NSC_CWD_ONLY=1 nsc generate config \
       --mem-resolver --config-file "$auth_dir/nats.conf" >/dev/null
     NKEYS_PATH="$auth_dir" NSC_CWD_ONLY=1 nsc generate creds \
@@ -57,7 +59,8 @@ prepare_tls_material() {
     -subj "/CN=ocaml-nats-interop-test-ca" >/dev/null
   openssl req -newkey rsa:2048 -nodes \
     -keyout "$cert_dir/server-key.pem" -out "$cert_dir/server.csr" \
-    -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost" \
+    -subj "/CN=localhost" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
     >/dev/null
   openssl x509 -req -in "$cert_dir/server.csr" \
     -CA "$cert_dir/ca.pem" -CAkey "$cert_dir/ca-key.pem" \

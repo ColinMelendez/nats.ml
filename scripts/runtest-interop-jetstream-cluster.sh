@@ -21,6 +21,14 @@ integration_command() {
 
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
 dune_build_dir=${NATS_TEST_DUNE_BUILD_DIR:-_build-interop}
+tls_enabled=${NATS_TEST_TLS-0}
+interop_auth_mode=${NATS_TEST_INTEROP_AUTH_MODE-}
+auth_user=${NATS_TEST_USER-}
+auth_pass=${NATS_TEST_PASS-}
+auth_token=${NATS_TEST_TOKEN-}
+auth_mode=anonymous
+cert_dir=
+auth_dir=
 if [ "${NATS_TEST_JS_INTEROP_DEBUG-}" = 1 ]; then
   server_debug_args="-DV"
 else
@@ -61,14 +69,61 @@ case "$failure_mode" in
     ;;
 esac
 
-if [ -n "${NATS_TEST_TOKEN+x}" ] || [ -n "${NATS_TEST_USER+x}" ] ||
-  [ -n "${NATS_TEST_PASS+x}" ] || [ -n "${NATS_TEST_TLS_CA+x}" ]; then
-  echo "JetStream cluster interop currently supports anonymous plaintext only" >&2
-  exit 1
+case "$tls_enabled" in
+  0|1) ;;
+  *)
+    echo "NATS_TEST_TLS must be 0 or 1" >&2
+    exit 1
+    ;;
+esac
+
+if [ -n "$interop_auth_mode" ]; then
+  case "$interop_auth_mode" in
+    nkey|jwt|mtls)
+      if [ -n "${NATS_TEST_TOKEN+x}" ] || [ -n "${NATS_TEST_USER+x}" ] ||
+        [ -n "${NATS_TEST_PASS+x}" ]; then
+        echo "NATS_TEST_INTEROP_AUTH_MODE cannot be combined with token or username/password credentials" >&2
+        exit 1
+      fi
+      auth_mode=$interop_auth_mode
+      ;;
+    *)
+      echo "NATS_TEST_INTEROP_AUTH_MODE must be nkey, jwt, or mtls" >&2
+      exit 1
+      ;;
+  esac
+elif [ -n "${NATS_TEST_TOKEN+x}" ]; then
+  if [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
+    echo "NATS_TEST_TOKEN cannot be combined with NATS_TEST_USER or NATS_TEST_PASS" >&2
+    exit 1
+  fi
+  if [ -z "$auth_token" ]; then
+    echo "NATS_TEST_TOKEN must be non-empty" >&2
+    exit 1
+  fi
+  case "$auth_token" in
+    *[!A-Za-z0-9_-]*)
+      echo "NATS_TEST_TOKEN may use only ASCII letters, digits, underscores, or hyphens" >&2
+      exit 1
+      ;;
+  esac
+  auth_mode=token
+elif [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
+  if [ -z "$auth_user" ] || [ -z "$auth_pass" ]; then
+    echo "NATS_TEST_USER and NATS_TEST_PASS must both be non-empty" >&2
+    exit 1
+  fi
+  case "$auth_user$auth_pass" in
+    *[!A-Za-z0-9_-]*)
+      echo "NATS_TEST_USER and NATS_TEST_PASS may use only ASCII letters, digits, underscores, or hyphens" >&2
+      exit 1
+      ;;
+  esac
+  auth_mode=user_pass
 fi
-if [ -n "${NATS_TEST_TLS+x}" ] && [ "${NATS_TEST_TLS}" != 0 ]; then
-  echo "JetStream cluster interop currently supports anonymous plaintext only" >&2
-  exit 1
+
+if [ "$auth_mode" = mtls ]; then
+  tls_enabled=1
 fi
 
 if ! integration_command dune build \
@@ -102,12 +157,46 @@ cleanup() {
     docker rm -f "$tertiary" >/dev/null 2>&1 || true
   fi
   docker network rm "$network" >/dev/null 2>&1 || true
+  if [ -n "$cert_dir" ]; then
+    rm -rf "$cert_dir"
+  fi
+  if [ -n "$auth_dir" ]; then
+    rm -rf "$auth_dir"
+  fi
   rm -f "$signal" "$signal.1" "$signal.failed" "$leader_file" \
     "$survivor_file" "$survivor_tmp" "$killed_file" "$kill_ready_file" \
     "$peer_ready" "$peer_log" "$ocaml_log" "$docker_error"
 }
 
 trap cleanup EXIT INT TERM
+
+# shellcheck disable=SC1091 # script_dir points at this file's directory.
+. "$script_dir/interop-auth-material.sh"
+
+if [ "$auth_mode" = nkey ] || [ "$auth_mode" = jwt ]; then
+  prepare_nkey_material
+else
+  unset NATS_TEST_NKEY_PUBLIC NATS_TEST_NKEY_SEED_FILE
+  unset NATS_TEST_USER_JWT_FILE NATS_TEST_USER_SEED_FILE
+fi
+
+if [ "$tls_enabled" -eq 1 ]; then
+  prepare_tls_material
+else
+  unset NATS_TEST_TLS_CA NATS_TEST_TLS_CERT NATS_TEST_TLS_KEY
+fi
+
+if [ "$auth_mode" = jwt ] && [ "$tls_enabled" -eq 1 ]; then
+  cp "$auth_dir/nats.conf" "$auth_dir/nats-tls.conf"
+  cat >>"$auth_dir/nats-tls.conf" <<'EOF'
+port: 4222
+
+tls {
+  cert_file: "/etc/nats/certs/server.pem"
+  key_file: "/etc/nats/certs/server-key.pem"
+}
+EOF
+fi
 
 cluster_base_port=${NATS_TEST_JS_INTEROP_CLUSTER_BASE_PORT:-16222}
 case "$cluster_base_port" in
@@ -123,33 +212,93 @@ fi
 secondary_port=$((cluster_base_port + 1))
 tertiary_port=$((cluster_base_port + 2))
 
+client_host=127.0.0.1
+
+endpoint_for_port() {
+  # NATS servers configured with TLS required advertise a plaintext INFO and
+  # upgrade the connection during the protocol handshake. Keep the nats
+  # scheme even for TLS cases so both clients exercise that negotiation.
+  printf 'nats://%s:%s' "$client_host" "$1"
+}
+
+host_port_for_port() {
+  printf '%s:%s' "$client_host" "$1"
+}
+
+run_server() {
+  node_name=$1
+  node_label=$2
+  client_port=$3
+  routes=$4
+  config_file=
+  docker_options=
+  server_options=
+  case "$auth_mode" in
+    anonymous)
+      if [ "$tls_enabled" -eq 1 ]; then
+        config_file="$script_dir/nats-server-tls.conf"
+      fi
+      ;;
+    token)
+      docker_options="--env NATS_TEST_TOKEN"
+      if [ "$tls_enabled" -eq 1 ]; then
+        config_file="$script_dir/nats-server-token-tls.conf"
+      else
+        server_options="--auth $auth_token"
+      fi
+      ;;
+    user_pass)
+      config_file="$script_dir/nats-server-auth.conf"
+      if [ "$tls_enabled" -eq 1 ]; then
+        config_file="$script_dir/nats-server-auth-tls.conf"
+      fi
+      docker_options="--env NATS_TEST_USER --env NATS_TEST_PASS"
+      ;;
+    nkey)
+      if [ "$tls_enabled" -eq 1 ]; then
+        config_file="$script_dir/nats-server-nkey-tls.conf"
+      else
+        config_file="$script_dir/nats-server-nkey.conf"
+      fi
+      docker_options="--env NATS_TEST_NKEY_PUBLIC"
+      ;;
+    jwt)
+      if [ "$tls_enabled" -eq 1 ]; then
+        config_file="$auth_dir/nats-tls.conf"
+      else
+        config_file="$auth_dir/nats.conf"
+      fi
+      ;;
+    mtls)
+      config_file="$script_dir/nats-server-mtls.conf"
+      ;;
+  esac
+  if [ -n "$config_file" ]; then
+    docker_options="$docker_options --volume $config_file:/etc/nats/nats.conf:ro"
+    server_options="$server_options -c /etc/nats/nats.conf"
+  fi
+  if [ -n "$cert_dir" ]; then
+    docker_options="$docker_options --volume $cert_dir:/etc/nats/certs:ro"
+  fi
+  # shellcheck disable=SC2086 # validated auth and fixed path options expand into words.
+  docker run --detach --name "$node_name" --network "$network" \
+    --hostname "$node_name" --tmpfs /data $docker_options \
+    --publish "127.0.0.1:$client_port:4222" "$image" $server_debug_args \
+    $server_options -js -sd /data -p 4222 -n "$node_label" \
+    -cluster nats://0.0.0.0:6222 \
+    -cluster_advertise "$node_name:6222" -routes "$routes" \
+    -cluster_name "$cluster_name" \
+    -client_advertise "$client_host:$client_port" 2>"$docker_error"
+}
+
 docker network create "$network" >/dev/null
 
-# shellcheck disable=SC2086 # the debug setting is a fixed optional flag.
-primary=$(docker run --detach --name "$primary_name" --network "$network" \
-  --hostname "$primary_name" --tmpfs /data \
-  --publish "127.0.0.1:$cluster_base_port:4222" "$image" $server_debug_args \
-  -js -sd /data -p 4222 -n cluster-a -cluster nats://0.0.0.0:6222 \
-  -cluster_advertise "$primary_name:6222" \
-  -routes "nats://$secondary_name:6222,nats://$tertiary_name:6222" \
-  -cluster_name "$cluster_name" \
-  -client_advertise "127.0.0.1:$cluster_base_port" 2>"$docker_error")
-secondary=$(docker run --detach --name "$secondary_name" --network "$network" \
-  --hostname "$secondary_name" --tmpfs /data \
-  --publish "127.0.0.1:$secondary_port:4222" "$image" $server_debug_args \
-  -js -sd /data -p 4222 -n cluster-b -cluster nats://0.0.0.0:6222 \
-  -cluster_advertise "$secondary_name:6222" \
-  -routes "nats://$primary_name:6222,nats://$tertiary_name:6222" \
-  -cluster_name "$cluster_name" \
-  -client_advertise "127.0.0.1:$secondary_port" 2>"$docker_error")
-tertiary=$(docker run --detach --name "$tertiary_name" --network "$network" \
-  --hostname "$tertiary_name" --tmpfs /data \
-  --publish "127.0.0.1:$tertiary_port:4222" "$image" $server_debug_args \
-  -js -sd /data -p 4222 -n cluster-c -cluster nats://0.0.0.0:6222 \
-  -cluster_advertise "$tertiary_name:6222" \
-  -routes "nats://$primary_name:6222,nats://$secondary_name:6222" \
-  -cluster_name "$cluster_name" \
-  -client_advertise "127.0.0.1:$tertiary_port" 2>"$docker_error")
+primary=$(run_server "$primary_name" cluster-a "$cluster_base_port" \
+  "nats://$secondary_name:6222,nats://$tertiary_name:6222")
+secondary=$(run_server "$secondary_name" cluster-b "$secondary_port" \
+  "nats://$primary_name:6222")
+tertiary=$(run_server "$tertiary_name" cluster-c "$tertiary_port" \
+  "nats://$primary_name:6222,nats://$secondary_name:6222")
 
 wait_until_ready() {
   container=$1
@@ -207,13 +356,13 @@ if [ "$failure_mode" = leader ]; then
     done
     case "$leader" in
       cluster-a)
-        survivor="nats://127.0.0.1:$secondary_port,nats://127.0.0.1:$tertiary_port"
+        survivor="$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$tertiary_port")"
         ;;
       cluster-b)
-        survivor="nats://127.0.0.1:$cluster_base_port,nats://127.0.0.1:$tertiary_port"
+        survivor="$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$tertiary_port")"
         ;;
       cluster-c)
-        survivor="nats://127.0.0.1:$cluster_base_port,nats://127.0.0.1:$secondary_port"
+        survivor="$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$secondary_port")"
         ;;
       *)
         touch "$signal.failed"
@@ -270,15 +419,15 @@ watcher=$!
 
 if [ "$failure_mode" = leader ]; then
   peer_mode=jetstream-ordered-leader-failover
-  peer_server="nats://127.0.0.1:$secondary_port,nats://127.0.0.1:$cluster_base_port,nats://127.0.0.1:$tertiary_port"
+  peer_server="$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$tertiary_port")"
 else
   peer_mode=jetstream-ordered-reconnect
-  peer_server="nats://127.0.0.1:$cluster_base_port,nats://127.0.0.1:$secondary_port,nats://127.0.0.1:$tertiary_port"
+  peer_server="$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$tertiary_port")"
 fi
 
 if [ "$failure_mode" = leader ]; then
   integration_command env \
-    NATS_TEST_SERVER="nats://127.0.0.1:$cluster_base_port" \
+    NATS_TEST_SERVER="$(endpoint_for_port "$cluster_base_port")" \
     NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" \
     NATS_TEST_INTEROP_SIGNAL="$signal" \
@@ -290,7 +439,7 @@ if [ "$failure_mode" = leader ]; then
     --survivor-file "$survivor_file" >"$peer_log" 2>&1 &
 else
   integration_command env \
-    NATS_TEST_SERVER="nats://127.0.0.1:$cluster_base_port" \
+    NATS_TEST_SERVER="$(endpoint_for_port "$cluster_base_port")" \
     NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" \
     NATS_TEST_INTEROP_SIGNAL="$signal" \
@@ -330,18 +479,18 @@ if [ "$failure_mode" = leader ] && [ ! -e "$survivor_file" ]; then
   exit 1
 fi
 
-ocaml_server="nats://127.0.0.1:$cluster_base_port"
+ocaml_server="$(endpoint_for_port "$cluster_base_port")"
 ocaml_initial_name=cluster-a
 ocaml_recovered_names=cluster-b,cluster-c
-ocaml_discovered="127.0.0.1:$secondary_port,127.0.0.1:$tertiary_port"
+ocaml_discovered="$(host_port_for_port "$secondary_port"),$(host_port_for_port "$tertiary_port")"
 if [ "$failure_mode" = leader ]; then
   leader=$(sed -n '1p' "$leader_file")
   case "$leader" in
     cluster-a)
-      ocaml_server="nats://127.0.0.1:$secondary_port"
+      ocaml_server="$(endpoint_for_port "$secondary_port")"
       ocaml_initial_name=cluster-b
       ocaml_recovered_names=cluster-a,cluster-c
-      ocaml_discovered="127.0.0.1:$cluster_base_port,127.0.0.1:$tertiary_port"
+      ocaml_discovered="$(host_port_for_port "$cluster_base_port"),$(host_port_for_port "$tertiary_port")"
       ;;
     cluster-b|cluster-c) ;;
     *)

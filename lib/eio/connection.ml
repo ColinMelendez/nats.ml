@@ -1025,7 +1025,9 @@ let handle_event t event =
   match event with
   | Nats.Event.Info info ->
       let default_scheme =
-        if t.tls_active then Nats.Endpoint.Tls else Nats.Endpoint.Nats
+        match t.current_endpoint with
+        | Some endpoint -> Nats.Endpoint.scheme endpoint
+        | None -> if t.tls_active then Nats.Endpoint.Tls else Nats.Endpoint.Nats
       in
       let endpoints =
         List.filter_map
