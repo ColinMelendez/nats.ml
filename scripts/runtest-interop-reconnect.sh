@@ -13,6 +13,7 @@ fi
 
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
 tls_enabled=${NATS_TEST_TLS-0}
+interop_auth_mode=${NATS_TEST_INTEROP_AUTH_MODE-}
 auth_user=${NATS_TEST_USER-}
 auth_pass=${NATS_TEST_PASS-}
 auth_token=${NATS_TEST_TOKEN-}
@@ -23,6 +24,7 @@ tertiary=
 watcher=
 peer_pid=
 cert_dir=
+auth_dir=
 signal=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-reconnect.XXXXXX")
 peer_signal="$signal.peer"
 peer_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-reconnect-peer.XXXXXX")
@@ -38,7 +40,22 @@ case "$tls_enabled" in
     ;;
 esac
 
-if [ -n "${NATS_TEST_TOKEN+x}" ]; then
+if [ -n "$interop_auth_mode" ]; then
+  case "$interop_auth_mode" in
+    nkey|jwt|mtls)
+      if [ -n "${NATS_TEST_TOKEN+x}" ] || [ -n "${NATS_TEST_USER+x}" ] ||
+        [ -n "${NATS_TEST_PASS+x}" ]; then
+        echo "NATS_TEST_INTEROP_AUTH_MODE cannot be combined with token or username/password credentials" >&2
+        exit 1
+      fi
+      auth_mode=$interop_auth_mode
+      ;;
+    *)
+      echo "NATS_TEST_INTEROP_AUTH_MODE must be nkey, jwt, or mtls" >&2
+      exit 1
+      ;;
+  esac
+elif [ -n "${NATS_TEST_TOKEN+x}" ]; then
   if [ -n "${NATS_TEST_USER+x}" ] || [ -n "${NATS_TEST_PASS+x}" ]; then
     echo "NATS_TEST_TOKEN cannot be combined with NATS_TEST_USER or NATS_TEST_PASS" >&2
     exit 1
@@ -89,10 +106,27 @@ cleanup() {
   if [ -n "$cert_dir" ]; then
     rm -rf "$cert_dir"
   fi
+  if [ -n "$auth_dir" ]; then
+    rm -rf "$auth_dir"
+  fi
   rm -f "$signal" "$signal.1" "$signal.2" "$peer_signal" "$peer_log" "$ocaml_log"
 }
 
 trap 'cleanup' EXIT INT TERM
+
+# shellcheck disable=SC1091 # script_dir points at this file's directory.
+. "$script_dir/interop-auth-material.sh"
+
+if [ "$auth_mode" = nkey ] || [ "$auth_mode" = jwt ]; then
+  prepare_nkey_material
+else
+  unset NATS_TEST_NKEY_PUBLIC NATS_TEST_NKEY_SEED_FILE
+  unset NATS_TEST_USER_JWT_FILE NATS_TEST_USER_SEED_FILE
+fi
+
+if [ "$auth_mode" = mtls ]; then
+  tls_enabled=1
+fi
 
 wait_for_port() {
   container=$1
@@ -140,6 +174,18 @@ run_server() {
         config_file="$script_dir/nats-server-auth-tls.conf"
         auth_options="--env NATS_TEST_USER --env NATS_TEST_PASS"
         ;;
+      nkey)
+        config_file="$script_dir/nats-server-nkey-tls.conf"
+        auth_options="--env NATS_TEST_NKEY_PUBLIC"
+        ;;
+      jwt)
+        config_file="$auth_dir/nats-tls.conf"
+        auth_options=
+        ;;
+      mtls)
+        config_file="$script_dir/nats-server-mtls.conf"
+        auth_options=
+        ;;
     esac
     # shellcheck disable=SC2086 # auth_options intentionally expands to option words.
     docker run --detach --rm $auth_options \
@@ -153,25 +199,36 @@ run_server() {
       --env NATS_TEST_USER --env NATS_TEST_PASS \
       --volume "$script_dir/nats-server-auth.conf:/etc/nats/nats.conf:ro" \
       --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf
+  elif [ "$auth_mode" = nkey ]; then
+    docker run --detach --rm \
+      --env NATS_TEST_NKEY_PUBLIC \
+      --volume "$script_dir/nats-server-nkey.conf:/etc/nats/nats.conf:ro" \
+      --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf
+  elif [ "$auth_mode" = jwt ]; then
+    docker run --detach --rm \
+      --volume "$auth_dir/nats.conf:/etc/nats/nats.conf:ro" \
+      --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf
   else
     docker run --detach --rm --publish 127.0.0.1::4222 "$image"
   fi
 }
 
 if [ "$tls_enabled" -eq 1 ]; then
-  cert_dir=$(mktemp -d "$script_dir/.nats-interop-tls.XXXXXX")
-  openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \
-    -keyout "$cert_dir/ca-key.pem" -out "$cert_dir/ca.pem" \
-    -subj "/CN=ocaml-nats-interop-test-ca" >/dev/null
-  openssl req -newkey rsa:2048 -nodes \
-    -keyout "$cert_dir/server-key.pem" -out "$cert_dir/server.csr" \
-    -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost" \
-    >/dev/null
-  openssl x509 -req -in "$cert_dir/server.csr" \
-    -CA "$cert_dir/ca.pem" -CAkey "$cert_dir/ca-key.pem" \
-    -CAcreateserial -out "$cert_dir/server.pem" -days 1 -sha256 \
-    -copy_extensions copy >/dev/null
-  export NATS_TEST_TLS_CA="$cert_dir/ca.pem"
+  prepare_tls_material
+else
+  unset NATS_TEST_TLS_CA NATS_TEST_TLS_CERT NATS_TEST_TLS_KEY
+fi
+
+if [ "$auth_mode" = jwt ] && [ "$tls_enabled" -eq 1 ]; then
+  cp "$auth_dir/nats.conf" "$auth_dir/nats-tls.conf"
+  cat >>"$auth_dir/nats-tls.conf" <<'EOF'
+port: 4222
+
+tls {
+  cert_file: "/etc/nats/certs/server.pem"
+  key_file: "/etc/nats/certs/server-key.pem"
+}
+EOF
 fi
 
 primary=$(run_server)

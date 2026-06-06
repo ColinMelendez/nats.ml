@@ -1,6 +1,6 @@
 (executable
  (name interop_acceptance)
- (modules interop_acceptance)
+ (modules interop_auth interop_acceptance)
  (libraries
   nats
   nats-eio
@@ -30,7 +30,7 @@
 
 (executable
  (name interop_reconnect_acceptance)
- (modules interop_reconnect_acceptance)
+ (modules interop_auth interop_reconnect_acceptance)
  (libraries
   nats
   nats-eio
@@ -40,6 +40,8 @@
   x509
   domain-name
   mirage-crypto-rng.unix
+  mirage-crypto-ec
+  base64
   ptime))
 
 (executable

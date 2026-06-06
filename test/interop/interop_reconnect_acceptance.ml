@@ -25,43 +25,6 @@ let endpoints () =
       | first :: second :: rest -> List.map endpoint (first :: second :: rest)
       | _ -> failf "NATS_TEST_SERVERS must contain at least two endpoints")
 
-let auth () =
-  match
-    ( Sys.getenv_opt "NATS_TEST_USER",
-      Sys.getenv_opt "NATS_TEST_PASS",
-      Sys.getenv_opt "NATS_TEST_TOKEN" )
-  with
-  | None, None, None -> None
-  | None, None, Some token -> Some (Nats.Auth.token token)
-  | Some user, Some pass, None -> Some (Nats.Auth.user_pass ~user ~pass)
-  | _ ->
-      failf
-        "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
-
-let read_file path = In_channel.with_open_bin path In_channel.input_all
-
-let tls_config () =
-  match Sys.getenv_opt "NATS_TEST_TLS_CA" with
-  | None -> None
-  | Some ca_file -> (
-      let ca =
-        match X509.Certificate.decode_pem (read_file ca_file) with
-        | Ok value -> value
-        | Error (`Msg message) ->
-            failf "invalid test CA certificate: %s" message
-      in
-      let authenticator =
-        X509.Authenticator.chain_of_trust
-          ~time:(fun () -> Some (Ptime_clock.now ()))
-          [ ca ]
-      in
-      let peer_name =
-        Domain_name.host_exn (Domain_name.of_string_exn "localhost")
-      in
-      match Tls.Config.client ~authenticator ~peer_name () with
-      | Ok value -> Some value
-      | Error (`Msg message) -> failf "TLS client configuration: %s" message)
-
 let next_event ~clock ~timeout events =
   let seconds = Mtime.Span.to_float_ns timeout /. 1e9 in
   match
@@ -177,8 +140,8 @@ let run env =
     | Some value -> value
     | None -> failf "NATS_TEST_INTEROP_PREFIX is required"
   in
-  let auth = auth () in
-  let tls = tls_config () in
+  let auth = Interop_auth.auth () in
+  let tls = Interop_auth.tls_config () in
   let config =
     expect_ok "connection config"
       (Nats_eio.Connection.Config.v ?auth ?tls ~max_reconnect_attempts:(Some 20)
