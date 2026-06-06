@@ -35,7 +35,7 @@ let base32_value = function
 let decode_nkey_seed value =
   let value = String.trim value in
   let length = String.length value in
-  let raw = Bytes.create ((length * 5) / 8) in
+  let raw = Bytes.create (length * 5 / 8) in
   let buffer = ref 0 in
   let bits = ref 0 in
   let output = ref 0 in
@@ -55,7 +55,9 @@ let decode_nkey_seed value =
   let first = Char.code (Bytes.get raw 0) in
   let second = Char.code (Bytes.get raw 1) in
   let seed_prefix = first land 0xf8 in
-  let public_prefix = ((first land 0x07) lsl 5) lor ((second land 0xf8) lsr 3) in
+  let public_prefix =
+    ((first land 0x07) lsl 5) lor ((second land 0xf8) lsr 3)
+  in
   if seed_prefix <> 0x90 || public_prefix <> 0xa0 then
     failf "NKey seed did not contain a user seed prefix";
   Bytes.sub_string raw 2 32
@@ -104,9 +106,7 @@ let auth () =
              (Mirage_crypto_ec.Ed25519.sign ~key nonce))
       in
       Some (Nats.Auth.jwt ~jwt ~nkey ~sign)
-  | _ ->
-      failf
-        "set exactly one supported authentication credential set"
+  | _ -> failf "set exactly one supported authentication credential set"
 
 let tls_certificates () =
   match
@@ -115,10 +115,11 @@ let tls_certificates () =
   | None, None -> None
   | Some certificate_file, Some key_file ->
       let certificates =
-        match X509.Certificate.decode_pem_multiple (read_file certificate_file) with
+        match
+          X509.Certificate.decode_pem_multiple (read_file certificate_file)
+        with
         | Ok value -> value
-        | Error (`Msg message) ->
-            failf "invalid client certificate: %s" message
+        | Error (`Msg message) -> failf "invalid client certificate: %s" message
       in
       let key =
         match X509.Private_key.decode_pem (read_file key_file) with
@@ -126,7 +127,8 @@ let tls_certificates () =
         | Error (`Msg message) -> failf "invalid client key: %s" message
       in
       Some (`Single (certificates, key))
-  | _ -> failf "NATS_TEST_TLS_CERT and NATS_TEST_TLS_KEY must be supplied together"
+  | _ ->
+      failf "NATS_TEST_TLS_CERT and NATS_TEST_TLS_KEY must be supplied together"
 
 let tls_config () =
   match Sys.getenv_opt "NATS_TEST_TLS_CA" with
