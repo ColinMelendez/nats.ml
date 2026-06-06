@@ -23,8 +23,11 @@ let leader_failover () =
   match Sys.getenv_opt "NATS_TEST_JS_CLUSTER_FAILURE_MODE" with
   | None | Some "seed" -> false
   | Some "leader" -> true
+  | Some "restart" -> false
   | Some value ->
-      failf "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed or leader, got %S"
+      failf
+        "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, leader, or restart, \
+         got %S"
         value
 
 let endpoint () =
@@ -223,6 +226,11 @@ let run env =
   let stream_name = required "NATS_TEST_INTEROP_STREAM" in
   let signal = required "NATS_TEST_INTEROP_SIGNAL" in
   let leader_failover = leader_failover () in
+  let restart =
+    match Sys.getenv_opt "NATS_TEST_JS_CLUSTER_FAILURE_MODE" with
+    | Some "restart" -> true
+    | None | Some _ -> false
+  in
   let failure_file = signal ^ ".failed" in
   let initial_name = required "NATS_TEST_JS_CLUSTER_INITIAL_NAME" in
   let recovered_names =
@@ -339,10 +347,11 @@ let run env =
             in
             expect_reconnected ~clock ~timeout:reconnect_timeout ~failure_file
               events;
-            match Nats.Info.server_name recovered_info with
+            (match Nats.Info.server_name recovered_info with
             | Some value when not (String.equal value initial_name) -> ()
             | Some value -> failf "reconnected to killed server %S" value
             | None -> failf "reconnect INFO had no server name");
+            if restart then touch (signal ^ ".ocaml-reconnected"));
           let after_result, after_result_u = Eio.Promise.create () in
           Eio.Fiber.fork ~sw (fun () ->
               Eio.Promise.resolve after_result_u

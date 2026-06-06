@@ -43,6 +43,9 @@ tertiary_name="$network-c"
 primary=
 secondary=
 tertiary=
+primary_data_volume=
+secondary_data_volume=
+tertiary_data_volume=
 peer_pid=
 watcher=
 resolver=
@@ -55,19 +58,28 @@ rm -f "$signal"
 prefix="ocaml.interop.jetstream.cluster.$$"
 stream="OCAML_INTEROP_JS_CLUSTER_$$"
 failure_mode=${NATS_TEST_JS_CLUSTER_FAILURE_MODE:-seed}
+volume_suffix=${signal##*/}
 leader_file="$signal.leader"
 survivor_file="$signal.survivor"
 survivor_tmp="$survivor_file.tmp"
 killed_file="$signal.killed"
 kill_ready_file="$signal.kill-ready"
+go_reconnected_file="$signal.go-reconnected"
+ocaml_reconnected_file="$signal.ocaml-reconnected"
 
 case "$failure_mode" in
-  seed|leader) ;;
+  seed|leader|restart) ;;
   *)
-    echo "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed or leader" >&2
+    echo "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, leader, or restart" >&2
     exit 1
     ;;
 esac
+
+if [ "$failure_mode" = restart ]; then
+  primary_data_volume="$primary_name-data-$volume_suffix"
+  secondary_data_volume="$secondary_name-data-$volume_suffix"
+  tertiary_data_volume="$tertiary_name-data-$volume_suffix"
+fi
 
 case "$tls_enabled" in
   0|1) ;;
@@ -156,6 +168,15 @@ cleanup() {
   if [ -n "$tertiary" ]; then
     docker rm -f "$tertiary" >/dev/null 2>&1 || true
   fi
+  if [ -n "$primary_data_volume" ]; then
+    docker volume rm "$primary_data_volume" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$secondary_data_volume" ]; then
+    docker volume rm "$secondary_data_volume" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$tertiary_data_volume" ]; then
+    docker volume rm "$tertiary_data_volume" >/dev/null 2>&1 || true
+  fi
   docker network rm "$network" >/dev/null 2>&1 || true
   if [ -n "$cert_dir" ]; then
     rm -rf "$cert_dir"
@@ -165,7 +186,8 @@ cleanup() {
   fi
   rm -f "$signal" "$signal.1" "$signal.failed" "$leader_file" \
     "$survivor_file" "$survivor_tmp" "$killed_file" "$kill_ready_file" \
-    "$peer_ready" "$peer_log" "$ocaml_log" "$docker_error"
+    "$go_reconnected_file" "$ocaml_reconnected_file" "$peer_ready" \
+    "$peer_log" "$ocaml_log" "$docker_error"
 }
 
 trap cleanup EXIT INT TERM
@@ -230,6 +252,11 @@ run_server() {
   node_label=$2
   client_port=$3
   routes=$4
+  data_option="--tmpfs /data"
+  if [ "$failure_mode" = restart ]; then
+    data_volume="$node_name-data-$volume_suffix"
+    data_option="--volume $data_volume:/data"
+  fi
   config_file=
   docker_options=
   server_options=
@@ -282,7 +309,7 @@ run_server() {
   fi
   # shellcheck disable=SC2086 # validated auth and fixed path options expand into words.
   docker run --detach --name "$node_name" --network "$network" \
-    --hostname "$node_name" --tmpfs /data $docker_options \
+    --hostname "$node_name" $data_option $docker_options \
     --publish "127.0.0.1:$client_port:4222" "$image" $server_debug_args \
     $server_options -js -sd /data -p 4222 -n "$node_label" \
     -cluster nats://0.0.0.0:6222 \
@@ -292,6 +319,11 @@ run_server() {
 }
 
 docker network create "$network" >/dev/null
+if [ "$failure_mode" = restart ]; then
+  docker volume create "$primary_data_volume" >/dev/null
+  docker volume create "$secondary_data_volume" >/dev/null
+  docker volume create "$tertiary_data_volume" >/dev/null
+fi
 
 primary=$(run_server "$primary_name" cluster-a "$cluster_base_port" \
   "nats://$secondary_name:6222,nats://$tertiary_name:6222")
@@ -312,6 +344,43 @@ wait_until_ready() {
   done
   echo "NATS JetStream server $container did not become ready" >&2
   docker logs "$container" >&2 || true
+  return 1
+}
+
+wait_until_ready_count() {
+  container=$1
+  minimum=$2
+  attempt=0
+  while [ "$attempt" -lt 45 ]; do
+    ready_count=$(docker logs "$container" 2>&1 \
+      | grep -c "Server is ready" || true)
+    if [ "$ready_count" -ge "$minimum" ]; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  echo "NATS JetStream server $container did not become ready $minimum time(s)" >&2
+  docker logs "$container" >&2 || true
+  return 1
+}
+
+wait_for_barrier() {
+  path=$1
+  label=$2
+  attempt=0
+  while [ "$attempt" -lt 900 ]; do
+    if [ -e "$signal.failed" ]; then
+      echo "$label failed (see $signal.failed)" >&2
+      return 1
+    fi
+    if [ -e "$path" ]; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  echo "timed out waiting for $label" >&2
   return 1
 }
 
@@ -411,6 +480,21 @@ fi
     touch "$signal.failed"
     exit 1
   fi
+  if [ "$failure_mode" = restart ]; then
+    if ! wait_for_barrier "$go_reconnected_file" "Go reconnect barrier" ||
+      ! wait_for_barrier "$ocaml_reconnected_file" "OCaml reconnect barrier"; then
+      touch "$signal.failed"
+      exit 1
+    fi
+    if ! docker start "$target" >/dev/null 2>&1; then
+      touch "$signal.failed"
+      exit 1
+    fi
+    if ! wait_until_ready_count "$target" 2; then
+      touch "$signal.failed"
+      exit 1
+    fi
+  fi
   if [ "$failure_mode" = leader ]; then
     touch "$killed_file"
   fi
@@ -420,6 +504,9 @@ watcher=$!
 if [ "$failure_mode" = leader ]; then
   peer_mode=jetstream-ordered-leader-failover
   peer_server="$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$tertiary_port")"
+elif [ "$failure_mode" = restart ]; then
+  peer_mode=jetstream-ordered-restart
+  peer_server="$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$tertiary_port")"
 else
   peer_mode=jetstream-ordered-reconnect
   peer_server="$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$tertiary_port")"

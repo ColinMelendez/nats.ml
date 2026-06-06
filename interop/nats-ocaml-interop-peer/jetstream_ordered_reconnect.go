@@ -10,6 +10,7 @@ import (
 )
 
 const orderedReconnectWait = 90 * time.Second
+const orderedConsumerWait = 5 * time.Second
 
 func waitForJetStreamLeaderKillSignal(signal string) error {
 	deadline := time.Now().Add(orderedReconnectWait)
@@ -112,6 +113,26 @@ func retryJetStreamStreamQuorum(jetstream nats.JetStreamContext, stream string, 
 		return nil, fmt.Errorf("JetStream stream %s did not report replication state", stream)
 	}
 	return nil, fmt.Errorf("JetStream stream %s did not reach replica quorum: %w", stream, lastError)
+}
+
+func retryJetStreamOrderedConsumerReady(subscription *nats.Subscription, deadline time.Time) error {
+	var lastError error
+	for time.Now().Before(deadline) {
+		info, err := subscription.ConsumerInfo()
+		if err == nil {
+			if info.Name != "" {
+				return nil
+			}
+			lastError = fmt.Errorf("ordered consumer info did not identify a consumer")
+		} else {
+			lastError = err
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if lastError == nil {
+		return fmt.Errorf("ordered consumer did not become ready")
+	}
+	return fmt.Errorf("ordered consumer did not become ready: %w", lastError)
 }
 
 func retryAddJetStreamStream(jetstream nats.JetStreamContext, config *nats.StreamConfig, deadline time.Time) (*nats.StreamInfo, error) {
@@ -285,16 +306,19 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 		}
 	}
 
+	orderedJetstream, err := connection.JetStream(nats.MaxWait(orderedConsumerWait))
+	if err != nil {
+		return fmt.Errorf("ordered JetStream context: %w", err)
+	}
 	matchSubject := config.prefix + ".match"
 	orderedOptions := []nats.SubOpt{
 		nats.BindStream(config.stream),
 		nats.OrderedConsumer(),
 	}
-	orderedSubscription, err := jetstream.SubscribeSync(matchSubject, orderedOptions...)
+	orderedSubscription, err := orderedJetstream.SubscribeSync(matchSubject, orderedOptions...)
 	if err != nil {
 		return fmt.Errorf("create Go ordered consumer: %w", err)
 	}
-	defer orderedSubscription.Unsubscribe()
 	if err := connection.Flush(); err != nil {
 		return fmt.Errorf("flush ordered setup: %w", err)
 	}
@@ -385,9 +409,6 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	if _, err := retryJetStreamStreamQuorum(jetstream, config.stream, 3, 3, time.Now().Add(orderedReconnectWait)); err != nil {
 		return err
 	}
-	// A quorum response can precede the final consumer/meta placement events.
-	// Let those events settle before the harness removes the seed server.
-	time.Sleep(3 * time.Second)
 	if err := baselineMessage.Respond([]byte("go-baseline-ready")); err != nil {
 		return fmt.Errorf("respond baseline completion: %w", err)
 	}
@@ -419,10 +440,22 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 		}
 		recoveryDeadline = time.Now().Add(orderedReconnectWait)
 		streamInfo, err = retryJetStreamLeaderChange(leaderProbe, config.stream, leaderName, recoveryDeadline)
+		if err == nil {
+			// JetStream stream leadership can move before its metadata and
+			// ephemeral consumer leadership have converged. The post-failover
+			// ordered delivery below is the functional readiness check; this
+			// brief settle period keeps teardown from racing that convergence.
+			time.Sleep(3 * time.Second)
+		}
 	} else if err := waitJetStreamReconnect(reconnected); err != nil {
 		return err
 	} else {
 		recoveryDeadline = time.Now().Add(orderedReconnectWait)
+		if config.requireReplicatedStream {
+			if err := os.WriteFile(config.signal+".go-reconnected", []byte("ready\n"), 0600); err != nil {
+				return fmt.Errorf("write Go reconnect barrier: %w", err)
+			}
+		}
 	}
 	if err != nil {
 		if config.leader != "" {
@@ -431,7 +464,13 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 		return err
 	}
 	if config.leader == "" {
-		streamInfo, err = retryJetStreamStreamInfo(jetstream, config.stream, recoveryDeadline)
+		if config.requireReplicatedStream {
+			// A restarted node must rejoin the file-backed stream with current
+			// replicas before the peer declares recovery complete.
+			streamInfo, err = retryJetStreamStreamQuorum(jetstream, config.stream, 3, 3, recoveryDeadline)
+		} else {
+			streamInfo, err = retryJetStreamStreamInfo(jetstream, config.stream, recoveryDeadline)
+		}
 	}
 	if err != nil {
 		return err
@@ -450,6 +489,9 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	}
 	if string(recoveryMessage.Data) != recoveryPayload {
 		return fmt.Errorf("recovery readiness was %q, expected %q", string(recoveryMessage.Data), recoveryPayload)
+	}
+	if err := retryJetStreamOrderedConsumerReady(orderedSubscription, recoveryDeadline); err != nil {
+		return err
 	}
 	if err := recoveryMessage.Respond([]byte("go-recovery-ready")); err != nil {
 		return fmt.Errorf("respond recovery readiness: %w", err)
@@ -471,12 +513,6 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	if string(closeMessage.Data) != "ocaml-close" {
 		return fmt.Errorf("close request was %q, expected %q", string(closeMessage.Data), "ocaml-close")
 	}
-	if err := orderedSubscription.Unsubscribe(); err != nil {
-		return fmt.Errorf("unsubscribe Go ordered consumer: %w", err)
-	}
-	if err := connection.Flush(); err != nil {
-		return fmt.Errorf("flush Go ordered unsubscribe: %w", err)
-	}
 	if err := closeMessage.Respond([]byte("go-closed")); err != nil {
 		return fmt.Errorf("respond Go ordered close: %w", err)
 	}
@@ -494,6 +530,9 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	if err := cleanupMessage.Respond([]byte("cleaned")); err != nil {
 		return fmt.Errorf("respond cleanup: %w", err)
 	}
+	// Let Drain remove the local subscription without synchronously waiting for
+	// the ephemeral consumer delete request. That request can outlive a
+	// JetStream leader transition and must not block the interop handshake.
 	if err := connection.Drain(); err != nil {
 		return fmt.Errorf("drain: %w", err)
 	}

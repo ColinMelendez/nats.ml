@@ -4,9 +4,16 @@ set -eu
 script_dir=$(CDPATH=; export CDPATH; cd "$(dirname "$0")" && pwd)
 cd "$script_dir/.."
 
+if [ "${NATS_INTEGRATION_SHELL-}" != 1 ]; then
+  LC_ALL=C
+  export LC_ALL
+  exec nix develop .#integration -c env \
+    NATS_INTEGRATION_SHELL=1 "$script_dir/runtest-interop-auth-jetstream-cluster-matrix.sh" "$@"
+fi
+
 images=${NATS_SERVER_IMAGES:-nats:2.10.22,nats:2.12.15,nats:2.14.5}
 modes=${NATS_INTEROP_AUTH_JETSTREAM_CLUSTER_MATRIX_MODES:-nkey,nkey-tls,jwt,jwt-tls,mtls}
-failure_modes=${NATS_INTEROP_AUTH_JETSTREAM_CLUSTER_FAILURE_MODES:-seed,leader}
+failure_modes=${NATS_INTEROP_AUTH_JETSTREAM_CLUSTER_FAILURE_MODES:-seed,leader,restart}
 
 case "$modes" in
   ""|,*|*,|*,,*)
@@ -16,7 +23,7 @@ case "$modes" in
 esac
 case "$failure_modes" in
   ""|,*|*,|*,,*)
-    echo "NATS_INTEROP_AUTH_JETSTREAM_CLUSTER_FAILURE_MODES must contain seed and/or leader with no empty entries" >&2
+    echo "NATS_INTEROP_AUTH_JETSTREAM_CLUSTER_FAILURE_MODES must contain seed, leader, and/or restart with no empty entries" >&2
     exit 1
     ;;
 esac
@@ -59,7 +66,7 @@ fi
 failure_mode_list=
 for failure_mode do
   case "$failure_mode" in
-    seed|leader)
+    seed|leader|restart)
       ;;
     *)
       echo "unknown authenticated JetStream cluster failure mode: $failure_mode" >&2
