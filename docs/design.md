@@ -292,10 +292,10 @@ failure and an elected JetStream stream-leader failure. After either failure,
 each client either continues the existing Ordered consumer at the next
 consumer sequence or recreates it from the next stream sequence if the
 one-replica consumer leader was also lost. Consumer identity is therefore not
-an invariant of endpoint or stream-leader recovery. The anonymous plaintext
-matrix passes both failures on `nats:2.10.22`, `nats:2.12.15`, and
-`nats:2.14.5`; authentication, TLS, and broader failure matrices remain
-final-acceptance work.
+an invariant of endpoint or stream-leader recovery. The authenticated matrix
+covers NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS under both failures on
+`nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. Additional failure modes
+remain final-acceptance work.
 
 ### The protocol core as a testable boundary
 
@@ -547,9 +547,12 @@ connection accepts validated endpoint seeds, resolves each candidate again for
 every dial pass, tries every returned stream address, prefers the successful
 endpoint, and rotates failures. An `INFO` replaces the discovered candidate
 set while configured seeds remain sticky; both full endpoint URLs and bare
-`host[:port]` advertisements are accepted. Initial handshake failures fail
-over across remaining configured seeds. The first redial is immediate, later
-attempts use a configurable capped exponential backoff, and the bridge
+`host[:port]` advertisements are accepted. Bare advertisements inherit the
+current endpoint's scheme, so a server-required TLS upgrade remains a
+plaintext-INFO-then-upgrade reconnect rather than becoming a TLS-first dial.
+Initial handshake failures fail over across remaining configured seeds. The
+first redial is immediate, later attempts use a configurable capped exponential
+backoff, and the bridge
 re-enters the INFO/TLS/CONNECT handshake for each attempt. It emits
 non-terminal `Disconnected` and `Reconnected` events, defers unsubscribe and
 auto-unsubscribe commands until the replacement session is connected, and
@@ -566,7 +569,7 @@ cancellation cleanup, auto-unsubscribe, subscription drain, connection drain,
 bounded slow-consumer handling, parent-switch cleanup, reconnect recovery,
 three-node cluster discovery/failover with subscription recovery, and lame-duck
 INFO/event handling with continued use of the existing connection. Advanced
-cluster failure scenarios and cross-SDK acceptance remain later work.
+cluster failure scenarios and broader cross-SDK acceptance remain later work.
 
 The normal user operations should be direct-style and result-returning:
 
@@ -833,8 +836,10 @@ through individual helper functions:
   dedicated Key-Value interop runner checks revisions, stale CAS, tombstones,
   watches, purge markers, and cleanup against the official Go `nats.go`
   `jetstream.KeyValue` API across the pinned server/authentication matrix;
-  broader cluster/reconnect and Object Store cross-SDK matrices
-  remain later work.
+  the dedicated Ordered reconnect runner also checks cross-SDK stream and
+  consumer recovery under seed and elected-leader loss for five authenticated
+  or TLS modes across all three pinned releases. Broader cluster/reconnect and
+  Object Store cross-SDK matrices remain later work.
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 

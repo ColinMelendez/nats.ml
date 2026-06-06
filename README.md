@@ -50,6 +50,8 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-interop-jetstream-reconnect.sh
 ./scripts/runtest-interop-jetstream-cluster.sh
 ./scripts/runtest-interop-jetstream-cluster-matrix.sh
+./scripts/runtest-interop-auth-jetstream-cluster.sh
+./scripts/runtest-interop-auth-jetstream-cluster-matrix.sh
 NATS_TEST_JS_CLUSTER_FAILURE_MODE=leader ./scripts/runtest-interop-jetstream-cluster.sh
 NATS_TEST_INTEROP_JETSTREAM_MODE=push ./scripts/runtest-interop-jetstream.sh
 NATS_TEST_INTEROP_JETSTREAM_MODE=ordered ./scripts/runtest-interop-jetstream.sh
@@ -77,9 +79,12 @@ node with subscription replay.
 The JetStream cluster runner starts a separate three-node full route mesh with
 file-backed, three-replica JetStream state, verifies durable Push delivery and
 acknowledgement before killing the seed, then verifies reconnect, replicated
-stream/consumer state, and a second publish/delivery on a surviving node. It
-is an anonymous single-image failover slice; leader-targeted failures, extra
-node loss, and version/authentication/TLS matrices remain separate work.
+stream/consumer state, and a second publish/delivery on a surviving node. The
+cross-SDK Ordered reconnect runner adds elected stream-leader targeting and
+checks both the OCaml client and the official Go peer. Its authenticated
+companion covers NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS, with both
+seed and leader failures across `nats:2.10.22`, `nats:2.12.15`, and
+`nats:2.14.5`.
 The lame-duck runner starts two fresh server containers, signals each live
 server through its container, and checks the dynamic `INFO` flag, typed
 `Lame_duck_mode` event, and continued use of each connection.
@@ -166,8 +171,14 @@ consumer, and delivery metadata in either case. The companion
 modes over the three pinned server images by default; set
 `NATS_SERVER_IMAGES` or `NATS_INTEROP_JETSTREAM_CLUSTER_MATRIX_MODES` to select
 a bounded subset. Its six-case anonymous plaintext sweep passes on
-`nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. Authentication, TLS, and
-broader cluster-failure matrices remain separate work. The optional
+`nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. The authenticated
+companion `./scripts/runtest-interop-auth-jetstream-cluster-matrix.sh` runs
+the five NKey/JWT/TLS modes over both seed and leader failures: all 30
+cross-SDK cases pass across the same three pinned releases. Broader
+cluster-failure matrices remain separate work. The base cluster runner also
+accepts `NATS_TEST_TOKEN` or paired `NATS_TEST_USER`/`NATS_TEST_PASS` values,
+with `NATS_TEST_TLS=1` for their server-required TLS variants; the companion
+matrix intentionally focuses on generated NKey/JWT/mTLS material. The optional
 `NATS_TEST_TOKEN` or paired
 `NATS_TEST_USER`/`NATS_TEST_PASS` values only replace the built-in credentials
 for their selected modes; they do not select modes. Set

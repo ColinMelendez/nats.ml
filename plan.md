@@ -115,11 +115,14 @@ Service endpoint and monitoring recovery across a two-server reconnect, and
 exercises chunked content, metadata, links, listing, deletion and tombstones,
 watches, sealing, and cleanup. Push reconnect restoration is
 implemented through replayable subscription
-recovery, including durable confirmation and ephemeral recreation. Advanced
-cluster failure scenarios and the broader cross-SDK acceptance matrix are
-deliberately deferred to the final acceptance phase; current consumer
-confidence combines local mock transport and pure-boundary tests with the
-passing single-server and bounded cluster acceptance slices. Priority-group
+recovery, including durable confirmation and ephemeral recreation. The
+cross-SDK Ordered reconnect harness now covers seed-node and elected
+JetStream-leader loss under NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS
+across the three pinned server releases; additional cluster failure scenarios
+and the broader cross-SDK acceptance matrix remain in the final acceptance
+phase. Current consumer confidence combines local mock transport and
+pure-boundary tests with the passing single-server and authenticated cluster
+acceptance slices. Priority-group
 pull consumers are
 now modeled locally:
 validated single-group policy configuration, per-request thresholds and
@@ -132,9 +135,9 @@ the pinned `nats:2.10.22` image: it forms a full three-node route mesh, creates
 file-backed three-replica stream and durable explicit-ack Push consumer state,
 acknowledges a baseline delivery, kills the seed, verifies reconnect to a
 surviving node and replicated state, then publishes, delivers, acknowledges,
-and cleans up after recovery. Its scope is anonymous connected-node loss;
-leader-targeted failure, additional node loss, server-version/authentication/
-TLS matrices, and cross-SDK cluster behavior remain deferred.
+and cleans up after recovery. Its scope is the lower-level anonymous
+connected-node-loss contract; the separate cross-SDK Ordered reconnect runner
+covers leader-targeted failure and authenticated/TLS behavior.
 The recovery bridge
 preserves live subscription handles, queues, and replay intent; fails
 transport-bound requests, flushes, and drains; redials through the stored
@@ -188,13 +191,14 @@ tracked gaps, never as an accidental absence of coverage.
 #### C. Expand cluster failure injection
 
 Reuse the existing three-node route and JetStream runners. Elected
-stream-leader loss and ordered-session recovery already have a bounded
-anonymous plaintext matrix; the remaining cases are each-node loss where the
+stream-leader loss and ordered-session recovery now have a 30-case
+authenticated/TLS cross-SDK matrix over the three pinned releases, with both
+seed and leader targeting. The remaining cases are each-node loss where the
 replica count allows it, changed advertised client URLs, reconnect during
 management and delivery operations, consumer recreation under more failure
-modes, and authenticated/TLS cluster paths. Keep the failure trigger
-synchronized with a flushed, observable barrier so a test failure identifies
-the lost invariant rather than a startup race.
+modes, and multi-node loss. Keep the failure trigger synchronized with a
+flushed, observable barrier so a test failure identifies the lost invariant
+rather than a startup race.
 
 #### D. Make cross-SDK behavior the wire-level oracle
 
@@ -217,8 +221,11 @@ username/password, NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS. The
 dedicated positive matrix passes all five non-anonymous modes across the three
 pinned server releases; its companion negative matrix passes invalid NKey/JWT
 signatures and missing mTLS client certificates across the same releases for
-both SDKs. Reconnect and cluster combinations remain a later acceptance
-increment, with server-version and feature-gate differences documented there.
+both SDKs. The cross-SDK Ordered reconnect matrix also passes those five modes
+under both seed and leader failure on all three releases. Authenticated
+JetStream restart, multi-node loss, and other feature-family combinations
+remain later acceptance increments, with server-version and feature-gate
+differences documented there.
 
 #### F. Define release gates
 
@@ -817,10 +824,11 @@ request/reply and subscription primitives.
   stream-leader failure, both clients reconnect through surviving peer URLs and
   validate Ordered progress. A one-replica consumer may either retain its
   identity and continue at consumer sequence 3 or be recreated at sequence 1
-  when its consumer leader was also lost. The anonymous plaintext matrix
-  passes both seed and leader failures on `nats:2.10.22`, `nats:2.12.15`, and
-  `nats:2.14.5`; authenticated/TLS and multi-node-loss matrices remain
-  separate work.
+  when its consumer leader was also lost. The authenticated matrix covers
+  NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS under both seed and leader
+  failures: all 30 cases pass on `nats:2.10.22`, `nats:2.12.15`, and
+  `nats:2.14.5`. Multi-node-loss and restart combinations remain separate
+  work.
 - Completed cross-SDK Push reconnect floor: a dedicated runner keeps the same
   Go and OCaml durable Push sessions across a persistent file-backed
   nats-server restart, checks recovery barriers and post-restart JetStream
@@ -834,11 +842,12 @@ request/reply and subscription primitives.
   kill with reconnect to a surviving node, and checks post-failover publish,
   delivery, acknowledgement floors, replicated stream state, and cleanup on
   the pinned `nats:2.10.22` image. It intentionally does not claim
-  JetStream-leader targeting, multi-node loss, or a version/authentication/TLS
-  matrix.
-- Remaining: additional real cluster failure scenarios, authenticated/TLS and
-  cluster reconnect matrices, feature gates for remaining server-version
-  differences, and broader cross-SDK JetStream cluster coverage.
+  JetStream-leader targeting or multi-node loss; those are covered by the
+  cross-SDK Ordered reconnect runner only where its protocol assertions apply.
+- Remaining: additional real cluster failure scenarios, authenticated/TLS
+  restart and multi-node-loss matrices, feature gates for remaining
+  server-version differences, and broader cross-SDK JetStream cluster
+  coverage.
 
 ### Gate G4 — JetStream API stabilization
 
