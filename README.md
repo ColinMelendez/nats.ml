@@ -48,6 +48,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-interop-key-value.sh
 ./scripts/runtest-interop-key-value-matrix.sh
 ./scripts/runtest-interop-jetstream-reconnect.sh
+./scripts/runtest-interop-auth-jetstream-reconnect-matrix.sh
 ./scripts/runtest-interop-jetstream-cluster.sh
 ./scripts/runtest-interop-jetstream-cluster-matrix.sh
 ./scripts/runtest-interop-auth-jetstream-cluster.sh
@@ -204,10 +205,13 @@ authentication and TLS contracts for Core traffic.
 The separate JetStream reconnect runner uses a file-backed stream and durable
 Push consumers on one persistent server container, kills and restarts that
 container, and verifies both the OCaml and Go Push legs recover and exchange
-new messages without recreating their sessions. Anonymous plaintext passes on
-all three pinned releases; the runner currently rejects authentication and TLS
-variables. Ordered reconnect has a separate three-node failover runner as
-described above.
+new messages without recreating their sessions. Its authenticated companion
+`./scripts/runtest-interop-auth-jetstream-reconnect-matrix.sh` covers NKey, JWT,
+NKey-over-TLS, JWT-over-TLS, and mTLS across all three pinned releases; all 15
+restart cases pass. The base runner also accepts token and username/password
+credentials, including their server-required TLS variants, for focused
+compatibility checks. Ordered reconnect has a separate three-node failover
+runner as described above.
 The Core interop matrix runner (`./scripts/runtest-interop-matrix.sh`) is a
 bounded Core gate: by
 default it spans the established `nats:2.10.22` floor, `nats:2.12.15`, and the

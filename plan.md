@@ -115,7 +115,9 @@ Service endpoint and monitoring recovery across a two-server reconnect, and
 exercises chunked content, metadata, links, listing, deletion and tombstones,
 watches, sealing, and cleanup. Push reconnect restoration is
 implemented through replayable subscription
-recovery, including durable confirmation and ephemeral recreation. The
+recovery, including durable confirmation and ephemeral recreation. Its
+cross-SDK authenticated/TLS restart matrix now covers NKey, JWT,
+NKey-over-TLS, JWT-over-TLS, and mTLS across the three pinned releases. The
 cross-SDK Ordered reconnect harness now covers seed-node and elected
 JetStream-leader loss under NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS
 across the three pinned server releases; additional cluster failure scenarios
@@ -223,7 +225,8 @@ pinned server releases; its companion negative matrix passes invalid NKey/JWT
 signatures and missing mTLS client certificates across the same releases for
 both SDKs. The cross-SDK Ordered reconnect matrix also passes those five modes
 under both seed and leader failure on all three releases. Authenticated
-JetStream restart, multi-node loss, and other feature-family combinations
+JetStream Push restart now passes the same five modes across all three
+releases; authenticated multi-node loss and other feature-family combinations
 remain later acceptance increments, with server-version and feature-gate
 differences documented there.
 
@@ -564,8 +567,10 @@ consumer sequences, and coordinated cleanup.
 The separate JetStream Push reconnect runner uses a file-backed stream and
 durable consumers on one persistent server container, restarts that container,
 and checks both the Go and OCaml Push legs after reconnect. Anonymous
-plaintext passes on all three pinned releases; authentication/TLS and cluster
-restart remain separate work. Ordered reconnect has a separate three-node
+plaintext plus NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS restart modes
+pass on all three pinned releases. The base runner also covers token and
+username/password compatibility, including server-required TLS. Cluster
+restart remains separate work. Ordered reconnect has a separate three-node
 cluster acceptance slice below.
 
 - Core publish/subscribe, queue-group load balancing, headers, and replies.
@@ -834,8 +839,11 @@ request/reply and subscription primitives.
   nats-server restart, checks recovery barriers and post-restart JetStream
   readiness, and validates new deliveries, stream/consumer sequences,
   acknowledgement floors, and two-phase cleanup. Anonymous plaintext passes
-  on all three pinned releases. Authentication/TLS restart and cluster
-  reconnect remain separate matrices.
+  on all three pinned releases. Its authenticated companion covers NKey, JWT,
+  NKey-over-TLS, JWT-over-TLS, and mTLS across the same releases; all 15 cases
+  pass. The base runner also accepts token and username/password credentials,
+  including server-required TLS variants. Cluster reconnect remains a separate
+  matrix.
 - Completed real-server cluster slice: the dedicated Docker harness forms a
   full three-node JetStream route mesh, verifies file-backed three-replica
   stream and durable explicit-ack Push consumer state, survives one seed-node
@@ -845,9 +853,8 @@ request/reply and subscription primitives.
   JetStream-leader targeting or multi-node loss; those are covered by the
   cross-SDK Ordered reconnect runner only where its protocol assertions apply.
 - Remaining: additional real cluster failure scenarios, authenticated/TLS
-  restart and multi-node-loss matrices, feature gates for remaining
-  server-version differences, and broader cross-SDK JetStream cluster
-  coverage.
+  multi-node-loss matrices, feature gates for remaining server-version
+  differences, and broader cross-SDK JetStream cluster coverage.
 
 ### Gate G4 — JetStream API stabilization
 

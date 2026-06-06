@@ -839,7 +839,9 @@ through individual helper functions:
   the dedicated Ordered reconnect runner also checks cross-SDK stream and
   consumer recovery under seed and elected-leader loss for five authenticated
   or TLS modes across all three pinned releases. Broader cluster/reconnect and
-  Object Store cross-SDK matrices remain later work.
+  Object Store cross-SDK matrices remain later work. The dedicated Push
+  reconnect runner checks durable consumer recovery across a persistent server
+  restart for the same five modes and all three pinned releases.
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 
