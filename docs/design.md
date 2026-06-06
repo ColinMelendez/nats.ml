@@ -837,9 +837,10 @@ through individual helper functions:
   watches, purge markers, and cleanup against the official Go `nats.go`
   `jetstream.KeyValue` API across the pinned server/authentication matrix;
   the dedicated Ordered reconnect runner also checks cross-SDK stream and
-  consumer recovery under seed and elected-leader loss for five authenticated
-  or TLS modes across all three pinned releases. Broader cluster/reconnect and
-  Object Store cross-SDK matrices remain later work. The dedicated Push
+  consumer recovery under seed loss, elected-leader loss, and durable seed
+  restart for five authenticated or TLS modes across all three pinned
+  releases. Broader cluster/reconnect and Object Store cross-SDK matrices
+  remain later work. The dedicated Push
   reconnect runner checks durable consumer recovery across a persistent server
   restart for the same five modes and all three pinned releases.
 - cross-check observable behavior with NATS by Example and at least one

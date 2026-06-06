@@ -82,10 +82,10 @@ file-backed, three-replica JetStream state, verifies durable Push delivery and
 acknowledgement before killing the seed, then verifies reconnect, replicated
 stream/consumer state, and a second publish/delivery on a surviving node. The
 cross-SDK Ordered reconnect runner adds elected stream-leader targeting and
-checks both the OCaml client and the official Go peer. Its authenticated
-companion covers NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS, with both
-seed and leader failures across `nats:2.10.22`, `nats:2.12.15`, and
-`nats:2.14.5`.
+durable seed restart recovery, and checks both the OCaml client and the
+official Go peer. Its authenticated companion covers NKey, JWT, NKey-over-TLS,
+JWT-over-TLS, and mTLS, with seed failure, elected-leader failure, and durable
+seed restart across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`.
 The lame-duck runner starts two fresh server containers, signals each live
 server through its container, and checks the dynamic `INFO` flag, typed
 `Lame_duck_mode` event, and continued use of each connection.
@@ -167,14 +167,18 @@ one-replica, a stream-leader failure can either preserve a consumer identity
 and continue at consumer sequence 3 or recreate that consumer and resume at
 sequence 1 if its consumer leader was also the failed node. The same is true
 of seed-node failure: the runner checks the corresponding exact stream,
-consumer, and delivery metadata in either case. The companion
-`./scripts/runtest-interop-jetstream-cluster-matrix.sh` runs the seed and leader
-modes over the three pinned server images by default; set
+consumer, and delivery metadata in either case. Set
+`NATS_TEST_JS_CLUSTER_FAILURE_MODE=restart` to use run-unique Docker volumes,
+wait until both clients have failed over, restart the seed container, and
+require all three stream replicas to be current before post-restart delivery.
+The companion `./scripts/runtest-interop-jetstream-cluster-matrix.sh` runs the
+seed, leader, and restart modes over the three pinned server images by default;
+set
 `NATS_SERVER_IMAGES` or `NATS_INTEROP_JETSTREAM_CLUSTER_MATRIX_MODES` to select
-a bounded subset. Its six-case anonymous plaintext sweep passes on
+a bounded subset. Its nine-case anonymous plaintext sweep passes on
 `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. The authenticated
 companion `./scripts/runtest-interop-auth-jetstream-cluster-matrix.sh` runs
-the five NKey/JWT/TLS modes over both seed and leader failures: all 30
+the five NKey/JWT/TLS modes over seed, leader, and restart failures: all 45
 cross-SDK cases pass across the same three pinned releases. Broader
 cluster-failure matrices remain separate work. The base cluster runner also
 accepts `NATS_TEST_TOKEN` or paired `NATS_TEST_USER`/`NATS_TEST_PASS` values,
@@ -269,8 +273,8 @@ statistics, replayable subscriptions, and service-local draining. The
 dedicated JetStream cluster slice is intentionally narrower than a full
 failure matrix; advanced cluster scenarios and cross-SDK interoperability
 coverage remain in the final acceptance phase. The Ordered reconnect cluster
-slice passes anonymous plaintext seed-node and JetStream-leader failures on
-all three pinned server releases.
+slice passes anonymous plaintext seed-node failure, JetStream-leader failure,
+and durable seed restart on all three pinned server releases.
 
 The project uses Dune package management. No compatibility layer for NATS
 Streaming is planned.

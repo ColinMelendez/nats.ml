@@ -118,14 +118,13 @@ implemented through replayable subscription
 recovery, including durable confirmation and ephemeral recreation. Its
 cross-SDK authenticated/TLS restart matrix now covers NKey, JWT,
 NKey-over-TLS, JWT-over-TLS, and mTLS across the three pinned releases. The
-cross-SDK Ordered reconnect harness now covers seed-node and elected
-JetStream-leader loss under NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS
-across the three pinned server releases; additional cluster failure scenarios
-and the broader cross-SDK acceptance matrix remain in the final acceptance
-phase. Current consumer confidence combines local mock transport and
-pure-boundary tests with the passing single-server and authenticated cluster
-acceptance slices. Priority-group
-pull consumers are
+cross-SDK Ordered reconnect harness now covers seed-node loss, elected
+JetStream-leader loss, and durable seed restart under NKey, JWT, NKey-over-TLS,
+JWT-over-TLS, and mTLS across the three pinned server releases; additional
+cluster failure scenarios and the broader cross-SDK acceptance matrix remain
+in the final acceptance phase. Current consumer confidence combines local mock
+transport and pure-boundary tests with the passing single-server and
+authenticated cluster acceptance slices. Priority-group pull consumers are
 now modeled locally:
 validated single-group policy configuration, per-request thresholds and
 priorities, INFO pin state, explicit unpin, pinned-client request echoing, and
@@ -193,10 +192,12 @@ tracked gaps, never as an accidental absence of coverage.
 #### C. Expand cluster failure injection
 
 Reuse the existing three-node route and JetStream runners. Elected
-stream-leader loss and ordered-session recovery now have a 30-case
-authenticated/TLS cross-SDK matrix over the three pinned releases, with both
-seed and leader targeting. The remaining cases are each-node loss where the
-replica count allows it, changed advertised client URLs, reconnect during
+stream-leader loss, seed-node loss, and durable seed restart now have a
+45-case authenticated/TLS cross-SDK matrix over the three pinned releases,
+with the restart mode retaining run-unique per-node data volumes, waiting for
+both clients to fail over, and checking that all three stream replicas are
+current after the seed returns. The remaining cases are each-node loss where
+the replica count allows it, changed advertised client URLs, reconnect during
 management and delivery operations, consumer recreation under more failure
 modes, and multi-node loss. Keep the failure trigger synchronized with a
 flushed, observable barrier so a test failure identifies the lost invariant
@@ -224,7 +225,8 @@ dedicated positive matrix passes all five non-anonymous modes across the three
 pinned server releases; its companion negative matrix passes invalid NKey/JWT
 signatures and missing mTLS client certificates across the same releases for
 both SDKs. The cross-SDK Ordered reconnect matrix also passes those five modes
-under both seed and leader failure on all three releases. Authenticated
+under seed failure, elected-leader failure, and durable seed restart on all
+three releases. Authenticated
 JetStream Push restart now passes the same five modes across all three
 releases; authenticated multi-node loss and other feature-family combinations
 remain later acceptance increments, with server-version and feature-gate
@@ -569,9 +571,10 @@ durable consumers on one persistent server container, restarts that container,
 and checks both the Go and OCaml Push legs after reconnect. Anonymous
 plaintext plus NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS restart modes
 pass on all three pinned releases. The base runner also covers token and
-username/password compatibility, including server-required TLS. Cluster
-restart remains separate work. Ordered reconnect has a separate three-node
-cluster acceptance slice below.
+username/password compatibility, including server-required TLS. Its scope is
+single-server restart; durable three-node seed restart is covered by the
+separate Ordered reconnect cluster acceptance slice below, while broader
+cluster restart combinations remain later work.
 
 - Core publish/subscribe, queue-group load balancing, headers, and replies.
 - Request success, timeout, no responders, cancellation, and a pending-request
@@ -825,15 +828,17 @@ request/reply and subscription primitives.
 - Completed cross-SDK Ordered reconnect slice: a separate Nix-built official Go
   `nats.go` peer and OCaml client share a file-backed, three-replica stream in a
   three-node cluster. Matching and non-matching baseline messages establish
-  filtered stream and consumer sequences; after either a seed-node or elected
-  stream-leader failure, both clients reconnect through surviving peer URLs and
-  validate Ordered progress. A one-replica consumer may either retain its
+  filtered stream and consumer sequences; after seed-node loss, elected
+  stream-leader loss, or durable seed restart, both clients reconnect through
+  surviving peer URLs and validate Ordered progress. Restart mode uses
+  run-unique per-node data volumes, waits for both clients to report failover,
+  and requires the returned seed to rejoin with all three replicas current
+  before post-recovery delivery. A one-replica consumer may either retain its
   identity and continue at consumer sequence 3 or be recreated at sequence 1
   when its consumer leader was also lost. The authenticated matrix covers
-  NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS under both seed and leader
-  failures: all 30 cases pass on `nats:2.10.22`, `nats:2.12.15`, and
-  `nats:2.14.5`. Multi-node-loss and restart combinations remain separate
-  work.
+  NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS under all three failure
+  modes: all 45 cases pass on `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`.
+  Multi-node-loss combinations remain separate work.
 - Completed cross-SDK Push reconnect floor: a dedicated runner keeps the same
   Go and OCaml durable Push sessions across a persistent file-backed
   nats-server restart, checks recovery barriers and post-restart JetStream
@@ -850,8 +855,9 @@ request/reply and subscription primitives.
   kill with reconnect to a surviving node, and checks post-failover publish,
   delivery, acknowledgement floors, replicated stream state, and cleanup on
   the pinned `nats:2.10.22` image. It intentionally does not claim
-  JetStream-leader targeting or multi-node loss; those are covered by the
-  cross-SDK Ordered reconnect runner only where its protocol assertions apply.
+  JetStream-leader targeting, durable seed restart, or multi-node loss; those
+  are covered by the cross-SDK Ordered reconnect runner only where its protocol
+  assertions apply.
 - Remaining: additional real cluster failure scenarios, authenticated/TLS
   multi-node-loss matrices, feature gates for remaining server-version
   differences, and broader cross-SDK JetStream cluster coverage.
