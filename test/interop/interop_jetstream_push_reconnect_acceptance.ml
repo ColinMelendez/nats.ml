@@ -26,19 +26,6 @@ let endpoint () =
   | Error error ->
       failf "invalid NATS_TEST_SERVER %S: %a" value Nats.Endpoint.pp_error error
 
-let auth () =
-  match
-    ( Sys.getenv_opt "NATS_TEST_USER",
-      Sys.getenv_opt "NATS_TEST_PASS",
-      Sys.getenv_opt "NATS_TEST_TOKEN" )
-  with
-  | None, None, None -> None
-  | None, None, Some token -> Some (Nats.Auth.token token)
-  | Some user, Some pass, None -> Some (Nats.Auth.user_pass ~user ~pass)
-  | _ ->
-      failf
-        "set either NATS_TEST_TOKEN or both NATS_TEST_USER and NATS_TEST_PASS"
-
 let transient_jetstream_api { Nats_eio.Jetstream.Error.code; _ } =
   Int.equal code 408 || Int.equal code 500 || Int.equal code 502
   || Int.equal code 503 || Int.equal code 504
@@ -310,10 +297,11 @@ let run env =
   let prefix = required "NATS_TEST_INTEROP_PREFIX" in
   let stream_name = required "NATS_TEST_INTEROP_STREAM" in
   let signal = required "NATS_TEST_INTEROP_SIGNAL" in
-  let auth = auth () in
+  let auth = Interop_auth.auth () in
+  let tls = Interop_auth.tls_config () in
   let config =
     expect_ok "connection config"
-      (Nats_eio.Connection.Config.v ?auth ~max_reconnect_attempts:None
+      (Nats_eio.Connection.Config.v ?auth ?tls ~max_reconnect_attempts:None
          ~reconnect_delay:Mtime.Span.(500 * ms)
          ~reconnect_max_delay:Mtime.Span.(2 * s)
          ())

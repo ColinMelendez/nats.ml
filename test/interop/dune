@@ -102,7 +102,7 @@
 
 (executable
  (name interop_jetstream_push_reconnect_acceptance)
- (modules interop_jetstream_push_reconnect_acceptance)
+ (modules interop_auth interop_jetstream_push_reconnect_acceptance)
  (libraries
   nats
   nats-eio
@@ -112,6 +112,8 @@
   x509
   domain-name
   mirage-crypto-rng.unix
+  mirage-crypto-ec
+  base64
   ptime))
 
 (executable
