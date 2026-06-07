@@ -21,11 +21,11 @@ the capabilities marked as covered.
 | Core NATS | Covered for the Eio model | WebSocket transport and some Go-specific diagnostics/options |
 | Authentication and TLS | Covered | Dynamic callback and transport-option breadth is narrower |
 | Reconnect, discovery, drain | Covered | Go-style callback hooks and connection statistics are not mirrored |
-| JetStream management | Broad partial coverage | Message deletion, manager/upsert/account operations, and newer stream fields |
+| JetStream management | Broad partial coverage | Manager/upsert/account operations and newer stream fields |
 | JetStream publishing | Synchronous publish acknowledgements | Async publishing and expectation/retry/TTL/schedule/batch options |
 | JetStream consumption | Pull, push, ordered, heartbeats, flow control, priority | Consumer reset, some ordered/ack fields, and Go's continuous batching controls |
 | Key-Value | CRUD, CAS, history, finite keys, watches | Per-key TTL, purge-delete cleanup, resumable/multi-filter watches, listers |
-| Object Store | Streaming CRUD, links, metadata, watches, list, seal | Bucket manager/listers and Go cross-SDK coverage |
+| Object Store | Streaming CRUD, links, metadata, watches, list, seal, and Go interop | Bucket manager/listers and file helpers |
 | Services | Registration, groups, requests, errors, discovery, stats | Reset/stopped state, pending limits, custom lifecycle/stat callbacks |
 
 ## Core and transport
@@ -74,7 +74,7 @@ The Go `jetstream.StreamConfig` can also express:
 
 - maximum consumers and discard-new-per-subject;
 - no-ack streams and duplicate windows;
-- mirrors, sources, source filters/transforms, and placement metadata;
+- mirrors, sources, source filters/transforms, and newer placement metadata/options;
 - deny-purge, initial sequence, subject transforms, republish, and mirror-direct
   reads;
 - stream-level consumer limits;
@@ -83,10 +83,10 @@ The Go `jetstream.StreamConfig` can also express:
 
 The OCaml codec preserves unknown fields when reading and read-modify-write
 updates preserve fields outside the modeled projection. That prevents data loss,
-but it does not make the fields configurable. The first concrete gap in this
-audit is stream message deletion: Go exposes both ordinary deletion and secure
-deletion while the OCaml stream handle currently exposes only purge. The
-implementation is tracked as the first follow-up slice.
+but it does not make the fields configurable. Ordinary and secure stream message
+deletion are now implemented and covered against the Go peer; the remaining
+management gaps are the manager-level and newer configuration capabilities
+listed above.
 
 The Go SDK also exposes manager-level create/update/upsert operations, stream
 and stream-name listers, account information, and consumer reset operations.
@@ -142,9 +142,11 @@ sealing. Its typed link representation is equivalent to the Go split between
 
 The remaining API gaps are bucket-level create/update/create-or-update
 distinctions, bucket-name/status listers, and file convenience helpers. The
-largest immediate confidence gap is test coverage: unlike Core, JetStream, KV,
-and Services, there is not yet a Go peer exercising the same Object Store data
-against both SDKs. That should follow the stream-delete slice.
+cross-SDK data-plane contract is now exercised by
+`scripts/runtest-interop-object-store.sh` against the pinned Go peer: both SDKs
+exchange content and metadata, observe updates, resolve links, inspect list and
+tombstone behavior, and validate sealing. The manager and convenience gaps do
+not block the data-plane feature set.
 
 ## Services
 
@@ -158,21 +160,15 @@ added as unstructured mutable hooks.
 
 ## Prioritized follow-up
 
-1. **Stream message deletion.** Add ordinary and secure deletion with structured
-   response handling and black-box coverage. This is a contained, user-visible
-   omission and is needed before treating stream administration as complete.
-2. **Object Store Go interop.** Add a Go v1.52.0 peer and exercise streaming
-   content, metadata, links, deletion markers, watches, list, seal, and cleanup
-   in both directions.
-3. **KV lifecycle and watch controls.** Add purge-delete cleanup, per-key TTL,
+1. **KV lifecycle and watch controls.** Add purge-delete cleanup, per-key TTL,
    resumable/multi-filter watches, and streaming key iteration where the Eio
    ownership model can express them cleanly.
-4. **JetStream manager and consumer administration.** Add account information,
+2. **JetStream manager and consumer administration.** Add account information,
    consumer reset, and compositional manager-level upsert/lister helpers.
-5. **Stream configuration and publishing expansion.** Add mirrors/sources and
+3. **Stream configuration and publishing expansion.** Add mirrors/sources and
    their transforms before the newer server feature flags; then design an async
    publisher around explicit futures/handles and expectation options.
-6. **Transport and service breadth.** Add WebSocket as a separate adapter and
+4. **Transport and service breadth.** Add WebSocket as a separate adapter and
    service reset/stopped/pending-limit behavior after the protocol gaps above.
 
 This ordering keeps the narrow protocol waist intact, gives each addition a
