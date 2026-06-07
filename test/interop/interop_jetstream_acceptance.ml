@@ -223,6 +223,28 @@ let run env =
              "go-message-acked")
       in
       expect_payload "Go acknowledgement" "acknowledged" acknowledgement;
+      let ordinary_delete_check =
+        Nats.Subject.literal (prefix ^ ".delete-check")
+      in
+      expect_jetstream_ok "delete Go JetStream message"
+        (Nats_eio.Jetstream.Stream.delete_message stream ~sequence:1L);
+      let secure_ready =
+        expect_ok "verify ordinary JetStream deletion"
+          (Nats_eio.Connection.request ~timeout connection ordinary_delete_check
+             "check")
+      in
+      expect_payload "ordinary JetStream deletion" "secure-ready" secure_ready;
+      let secure_delete_check =
+        Nats.Subject.literal (prefix ^ ".secure-delete-check")
+      in
+      expect_jetstream_ok "secure-delete Go JetStream message"
+        (Nats_eio.Jetstream.Stream.secure_delete_message stream ~sequence:2L);
+      let secure_deleted =
+        expect_ok "verify secure JetStream deletion"
+          (Nats_eio.Connection.request ~timeout connection secure_delete_check
+             "check")
+      in
+      expect_payload "secure JetStream deletion" "secure-deleted" secure_deleted;
       let ocaml_subject = Nats.Subject.literal (prefix ^ ".ocaml") in
       let headers =
         match
@@ -239,7 +261,7 @@ let run env =
              "from-ocaml-jetstream")
       in
       expect_publish_ack "OCaml publish" ~stream:stream_name ~duplicate:false
-        ~sequence:2L ocaml_ack;
+        ~sequence:3L ocaml_ack;
       let ocaml_duplicate_ack =
         expect_jetstream_ok "duplicate OCaml JetStream message"
           (Nats_eio.Jetstream.publish ~timeout ~headers
@@ -247,7 +269,7 @@ let run env =
              "from-ocaml-jetstream")
       in
       expect_publish_ack "duplicate OCaml publish" ~stream:stream_name
-        ~duplicate:true ~sequence:2L ocaml_duplicate_ack;
+        ~duplicate:true ~sequence:3L ocaml_duplicate_ack;
       let done_message = next_message ~timeout "completion" done_subscription in
       expect_payload "completion" "go-message-acked" done_message;
       expect_jetstream_ok "delete OCaml consumer"

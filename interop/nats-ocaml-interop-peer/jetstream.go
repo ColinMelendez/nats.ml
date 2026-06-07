@@ -77,6 +77,8 @@ func runJetStreamPeer(config options) error {
 
 	startMessages := make(chan *nats.Msg, 1)
 	goAcknowledgements := make(chan *nats.Msg, 1)
+	ordinaryDeleteChecks := make(chan *nats.Msg, 1)
+	secureDeleteChecks := make(chan *nats.Msg, 1)
 	_, err = connection.Subscribe(config.prefix+".start", func(message *nats.Msg) {
 		startMessages <- message
 	})
@@ -88,6 +90,18 @@ func runJetStreamPeer(config options) error {
 	})
 	if err != nil {
 		return fmt.Errorf("subscribe Go acknowledgement: %w", err)
+	}
+	_, err = connection.Subscribe(config.prefix+".delete-check", func(message *nats.Msg) {
+		ordinaryDeleteChecks <- message
+	})
+	if err != nil {
+		return fmt.Errorf("subscribe ordinary delete check: %w", err)
+	}
+	_, err = connection.Subscribe(config.prefix+".secure-delete-check", func(message *nats.Msg) {
+		secureDeleteChecks <- message
+	})
+	if err != nil {
+		return fmt.Errorf("subscribe secure delete check: %w", err)
 	}
 	if err := connection.Flush(); err != nil {
 		return fmt.Errorf("flush setup: %w", err)
@@ -134,6 +148,41 @@ func runJetStreamPeer(config options) error {
 		return fmt.Errorf("respond to OCaml acknowledgement: %w", err)
 	}
 
+	ordinaryDeleteCheck, err := waitMessage("ordinary delete check", ordinaryDeleteChecks)
+	if err != nil {
+		return err
+	}
+	if string(ordinaryDeleteCheck.Data) != "check" {
+		return fmt.Errorf("ordinary delete check payload was %q, expected %q", string(ordinaryDeleteCheck.Data), "check")
+	}
+	if _, err := jetstream.GetMsg(config.stream, 1); err == nil {
+		return fmt.Errorf("ordinary delete left stream sequence 1 readable")
+	}
+	secureAck, err := jetstream.Publish(config.prefix+".go", []byte("secure-delete"))
+	if err != nil {
+		return fmt.Errorf("publish secure-delete message: %w", err)
+	}
+	if err := expectPublishAck("secure-delete publish", secureAck, config.stream, false, 2); err != nil {
+		return err
+	}
+	if err := ordinaryDeleteCheck.Respond([]byte("secure-ready")); err != nil {
+		return fmt.Errorf("respond to ordinary delete check: %w", err)
+	}
+
+	secureDeleteCheck, err := waitMessage("secure delete check", secureDeleteChecks)
+	if err != nil {
+		return err
+	}
+	if string(secureDeleteCheck.Data) != "check" {
+		return fmt.Errorf("secure delete check payload was %q, expected %q", string(secureDeleteCheck.Data), "check")
+	}
+	if _, err := jetstream.GetMsg(config.stream, 2); err == nil {
+		return fmt.Errorf("secure delete left stream sequence 2 readable")
+	}
+	if err := secureDeleteCheck.Respond([]byte("secure-deleted")); err != nil {
+		return fmt.Errorf("respond to secure delete check: %w", err)
+	}
+
 	messages, err := goSubscription.Fetch(1, nats.MaxWait(waitTimeout))
 	if err != nil {
 		return fmt.Errorf("fetch OCaml JetStream message: %w", err)
@@ -158,7 +207,7 @@ func runJetStreamPeer(config options) error {
 	if metadata.Stream != config.stream || metadata.Consumer != goConsumerName {
 		return fmt.Errorf("OCaml metadata identified stream=%q consumer=%q", metadata.Stream, metadata.Consumer)
 	}
-	if metadata.Sequence.Stream != 2 || metadata.Sequence.Consumer != 1 || metadata.NumPending != 0 {
+	if metadata.Sequence.Stream != 3 || metadata.Sequence.Consumer != 1 || metadata.NumPending != 0 {
 		return fmt.Errorf("OCaml metadata had stream sequence=%d consumer sequence=%d pending=%d", metadata.Sequence.Stream, metadata.Sequence.Consumer, metadata.NumPending)
 	}
 	if err := ocamlMessage.AckSync(); err != nil {

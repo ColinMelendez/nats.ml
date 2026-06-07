@@ -1999,6 +1999,93 @@ let () =
               equal int64 3L (expect_jetstream_ok (Eio.Promise.await result));
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "stream message deletion supports ordinary and secure requests"
+        (fun () ->
+          let ordinary_response, ordinary_response_u = Eio.Promise.create () in
+          let secure_response, secure_response_u = Eio.Promise.create () in
+          let failed_response, failed_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await ordinary_response;
+                `Await secure_response;
+                `Await failed_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
+              in
+              let ordinary_result, ordinary_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve ordinary_result_u
+                    (Nats_eio.Jetstream.Stream.delete_message stream
+                       ~sequence:7L));
+              yield_n 5;
+              let trace_after_ordinary = Buffer.contents trace in
+              if
+                not
+                  (contains_substring ~needle:"STREAM.MSG.DELETE.ORDERS"
+                     trace_after_ordinary)
+              then fail "ordinary message deletion was not sent";
+              if
+                not
+                  (contains_substring ~needle:"seq\\\":7" trace_after_ordinary)
+              then fail "ordinary message deletion omitted the sequence";
+              if
+                not
+                  (contains_substring ~needle:"no_erase\\\":true"
+                     trace_after_ordinary)
+              then fail "ordinary message deletion did not request no erase";
+              Eio.Promise.resolve ordinary_response_u
+                (Ok (consumer_info_wire_with_sid ~sid:1 "{\"success\":true}"));
+              expect_jetstream_ok (Eio.Promise.await ordinary_result);
+              let secure_result, secure_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve secure_result_u
+                    (Nats_eio.Jetstream.Stream.secure_delete_message stream
+                       ~sequence:8L));
+              yield_n 5;
+              let trace_after_secure = Buffer.contents trace in
+              if not (contains_substring ~needle:"seq\\\":8" trace_after_secure)
+              then fail "secure message deletion omitted the sequence";
+              if
+                Int.compare
+                  (count_substring ~needle:"no_erase\\\":true"
+                     trace_after_secure)
+                  1
+                <> 0
+              then fail "secure message deletion requested no erase";
+              Eio.Promise.resolve secure_response_u
+                (Ok (consumer_info_wire_with_sid ~sid:2 "{\"success\":true}"));
+              expect_jetstream_ok (Eio.Promise.await secure_result);
+              let failed_result, failed_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve failed_result_u
+                    (Nats_eio.Jetstream.Stream.delete_message stream
+                       ~sequence:9L));
+              yield_n 5;
+              Eio.Promise.resolve failed_response_u
+                (Ok (consumer_info_wire_with_sid ~sid:3 "{\"success\":false}"));
+              (match Eio.Promise.await failed_result with
+              | Error
+                  (Nats_eio.Jetstream.Error.Message_delete_failed
+                     { sequence = 9L; secure = false }) ->
+                  ()
+              | Ok () ->
+                  fail "unsuccessful message deletion unexpectedly succeeded"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected message deletion error: %a"
+                       Nats_eio.Jetstream.Error.pp error));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream direct reads preserve stored message metadata" (fun () ->
           let first_response, first_response_u = Eio.Promise.create () in
           let second_response, second_response_u = Eio.Promise.create () in

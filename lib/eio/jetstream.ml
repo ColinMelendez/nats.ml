@@ -45,6 +45,7 @@ module Error = struct
     | Invalid_config of config
     | Invalid_headers of Nats.Header.error
     | Message_not_found
+    | Message_delete_failed of { sequence : int64; secure : bool }
     | Invalid_message_header of { name : string; value : string }
     | Empty_msg_id
     | Msg_id_already_set
@@ -148,6 +149,11 @@ module Error = struct
           error
     | Message_not_found ->
         Format.pp_print_string ppf "JetStream message was not found"
+    | Message_delete_failed { sequence; secure } ->
+        Format.fprintf ppf
+          "JetStream %smessage deletion failed for sequence %Ld"
+          (if secure then "secure " else "")
+          sequence
     | Invalid_message_header { name; value } ->
         Format.fprintf ppf "invalid JetStream message header %S=%S" name value
     | Empty_msg_id -> Format.pp_print_string ppf "JetStream message id is empty"
@@ -1285,6 +1291,63 @@ module Stream = struct
             | Error error -> Error error
             | Ok { error = Some error; _ } -> Error (Error.Api error)
             | Ok { error = None; purged } -> Ok purged))
+
+  type message_delete_request = { sequence : int64; no_erase : bool option }
+
+  let message_delete_request_codec =
+    Jsont.Object.map ~kind:"JetStream stream message delete request"
+      (fun sequence no_erase -> { sequence; no_erase })
+    |> Jsont.Object.mem "seq" Jsont.int64 ~enc:(fun value -> value.sequence)
+    |> Jsont.Object.opt_mem "no_erase" Jsont.bool ~enc:(fun value ->
+        value.no_erase)
+    |> Jsont.Object.finish
+
+  type message_delete_response = { error : api_error option; success : bool }
+
+  let message_delete_response_codec =
+    Jsont.Object.map ~kind:"JetStream stream message delete response"
+      (fun error success ->
+        { error; success = Option.value ~default:false success })
+    |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
+        value.error)
+    |> Jsont.Object.opt_mem "success" Jsont.bool ~enc:(fun value ->
+        Some value.success)
+    |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+
+  let delete_message_internal ?timeout ~secure stream ~sequence =
+    if Int64.compare sequence 0L < 0 then
+      Error
+        (Error.Invalid_message_header
+           { name = "Nats-Sequence"; value = Int64.to_string sequence })
+    else
+      let request =
+        { sequence; no_erase = (if secure then None else Some true) }
+      in
+      match encode message_delete_request_codec request with
+      | Error error -> Error error
+      | Ok payload -> (
+          let subject =
+            api_subject stream.jetstream
+              [ "STREAM"; "MSG"; "DELETE"; stream.name ]
+          in
+          match
+            request_msg ?timeout stream.jetstream
+              (Nats.Message.v ~subject payload)
+          with
+          | Error error -> Error error
+          | Ok message -> (
+              match decode message_delete_response_codec message with
+              | Error error -> Error error
+              | Ok { error = Some error; _ } -> Error (Error.Api error)
+              | Ok { error = None; success = true } -> Ok ()
+              | Ok { error = None; success = false } ->
+                  Error (Error.Message_delete_failed { sequence; secure })))
+
+  let delete_message ?timeout stream ~sequence =
+    delete_message_internal ?timeout ~secure:false stream ~sequence
+
+  let secure_delete_message ?timeout stream ~sequence =
+    delete_message_internal ?timeout ~secure:true stream ~sequence
 
   let list ?subject jetstream =
     let offset = ref 0 in

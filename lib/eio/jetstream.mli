@@ -47,6 +47,7 @@ module Error : sig
     | Invalid_config of config
     | Invalid_headers of Nats.Header.error
     | Message_not_found
+    | Message_delete_failed of { sequence : int64; secure : bool }
     | Invalid_message_header of { name : string; value : string }
     | Empty_msg_id
     | Msg_id_already_set
@@ -317,6 +318,16 @@ module Stream : sig
   (** [purge ?subject stream] removes messages from [stream]. With [subject],
       only messages matching the subject filter are removed. The result is the
       number of messages the server purged. *)
+
+  val delete_message :
+    ?timeout:Mtime.Span.t -> t -> sequence:int64 -> (unit, Error.t) result
+  (** [delete_message stream ~sequence] marks one stored message as deleted
+      without overwriting its contents. *)
+
+  val secure_delete_message :
+    ?timeout:Mtime.Span.t -> t -> sequence:int64 -> (unit, Error.t) result
+  (** [secure_delete_message stream ~sequence] deletes one stored message and
+      asks the server to overwrite its contents. *)
 
   val delete : t -> (unit, Error.t) result
 end
