@@ -253,6 +253,11 @@ func runMode(config options) error {
 			return fmt.Errorf("bucket is required in jetstream-kv mode")
 		}
 		return runJetStreamKeyValuePeer(config)
+	case "jetstream-object":
+		if config.bucket == "" {
+			return fmt.Errorf("bucket is required in jetstream-object mode")
+		}
+		return runJetStreamObjectPeer(config)
 	case "jetstream-push-reconnect":
 		if config.signal == "" {
 			return fmt.Errorf("signal-file is required in jetstream-push-reconnect mode")
