@@ -18,6 +18,7 @@ module Config : sig
     | Invalid_bucket_character of { position : int; character : char }
     | Invalid_history of int
     | Invalid_ttl
+    | Invalid_limit_marker_ttl
     | Invalid_limit of { field : string; value : int64 }
         (** Errors produced while validating a bucket configuration. *)
 
@@ -27,6 +28,7 @@ module Config : sig
     bucket:string ->
     ?history:int ->
     ?ttl:Mtime.Span.t ->
+    ?limit_marker_ttl:Mtime.Span.t ->
     ?max_bytes:int64 ->
     ?max_value_size:int64 ->
     ?storage:storage ->
@@ -35,10 +37,12 @@ module Config : sig
   (** [v ~bucket ()] validates a bucket configuration.
 
       [history] defaults to [1] and must be in [1, 64]. [ttl] defaults to an
-      unlimited lifetime; a zero span has the same meaning. Limit options use
-      [None] for the unlimited value and accept [-1] when supplied for direct
-      JetStream correspondence; supplied [-1] is normalized to [None]. [storage]
-      defaults to {!File}. *)
+      unlimited lifetime; a zero span has the same meaning. [limit_marker_ttl]
+      defaults to disabled; a zero span has the same meaning and a positive span
+      enables server-side per-message TTLs. Limit options use [None] for the
+      unlimited value and accept [-1] when supplied for direct JetStream
+      correspondence; supplied [-1] is normalized to [None]. [storage] defaults
+      to {!File}. *)
 
   (** {1:queries Queries} *)
 
@@ -50,6 +54,11 @@ module Config : sig
 
   val ttl : t -> Mtime.Span.t option
   (** [ttl config] is the optional revision lifetime. *)
+
+  val limit_marker_ttl : t -> Mtime.Span.t option
+  (** [limit_marker_ttl config] is the optional lifetime of delete markers.
+      Setting it enables server-side per-message TTLs for key creation and purge
+      markers. *)
 
   val max_bytes : t -> int64 option
   (** [max_bytes config] is the optional bucket byte limit. *)
@@ -128,11 +137,16 @@ module Error : sig
     | Invalid_config of config
     | Invalid_key of { value : string; reason : key }
     | Invalid_revision of int64
+    | Invalid_key_ttl
+    | Invalid_marker_ttl
+    | Invalid_purge_age
+    | Invalid_watch_filters
     | Invalid_headers of Nats.Header.error
     | Invalid_operation of string
     | Invalid_filter of { value : string; reason : Nats.Subject.error }
     | Invalid_message_subject of string
     | Invalid_timestamp of int64
+    | Invalid_timestamp_text of string
     | Key_not_found
     | Key_deleted of Entry.t
     | Key_exists
@@ -166,6 +180,7 @@ module Status : sig
   val last_revision : t -> int64
   val history : t -> int64 option
   val ttl : t -> Mtime.Span.t option
+  val limit_marker_ttl : t -> Mtime.Span.t option
   val max_bytes : t -> int64 option
   val max_value_size : t -> int64 option
   val storage : t -> Config.storage
@@ -176,6 +191,16 @@ type t
 
 type bucket = t
 (** The bucket capability consumed by {!Watch}. *)
+
+type purge_age =
+  | Default
+  | Any
+  | Older_than of Mtime.Span.t
+      (** The age policy used by {!purge_deletes}. [Default] keeps recent
+          markers for thirty minutes, [Any] removes every current marker, and
+          [Older_than] keeps markers newer than the supplied positive span.
+          Keeping a recent marker still removes older revisions for that key,
+          matching JetStream's per-subject [keep:1] purge semantics. *)
 
 module Watch : sig
   type delivery =
@@ -196,20 +221,26 @@ module Watch : sig
   val v :
     sw:Eio.Switch.t ->
     ?key:string ->
+    ?keys:string list ->
     ?delivery:delivery ->
     ?ignore_deletes:bool ->
     ?meta_only:bool ->
+    ?resume_from_revision:int64 ->
     bucket ->
     (t, Error.t) result
-  (** [v ~sw ?key ?delivery ?ignore_deletes ?meta_only value] watches the
-      bucket-relative key filter [key], defaulting to [>]. The default delivery
-      policy is [Last_per_subject]. [Initial_done] follows the retained
-      snapshot; [New] emits it immediately. Delete and purge entries are
-      delivered unless [ignore_deletes] is true. [meta_only] suppresses values
-      while retaining entry metadata. The watch owns an ephemeral server
-      consumer and closes it with [sw]. Delivery order is the order observed by
-      the push session; reconnect recovery does not provide the stronger
-      gap-detection guarantees of an ordered consumer. *)
+  (** [v ~sw ?key ?keys ?delivery ?ignore_deletes ?meta_only
+       ?resume_from_revision value] watches bucket-relative key filters. [key]
+      is a shorthand for one filter; [keys] adds multiple filters and cannot be
+      supplied together with [key]. The default delivery policy is
+      [Last_per_subject]. [Initial_done] follows the retained snapshot; [New]
+      emits it immediately. Delete and purge entries are delivered unless
+      [ignore_deletes] is true. [meta_only] suppresses values while retaining
+      entry metadata. [resume_from_revision] starts delivery at a positive
+      JetStream stream revision, inclusively; pass the last processed revision
+      plus one when resuming after an entry. The watch owns an ephemeral server
+      and closes it with [sw]. Delivery order is the order observed by the push
+      session; reconnect recovery does not provide the stronger gap-detection
+      guarantees of an ordered consumer. *)
 
   val next : t -> (event, Error.t) result
   (** [next watch] returns the next watch event. *)
@@ -224,6 +255,28 @@ module Watch : sig
   val close : t -> (unit, Error.t) result
   (** [close watch] stops delivery, deletes the owned consumer, and is
       idempotent. *)
+end
+
+module Key_lister : sig
+  type t
+  (** An Eio-owned stream of current live keys. Entries may repeat when keys
+      change while the initial listing is in progress. *)
+
+  val v :
+    sw:Eio.Switch.t -> ?filters:string list -> bucket -> (t, Error.t) result
+  (** [v ~sw ?filters value] lists live keys matching the supplied
+      bucket-relative filters. An empty list matches every key. *)
+
+  val next : t -> (Key.t option, Error.t) result
+  (** [next lister] returns the next key, or [Ok None] after the initial listing
+      marker. Calls are single-owner. *)
+
+  val next_with_timeout :
+    timeout:Mtime.Span.t -> t -> (Key.t option, Error.t) result
+  (** [next_with_timeout ~timeout lister] bounds one read. *)
+
+  val close : t -> (unit, Error.t) result
+  (** [close lister] closes the underlying watch. *)
 end
 
 val create : Jetstream.t -> Config.t -> (t, Error.t) result
@@ -249,10 +302,12 @@ val delete_bucket : t -> (unit, Error.t) result
 val put : t -> Key.t -> string -> (int64, Error.t) result
 (** [put value key payload] appends a new value and returns its revision. *)
 
-val create_key : t -> Key.t -> string -> (int64, Error.t) result
-(** [create_key value key payload] creates [key] only when its current revision
-    is zero. A tombstoned key is resurrected with a compare-and-set update at
-    the tombstone revision. *)
+val create_key :
+  ?ttl:Mtime.Span.t -> t -> Key.t -> string -> (int64, Error.t) result
+(** [create_key ?ttl value key payload] creates [key] only when its current
+    revision is zero. [ttl] sets a per-message lifetime for the created value;
+    it requires the bucket's [limit_marker_ttl] capability. A tombstoned key is
+    resurrected with a compare-and-set update at the tombstone revision. *)
 
 val update : t -> Key.t -> revision:int64 -> string -> (int64, Error.t) result
 (** [update value key ~revision payload] replaces [key] only when its current
@@ -261,9 +316,16 @@ val update : t -> Key.t -> revision:int64 -> string -> (int64, Error.t) result
 val delete : ?expected_revision:int64 -> t -> Key.t -> (int64, Error.t) result
 (** [delete ?expected_revision value key] appends a delete tombstone. *)
 
-val purge : ?expected_revision:int64 -> t -> Key.t -> (int64, Error.t) result
-(** [purge ?expected_revision value key] appends a purge tombstone that rolls up
-    older revisions for the subject. *)
+val purge :
+  ?expected_revision:int64 ->
+  ?marker_ttl:Mtime.Span.t ->
+  t ->
+  Key.t ->
+  (int64, Error.t) result
+(** [purge ?expected_revision ?marker_ttl value key] appends a purge tombstone
+    that rolls up older revisions for the subject. [marker_ttl] expires the
+    purge marker after the supplied positive span and requires
+    [limit_marker_ttl] to be enabled in the bucket. *)
 
 val get : t -> Key.t -> (Entry.t, Error.t) result
 (** [get value key] returns the latest entry for [key]. A delete or purge
@@ -279,6 +341,11 @@ val keys : ?filter:string -> t -> (Key.t list, Error.t) result
 
     [filter] is a bucket-relative NATS filter using exact tokens, [*], and a
     terminal [>]. It defaults to [>]. Tombstoned keys are omitted. *)
+
+val purge_deletes : ?older_than:purge_age -> t -> (unit, Error.t) result
+(** [purge_deletes ?older_than value] removes current delete and purge markers.
+    By default markers newer than thirty minutes are retained; [Any] removes all
+    markers. *)
 
 val history : t -> Key.t -> (Entry.t list, Error.t) result
 (** [history value key] returns retained entries for [key], oldest first. Put,
