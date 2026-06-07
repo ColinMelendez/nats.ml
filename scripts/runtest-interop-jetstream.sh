@@ -32,7 +32,15 @@ case "$jetstream_mode" in
   pull) peer_mode=jetstream ;;
   push) peer_mode=jetstream-push ;;
   ordered) peer_mode=jetstream-ordered ;;
-  kv) peer_mode=jetstream-kv ;;
+  kv)
+    peer_mode=jetstream-kv
+    # LimitMarkerTTL and per-message TTL support require the JetStream API
+    # level provided by NATS 2.11. Keep the older default for the other modes,
+    # while allowing callers to override the image explicitly.
+    if [ -z "${NATS_SERVER_IMAGE+x}" ]; then
+      image=nats:2.11.0
+    fi
+    ;;
   object) peer_mode=jetstream-object ;;
   *)
     echo "NATS_TEST_INTEROP_JETSTREAM_MODE must be pull, push, ordered, kv, or object" >&2
