@@ -117,6 +117,22 @@
   ptime))
 
 (executable
+ (name interop_object_store_acceptance)
+ (modules interop_auth interop_object_store_acceptance)
+ (libraries
+  nats
+  nats-eio
+  eio
+  eio_main
+  tls
+  x509
+  domain-name
+  mirage-crypto-rng.unix
+  mirage-crypto-ec
+  base64
+  ptime))
+
+(executable
  (name interop_jetstream_ordered_reconnect_acceptance)
  (modules interop_auth interop_jetstream_ordered_reconnect_acceptance)
  (libraries

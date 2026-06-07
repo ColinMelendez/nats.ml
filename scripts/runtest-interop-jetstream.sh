@@ -33,8 +33,9 @@ case "$jetstream_mode" in
   push) peer_mode=jetstream-push ;;
   ordered) peer_mode=jetstream-ordered ;;
   kv) peer_mode=jetstream-kv ;;
+  object) peer_mode=jetstream-object ;;
   *)
-    echo "NATS_TEST_INTEROP_JETSTREAM_MODE must be pull, push, ordered, or kv" >&2
+    echo "NATS_TEST_INTEROP_JETSTREAM_MODE must be pull, push, ordered, kv, or object" >&2
     exit 1
     ;;
 esac
@@ -216,6 +217,7 @@ case "$jetstream_mode" in
   push) acceptance_executable=test/interop/interop_jetstream_push_acceptance.exe ;;
   ordered) acceptance_executable=test/interop/interop_jetstream_ordered_acceptance.exe ;;
   kv) acceptance_executable=test/interop/interop_key_value_acceptance.exe ;;
+  object) acceptance_executable=test/interop/interop_object_store_acceptance.exe ;;
 esac
 if NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" NATS_TEST_INTEROP_BUCKET="$bucket" \
