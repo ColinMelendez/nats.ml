@@ -1,0 +1,180 @@
+# Go SDK capability parity audit
+
+This audit compares the Eio SDK in this repository with the current official Go
+SDK pinned by the interop peer: `github.com/nats-io/nats.go v1.52.0`. The Go
+version is deliberately pinned so that a later server or SDK release does not
+silently change the scope of this document. The comparison is about user-visible
+capabilities, not a one-for-one translation of Go method names. Eio's direct
+style, switch-owned lifetimes, and typed OCaml values are intentional API
+differences.
+
+The primary Go references are the [nats.go repository](https://github.com/nats-io/nats.go),
+its current [JetStream package](https://github.com/nats-io/nats.go/tree/v1.52.0/jetstream),
+and its [Services package](https://github.com/nats-io/nats.go/tree/v1.52.0/micro).
+The repository's existing interop runners provide the behavioral evidence for
+the capabilities marked as covered.
+
+## Summary
+
+| Area | Current position | Material gaps |
+| --- | --- | --- |
+| Core NATS | Covered for the Eio model | WebSocket transport and some Go-specific diagnostics/options |
+| Authentication and TLS | Covered | Dynamic callback and transport-option breadth is narrower |
+| Reconnect, discovery, drain | Covered | Go-style callback hooks and connection statistics are not mirrored |
+| JetStream management | Broad partial coverage | Message deletion, manager/upsert/account operations, and newer stream fields |
+| JetStream publishing | Synchronous publish acknowledgements | Async publishing and expectation/retry/TTL/schedule/batch options |
+| JetStream consumption | Pull, push, ordered, heartbeats, flow control, priority | Consumer reset, some ordered/ack fields, and Go's continuous batching controls |
+| Key-Value | CRUD, CAS, history, finite keys, watches | Per-key TTL, purge-delete cleanup, resumable/multi-filter watches, listers |
+| Object Store | Streaming CRUD, links, metadata, watches, list, seal | Bucket manager/listers and Go cross-SDK coverage |
+| Services | Registration, groups, requests, errors, discovery, stats | Reset/stopped state, pending limits, custom lifecycle/stat callbacks |
+
+## Core and transport
+
+The following Go capabilities have equivalent OCaml behavior, although the
+ownership and receive APIs differ:
+
+- Core publish, headers, request/reply, no-responders, queue groups, flush,
+  unsubscribe, auto-unsubscribe, drain, and close.
+- Ordered configured and discovered server candidates, reconnect backoff and
+  jitter, subscription replay, reconnect lifecycle events, and bounded pending
+  resources.
+- Token, username/password, NKey, JWT/NKey, TLS, server-required TLS, and mTLS
+  authentication paths.
+
+Go exposes synchronous subscriptions, callbacks, and channels because those are
+natural Go concurrency forms. The OCaml surface uses `Subscription.next`,
+`iter`, and Eio switches instead; this is an intentional runtime adaptation,
+not a missing capability.
+
+The remaining transport/diagnostic gaps are:
+
+- No WebSocket transport adapter. This is a real capability gap for browser or
+  proxy deployments, but it should remain a transport package rather than enter
+  the protocol core.
+- No direct equivalent of Go's custom dialer, in-process server, WebSocket HTTP
+  headers, proxy path, ping/stale-connection tuning, or connection statistics and
+  server-introspection methods. Most are adapter-specific or observability
+  conveniences and are lower priority than protocol features.
+
+## JetStream management and publishing
+
+### Covered
+
+The OCaml client already covers synchronous publish acknowledgements, message
+IDs, stream create/bind/update/list/info/delete, direct message reads by
+sequence and subject, subject-filtered purge, consumer create/bind/update/list/
+info/delete, pull and push consumers, ordered consumers, explicit/all/no-ack
+acknowledgements, redelivery, backoff, filters, replay, idle heartbeats, flow
+control, priority groups, pause/resume, and consumer recovery. These are backed
+by the current Core request/reply and subscription primitives.
+
+### Partial or missing stream capabilities
+
+The Go `jetstream.StreamConfig` can also express:
+
+- maximum consumers and discard-new-per-subject;
+- no-ack streams and duplicate windows;
+- mirrors, sources, source filters/transforms, and placement metadata;
+- deny-purge, initial sequence, subject transforms, republish, and mirror-direct
+  reads;
+- stream-level consumer limits;
+- per-message TTL/counter support, scheduled messages, atomic/batched publish
+  feature flags, and newer persistence settings.
+
+The OCaml codec preserves unknown fields when reading and read-modify-write
+updates preserve fields outside the modeled projection. That prevents data loss,
+but it does not make the fields configurable. The first concrete gap in this
+audit is stream message deletion: Go exposes both ordinary deletion and secure
+deletion while the OCaml stream handle currently exposes only purge. The
+implementation is tracked as the first follow-up slice.
+
+The Go SDK also exposes manager-level create/update/upsert operations, stream
+and stream-name listers, account information, and consumer reset operations.
+OCaml callers can compose some of these from `Stream.bind`, `create`, `update`,
+and `list`, but there is no equivalent for account information or resetting a
+consumer's delivery state.
+
+### Publishing gaps
+
+The current OCaml publisher waits for each acknowledgement. Go additionally
+supports asynchronous publish futures, pending/completion tracking, and publish
+options for expected stream/sequence/message IDs, retry policy, stall waits,
+per-message TTL, scheduling, atomic publish, and fast batch publish. These need a
+deliberate asynchronous publisher design rather than a collection of optional
+arguments on the synchronous function.
+
+### Consumption gaps
+
+The normal pull/push/ordered workflows are present. The remaining Go-level gaps
+are:
+
+- `AckFlowControlPolicy` and the corresponding acknowledgement semantics;
+- the separate consumer name field, where it is distinct from a durable name;
+- consumer reset/reset-to-sequence operations;
+- ordered-consumer multi-subject filters, metadata, headers-only mode, inactive
+  threshold, reset-attempt limit, and custom name prefix;
+- Go's fetch-by-bytes/no-wait and continuously overlapping `Messages`/`Consume`
+  helpers. OCaml `fetch` and `iter` cover the basic workflows, but not every
+  throughput/control option exposed by Go.
+
+## Key-Value
+
+The OCaml module covers bucket configuration, revisioned get/put/create/update,
+compare-and-set delete/purge, exact revision reads, finite key scans, history,
+and switch-owned watches with initial markers, delivery policies, delete
+filtering, and metadata-only delivery.
+
+The Go SDK additionally supports per-key TTL on create, purge-marker cleanup
+(`PurgeDeletes`, including age selection), resumable watches, updates-only /
+ignore-delete / metadata-only watch options as separate controls, multi-filter
+watches, streaming key listers, filtered key listers, and bucket manager
+create/update/upsert/name/status listers. These are real follow-up capabilities;
+the current `New`/`Last_per_subject`/`All` watch policies intentionally cover only
+the existing snapshot-vs-history choices.
+
+## Object Store
+
+The OCaml module already has the important data-plane shape: incremental
+Bytesrw put/get, digest and chunk verification, metadata updates, ordinary and
+bucket links, listing, tombstones, watches, deletion cleanup, status, and
+sealing. Its typed link representation is equivalent to the Go split between
+`AddLink` and `AddBucketLink`.
+
+The remaining API gaps are bucket-level create/update/create-or-update
+distinctions, bucket-name/status listers, and file convenience helpers. The
+largest immediate confidence gap is test coverage: unlike Core, JetStream, KV,
+and Services, there is not yet a Go peer exercising the same Object Store data
+against both SDKs. That should follow the stream-delete slice.
+
+## Services
+
+The OCaml service module covers typed identity/configuration, endpoint and group
+composition, queue and metadata declarations, successful and error replies,
+monitoring discovery, statistics, and service-local stopping. Go additionally
+offers `Reset`, `Stopped`, endpoint pending message/byte limits, and custom
+statistics, error, and done callbacks. The first two are small state-surface
+extensions; the callbacks need an explicit Eio ownership policy and should not be
+added as unstructured mutable hooks.
+
+## Prioritized follow-up
+
+1. **Stream message deletion.** Add ordinary and secure deletion with structured
+   response handling and black-box coverage. This is a contained, user-visible
+   omission and is needed before treating stream administration as complete.
+2. **Object Store Go interop.** Add a Go v1.52.0 peer and exercise streaming
+   content, metadata, links, deletion markers, watches, list, seal, and cleanup
+   in both directions.
+3. **KV lifecycle and watch controls.** Add purge-delete cleanup, per-key TTL,
+   resumable/multi-filter watches, and streaming key iteration where the Eio
+   ownership model can express them cleanly.
+4. **JetStream manager and consumer administration.** Add account information,
+   consumer reset, and compositional manager-level upsert/lister helpers.
+5. **Stream configuration and publishing expansion.** Add mirrors/sources and
+   their transforms before the newer server feature flags; then design an async
+   publisher around explicit futures/handles and expectation options.
+6. **Transport and service breadth.** Add WebSocket as a separate adapter and
+   service reset/stopped/pending-limit behavior after the protocol gaps above.
+
+This ordering keeps the narrow protocol waist intact, gives each addition a
+behavioral test target, and avoids claiming parity merely because unknown JSON
+fields survive a read-modify-write operation.
