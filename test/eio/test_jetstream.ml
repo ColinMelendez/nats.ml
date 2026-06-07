@@ -444,6 +444,8 @@ let () =
                  ~max_msgs_per_subject:5L ~allow_rollup:true ~allow_direct:true
                  ~deny_delete:true ~replicas:3 ~placement
                  ~compression:Nats_eio.Jetstream.Stream.Config.S2
+                 ~allow_msg_ttl:true
+                 ~subject_delete_marker_ttl:Mtime.Span.(2 * s)
                  ~metadata:[ ("owner", "users") ]
                  ())
           in
@@ -461,6 +463,14 @@ let () =
           equal bool true (Nats_eio.Jetstream.Stream.Config.allow_rollup config);
           equal bool true (Nats_eio.Jetstream.Stream.Config.allow_direct config);
           equal bool true (Nats_eio.Jetstream.Stream.Config.deny_delete config);
+          equal bool true
+            (Nats_eio.Jetstream.Stream.Config.allow_msg_ttl config);
+          (match
+             Nats_eio.Jetstream.Stream.Config.subject_delete_marker_ttl config
+           with
+          | Some value ->
+              equal bool true (Mtime.Span.equal value Mtime.Span.(2 * s))
+          | None -> fail "stream config lost subject delete marker TTL");
           equal int 3 (Nats_eio.Jetstream.Stream.Config.replicas config);
           (match Nats_eio.Jetstream.Stream.Config.placement config with
           | None -> fail "stream config lost placement"
@@ -537,6 +547,22 @@ let () =
           in
           equal bool false
             (Nats_eio.Jetstream.Stream.Config.deny_delete updated);
+          let updated =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_allow_msg_ttl config false)
+          in
+          equal bool false
+            (Nats_eio.Jetstream.Stream.Config.allow_msg_ttl updated);
+          let updated =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_subject_delete_marker_ttl
+                 config None)
+          in
+          (match
+             Nats_eio.Jetstream.Stream.Config.subject_delete_marker_ttl updated
+           with
+          | None -> ()
+          | Some _ -> fail "stream config updater retained marker TTL");
           let sealed =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Stream.Config.with_sealed config true)
