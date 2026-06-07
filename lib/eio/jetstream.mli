@@ -7,6 +7,7 @@ module Error : sig
     | Empty_subjects
     | Invalid_limit of { field : string; value : int64 }
     | Invalid_max_age
+    | Invalid_subject_delete_marker_ttl
     | Invalid_replicas of int
     | Empty_placement
     | Empty_placement_cluster
@@ -132,6 +133,8 @@ module Stream : sig
       ?max_bytes:int64 ->
       ?max_age:Mtime.Span.t ->
       ?max_msg_size:int64 ->
+      ?allow_msg_ttl:bool ->
+      ?subject_delete_marker_ttl:Mtime.Span.t ->
       ?allow_rollup:bool ->
       ?allow_direct:bool ->
       ?deny_delete:bool ->
@@ -158,6 +161,8 @@ module Stream : sig
     val max_bytes : t -> int64 option
     val max_age : t -> Mtime.Span.t option
     val max_msg_size : t -> int64 option
+    val allow_msg_ttl : t -> bool
+    val subject_delete_marker_ttl : t -> Mtime.Span.t option
     val allow_rollup : t -> bool
 
     val allow_direct : t -> bool
@@ -226,6 +231,15 @@ module Stream : sig
     val with_max_msg_size : t -> int64 option -> (t, error) result
     (** [with_max_msg_size config value] validates and replaces the per-message
         size limit. [None] means unlimited. *)
+
+    val with_allow_msg_ttl : t -> bool -> (t, error) result
+    (** [with_allow_msg_ttl config value] replaces whether message-level TTL
+        headers are accepted by the stream. *)
+
+    val with_subject_delete_marker_ttl :
+      t -> Mtime.Span.t option -> (t, error) result
+    (** [with_subject_delete_marker_ttl config value] replaces the server-side
+        lifetime of subject delete markers. [None] disables the limit. *)
 
     val with_allow_rollup : t -> bool -> (t, error) result
     (** [with_allow_rollup config value] replaces whether rollup headers are
@@ -313,11 +327,13 @@ module Stream : sig
   val purge :
     ?timeout:Mtime.Span.t ->
     ?subject:Nats.Subject.Filter.t ->
+    ?keep:int64 ->
     t ->
     (int64, Error.t) result
-  (** [purge ?subject stream] removes messages from [stream]. With [subject],
-      only messages matching the subject filter are removed. The result is the
-      number of messages the server purged. *)
+  (** [purge ?subject ?keep stream] removes messages from [stream]. With
+      [subject], only messages matching the subject filter are removed. With
+      [keep], the newest [keep] matching messages are retained. The result is
+      the number of messages the server purged. *)
 
   val delete_message :
     ?timeout:Mtime.Span.t -> t -> sequence:int64 -> (unit, Error.t) result

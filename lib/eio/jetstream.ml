@@ -8,6 +8,7 @@ module Error = struct
     | Empty_subjects
     | Invalid_limit of { field : string; value : int64 }
     | Invalid_max_age
+    | Invalid_subject_delete_marker_ttl
     | Invalid_replicas of int
     | Empty_placement
     | Empty_placement_cluster
@@ -82,6 +83,9 @@ module Error = struct
         Format.fprintf ppf "invalid %s limit %Ld" field value
     | Invalid_max_age ->
         Format.pp_print_string ppf "stream max age must not be negative"
+    | Invalid_subject_delete_marker_ttl ->
+        Format.pp_print_string ppf
+          "stream subject delete marker TTL must be positive"
     | Invalid_replicas value ->
         Format.fprintf ppf "stream replicas must be between 1 and 5, got %d"
           value
@@ -312,6 +316,8 @@ module Stream = struct
       max_bytes : int64 option;
       max_age : Mtime.Span.t option;
       max_msg_size : int64 option;
+      allow_msg_ttl : bool;
+      subject_delete_marker_ttl : Mtime.Span.t option;
       allow_rollup : bool;
       allow_direct : bool;
       deny_delete : bool;
@@ -352,18 +358,28 @@ module Stream = struct
       if value < 1 || value > 5 then Error (Error.Invalid_replicas value)
       else Ok ()
 
+    let normalize_span = function
+      | Some value when Int.equal (Mtime.Span.compare value Mtime.Span.zero) 0
+        ->
+          None
+      | value -> value
+
     let v_internal ~allow_empty_subjects ~name ~subjects ?description
         ?(storage = File) ?(replicas = 1) ?placement
         ?(compression = Uncompressed) ?(metadata = []) ?(retention = Limits)
         ?(discard = Old) ?max_msgs ?max_msgs_per_subject ?max_bytes ?max_age
-        ?max_msg_size ?(allow_rollup = false) ?(allow_direct = false)
-        ?(deny_delete = false) ?(sealed = false) () =
+        ?max_msg_size ?(allow_msg_ttl = false) ?subject_delete_marker_ttl
+        ?(allow_rollup = false) ?(allow_direct = false) ?(deny_delete = false)
+        ?(sealed = false) () =
       let max_age =
         match max_age with
         | Some value when Int.equal (Mtime.Span.compare value Mtime.Span.zero) 0
           ->
             None
         | value -> value
+      in
+      let subject_delete_marker_ttl =
+        normalize_span subject_delete_marker_ttl
       in
       match validate_name name with
       | Error error -> Error error
@@ -394,38 +410,50 @@ module Stream = struct
                                 when Mtime.Span.compare value Mtime.Span.zero
                                      < 0 ->
                                   Error Error.Invalid_max_age
-                              | _ ->
-                                  Ok
-                                    {
-                                      name;
-                                      subjects;
-                                      description;
-                                      storage;
-                                      replicas;
-                                      placement;
-                                      compression;
-                                      metadata;
-                                      retention;
-                                      discard;
-                                      max_msgs;
-                                      max_msgs_per_subject;
-                                      max_bytes;
-                                      max_age;
-                                      max_msg_size;
-                                      allow_rollup;
-                                      allow_direct;
-                                      deny_delete;
-                                      sealed;
-                                    }))))))
+                              | _ -> (
+                                  match subject_delete_marker_ttl with
+                                  | Some value
+                                    when Mtime.Span.compare value
+                                           Mtime.Span.zero
+                                         <= 0 ->
+                                      Error
+                                        Error.Invalid_subject_delete_marker_ttl
+                                  | _ ->
+                                      Ok
+                                        {
+                                          name;
+                                          subjects;
+                                          description;
+                                          storage;
+                                          replicas;
+                                          placement;
+                                          compression;
+                                          metadata;
+                                          retention;
+                                          discard;
+                                          max_msgs;
+                                          max_msgs_per_subject;
+                                          max_bytes;
+                                          max_age;
+                                          max_msg_size;
+                                          allow_msg_ttl;
+                                          subject_delete_marker_ttl;
+                                          allow_rollup;
+                                          allow_direct;
+                                          deny_delete;
+                                          sealed;
+                                        })))))))
 
     let v ~name ~subjects ?description ?storage ?replicas ?placement
         ?compression ?metadata ?retention ?discard ?max_msgs
-        ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size ?allow_rollup
-        ?allow_direct ?deny_delete ?sealed () =
+        ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size ?allow_msg_ttl
+        ?subject_delete_marker_ttl ?allow_rollup ?allow_direct ?deny_delete
+        ?sealed () =
       v_internal ~allow_empty_subjects:false ~name ~subjects ?description
         ?storage ?replicas ?placement ?compression ?metadata ?retention ?discard
         ?max_msgs ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size
-        ?allow_rollup ?allow_direct ?deny_delete ?sealed ()
+        ?allow_msg_ttl ?subject_delete_marker_ttl ?allow_rollup ?allow_direct
+        ?deny_delete ?sealed ()
 
     let name value = value.name
     let subjects value = value.subjects
@@ -442,25 +470,34 @@ module Stream = struct
     let max_bytes value = value.max_bytes
     let max_age value = value.max_age
     let max_msg_size value = value.max_msg_size
+    let allow_msg_ttl value = value.allow_msg_ttl
+    let subject_delete_marker_ttl value = value.subject_delete_marker_ttl
     let allow_rollup value = value.allow_rollup
     let allow_direct value = value.allow_direct
     let deny_delete value = value.deny_delete
     let sealed value = value.sealed
 
-    let rebuild ?sealed ?replicas ?placement ?compression ?metadata value ~name
-        ~subjects ~storage ~retention ~discard ~max_msgs ~max_msgs_per_subject
-        ~max_bytes ~max_age ~max_msg_size ~allow_rollup ~allow_direct
-        ~deny_delete =
+    let rebuild ?sealed ?replicas ?placement ?compression ?metadata
+        ?allow_msg_ttl ?subject_delete_marker_ttl value ~name ~subjects ~storage
+        ~retention ~discard ~max_msgs ~max_msgs_per_subject ~max_bytes ~max_age
+        ~max_msg_size ~allow_rollup ~allow_direct ~deny_delete =
       let replicas = Option.value ~default:value.replicas replicas in
       let placement = Option.value ~default:value.placement placement in
       let compression = Option.value ~default:value.compression compression in
       let metadata = Option.value ~default:value.metadata metadata in
+      let allow_msg_ttl =
+        Option.value ~default:value.allow_msg_ttl allow_msg_ttl
+      in
+      let subject_delete_marker_ttl =
+        Option.value ~default:value.subject_delete_marker_ttl
+          subject_delete_marker_ttl
+      in
       v_internal
         ~allow_empty_subjects:(Int.equal (List.length value.subjects) 0)
         ~name ~subjects ?description:value.description ~storage ~retention
         ~replicas ?placement ~compression ~metadata ~discard ?max_msgs
         ?max_bytes ?max_msgs_per_subject ?max_age ?max_msg_size ~allow_rollup
-        ~allow_direct ~deny_delete
+        ~allow_msg_ttl ?subject_delete_marker_ttl ~allow_direct ~deny_delete
         ~sealed:(Option.value sealed ~default:value.sealed)
         ()
 
@@ -483,6 +520,8 @@ module Stream = struct
         ?max_bytes:value.max_bytes ?max_age:value.max_age
         ?max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
         ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+        ~allow_msg_ttl:value.allow_msg_ttl
+        ?subject_delete_marker_ttl:value.subject_delete_marker_ttl
         ~sealed:value.sealed ~replicas:value.replicas ?placement:value.placement
         ~compression:value.compression ~metadata:value.metadata ()
 
@@ -557,6 +596,25 @@ module Stream = struct
         ~allow_rollup:value.allow_rollup ~allow_direct:value.allow_direct
         ~deny_delete:value.deny_delete
 
+    let with_allow_msg_ttl value allow_msg_ttl =
+      rebuild ~allow_msg_ttl value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+
+    let with_subject_delete_marker_ttl value subject_delete_marker_ttl =
+      rebuild ~subject_delete_marker_ttl value ~name:value.name
+        ~subjects:value.subjects ~storage:value.storage
+        ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+
     let with_max_msgs_per_subject value max_msgs_per_subject =
       rebuild value ~name:value.name ~subjects:value.subjects
         ~storage:value.storage ~retention:value.retention ~discard:value.discard
@@ -622,6 +680,8 @@ module Stream = struct
         ?max_bytes:value.max_bytes ?max_age:value.max_age
         ?max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
         ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+        ~allow_msg_ttl:value.allow_msg_ttl
+        ?subject_delete_marker_ttl:value.subject_delete_marker_ttl
         ~sealed:value.sealed ()
 
     let with_compression value compression =
@@ -700,6 +760,8 @@ module Stream = struct
     max_bytes : int64 option;
     max_age : int64 option;
     max_msg_size : int64 option;
+    allow_msg_ttl : bool option;
+    subject_delete_marker_ttl : int64 option;
     allow_rollup : bool;
     allow_direct : bool;
     deny_delete : bool;
@@ -782,6 +844,8 @@ module Stream = struct
         max_bytes
         max_age
         max_msg_size
+        allow_msg_ttl
+        subject_delete_marker_ttl
         allow_rollup
         allow_direct
         deny_delete
@@ -804,6 +868,8 @@ module Stream = struct
           max_bytes;
           max_age;
           max_msg_size;
+          allow_msg_ttl;
+          subject_delete_marker_ttl;
           allow_rollup = Option.value ~default:false allow_rollup;
           allow_direct = Option.value ~default:false allow_direct;
           deny_delete = Option.value ~default:false deny_delete;
@@ -842,6 +908,10 @@ module Stream = struct
         value.max_age)
     |> Jsont.Object.opt_mem "max_msg_size" Jsont.int64 ~enc:(fun value ->
         value.max_msg_size)
+    |> Jsont.Object.opt_mem "allow_msg_ttl" Jsont.bool ~enc:(fun value ->
+        value.allow_msg_ttl)
+    |> Jsont.Object.opt_mem "subject_delete_marker_ttl" Jsont.int64
+         ~enc:(fun value -> value.subject_delete_marker_ttl)
     |> Jsont.Object.opt_mem "allow_rollup_hdrs" Jsont.bool ~enc:(fun value ->
         Some value.allow_rollup)
     |> Jsont.Object.opt_mem "allow_direct" Jsont.bool ~enc:(fun value ->
@@ -954,6 +1024,10 @@ module Stream = struct
       max_bytes = Config.max_bytes value;
       max_age = Option.map Mtime.Span.to_uint64_ns (Config.max_age value);
       max_msg_size = Config.max_msg_size value;
+      allow_msg_ttl = (if Config.allow_msg_ttl value then Some true else None);
+      subject_delete_marker_ttl =
+        Option.map Mtime.Span.to_uint64_ns
+          (Config.subject_delete_marker_ttl value);
       allow_rollup = Config.allow_rollup value;
       allow_direct = Config.allow_direct value;
       deny_delete = Config.deny_delete value;
@@ -991,6 +1065,12 @@ module Stream = struct
              (Option.map Mtime.Span.to_uint64_ns (Config.max_age value)));
       max_msg_size =
         Some (Option.value ~default:(-1L) (Config.max_msg_size value));
+      allow_msg_ttl = Some (Config.allow_msg_ttl value);
+      subject_delete_marker_ttl =
+        Some
+          (Option.value ~default:0L
+             (Option.map Mtime.Span.to_uint64_ns
+                (Config.subject_delete_marker_ttl value)));
       allow_rollup = Config.allow_rollup value;
       allow_direct = Config.allow_direct value;
       deny_delete = Config.deny_delete value;
@@ -1027,6 +1107,11 @@ module Stream = struct
         let max_msg_size =
           match value.max_msg_size with Some -1L -> None | value -> value
         in
+        let subject_delete_marker_ttl =
+          match value.subject_delete_marker_ttl with
+          | None | Some 0L -> None
+          | Some nanoseconds -> Some (Mtime.Span.of_uint64_ns nanoseconds)
+        in
         let max_age =
           match value.max_age with
           | None | Some 0L -> None
@@ -1051,7 +1136,8 @@ module Stream = struct
                 ~metadata:(metadata_of_wire value.metadata)
                 ~retention:value.retention ~discard:value.discard ?max_msgs
                 ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size
-                ~allow_rollup:value.allow_rollup
+                ~allow_msg_ttl:(Option.value ~default:false value.allow_msg_ttl)
+                ?subject_delete_marker_ttl ~allow_rollup:value.allow_rollup
                 ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
                 ~sealed:value.sealed ()
             with
@@ -1252,13 +1338,14 @@ module Stream = struct
     | Error error -> Error error
     | Ok message -> stored_message stream message
 
-  type purge_request = { filter : string option }
+  type purge_request = { filter : string option; keep : int64 option }
 
   let purge_request_codec =
-    Jsont.Object.map ~kind:"JetStream stream purge request" (fun filter ->
-        { filter })
+    Jsont.Object.map ~kind:"JetStream stream purge request" (fun filter keep ->
+        { filter; keep })
     |> Jsont.Object.opt_mem "filter" Jsont.string ~enc:(fun value ->
         value.filter)
+    |> Jsont.Object.opt_mem "keep" Jsont.int64 ~enc:(fun value -> value.keep)
     |> Jsont.Object.finish
 
   type purge_response = { error : api_error option; purged : int64 }
@@ -1271,26 +1358,38 @@ module Stream = struct
     |> Jsont.Object.mem "purged" Jsont.int64 ~enc:(fun value -> value.purged)
     |> Jsont.Object.skip_unknown |> Jsont.Object.finish
 
-  let purge ?timeout ?subject stream =
-    let request =
-      { filter = Option.map Nats.Subject.Filter.to_string subject }
+  let purge ?timeout ?subject ?keep stream =
+    let keep =
+      match keep with
+      | None -> Ok None
+      | Some value when Int64.compare value 0L >= 0 -> Ok (Some value)
+      | Some value ->
+          Error
+            (Error.Invalid_message_header
+               { name = "keep"; value = Int64.to_string value })
     in
-    match encode purge_request_codec request with
+    match keep with
     | Error error -> Error error
-    | Ok payload -> (
-        let subject =
-          api_subject stream.jetstream [ "STREAM"; "PURGE"; stream.name ]
+    | Ok keep -> (
+        let request =
+          { filter = Option.map Nats.Subject.Filter.to_string subject; keep }
         in
-        match
-          request_msg ?timeout stream.jetstream
-            (Nats.Message.v ~subject payload)
-        with
+        match encode purge_request_codec request with
         | Error error -> Error error
-        | Ok message -> (
-            match decode purge_response_codec message with
+        | Ok payload -> (
+            let subject =
+              api_subject stream.jetstream [ "STREAM"; "PURGE"; stream.name ]
+            in
+            match
+              request_msg ?timeout stream.jetstream
+                (Nats.Message.v ~subject payload)
+            with
             | Error error -> Error error
-            | Ok { error = Some error; _ } -> Error (Error.Api error)
-            | Ok { error = None; purged } -> Ok purged))
+            | Ok message -> (
+                match decode purge_response_codec message with
+                | Error error -> Error error
+                | Ok { error = Some error; _ } -> Error (Error.Api error)
+                | Ok { error = None; purged } -> Ok purged)))
 
   type message_delete_request = { sequence : int64; no_erase : bool option }
 
