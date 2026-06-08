@@ -46,6 +46,8 @@ module Error = struct
     | Invalid_config of config
     | Invalid_headers of Nats.Header.error
     | Message_not_found
+    | Stream_not_found
+    | Consumer_not_found
     | Message_delete_failed of { sequence : int64; secure : bool }
     | Invalid_message_header of { name : string; value : string }
     | Empty_msg_id
@@ -57,6 +59,7 @@ module Error = struct
     | Invalid_priority_group of string
     | Invalid_priority_threshold of { field : string; value : int64 }
     | Invalid_priority of int
+    | Invalid_consumer_reset_sequence of int64
     | Invalid_fetch_span
     | Invalid_idle_heartbeat
     | Idle_heartbeat_expires_too_short
@@ -153,6 +156,10 @@ module Error = struct
           error
     | Message_not_found ->
         Format.pp_print_string ppf "JetStream message was not found"
+    | Stream_not_found ->
+        Format.pp_print_string ppf "JetStream stream was not found"
+    | Consumer_not_found ->
+        Format.pp_print_string ppf "JetStream consumer was not found"
     | Message_delete_failed { sequence; secure } ->
         Format.fprintf ppf
           "JetStream %smessage deletion failed for sequence %Ld"
@@ -185,6 +192,9 @@ module Error = struct
     | Invalid_priority value ->
         Format.fprintf ppf
           "JetStream pull priority must be between 0 and 9, got %d" value
+    | Invalid_consumer_reset_sequence value ->
+        Format.fprintf ppf
+          "JetStream consumer reset sequence must be positive, got %Ld" value
     | Invalid_fetch_span ->
         Format.pp_print_string ppf "JetStream fetch expiry must be positive"
     | Invalid_idle_heartbeat ->
@@ -273,6 +283,333 @@ let api_error_codec =
        ~enc:(fun value -> value.Error.metadata)
        Jsont.json_mems
   |> Jsont.Object.finish
+
+type account_limits_wire = {
+  max_memory : int64 option;
+  max_storage : int64 option;
+  max_streams : int option;
+  max_consumers : int option;
+  max_ack_pending : int option;
+  memory_max_stream_bytes : int64 option;
+  storage_max_stream_bytes : int64 option;
+  max_bytes_required : bool option;
+}
+
+let account_limits_codec =
+  Jsont.Object.map ~kind:"JetStream account limits"
+    (fun
+      max_memory
+      max_storage
+      max_streams
+      max_consumers
+      max_ack_pending
+      memory_max_stream_bytes
+      storage_max_stream_bytes
+      max_bytes_required
+    ->
+      {
+        max_memory;
+        max_storage;
+        max_streams;
+        max_consumers;
+        max_ack_pending;
+        memory_max_stream_bytes;
+        storage_max_stream_bytes;
+        max_bytes_required;
+      })
+  |> Jsont.Object.opt_mem "max_memory" Jsont.int64 ~enc:(fun value ->
+      value.max_memory)
+  |> Jsont.Object.opt_mem "max_storage" Jsont.int64 ~enc:(fun value ->
+      value.max_storage)
+  |> Jsont.Object.opt_mem "max_streams" Jsont.int ~enc:(fun value ->
+      value.max_streams)
+  |> Jsont.Object.opt_mem "max_consumers" Jsont.int ~enc:(fun value ->
+      value.max_consumers)
+  |> Jsont.Object.opt_mem "max_ack_pending" Jsont.int ~enc:(fun value ->
+      value.max_ack_pending)
+  |> Jsont.Object.opt_mem "memory_max_stream_bytes" Jsont.int64
+       ~enc:(fun value -> value.memory_max_stream_bytes)
+  |> Jsont.Object.opt_mem "storage_max_stream_bytes" Jsont.int64
+       ~enc:(fun value -> value.storage_max_stream_bytes)
+  |> Jsont.Object.opt_mem "max_bytes_required" Jsont.bool ~enc:(fun value ->
+      value.max_bytes_required)
+  |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+
+type account_tier_wire = {
+  memory : int64 option;
+  storage : int64 option;
+  reserved_memory : int64 option;
+  reserved_storage : int64 option;
+  streams : int option;
+  consumers : int option;
+  limits : account_limits_wire option;
+}
+
+let account_tier_codec =
+  Jsont.Object.map ~kind:"JetStream account tier"
+    (fun
+      memory
+      storage
+      reserved_memory
+      reserved_storage
+      streams
+      consumers
+      limits
+    ->
+      {
+        memory;
+        storage;
+        reserved_memory;
+        reserved_storage;
+        streams;
+        consumers;
+        limits;
+      })
+  |> Jsont.Object.opt_mem "memory" Jsont.int64 ~enc:(fun value -> value.memory)
+  |> Jsont.Object.opt_mem "storage" Jsont.int64 ~enc:(fun value ->
+      value.storage)
+  |> Jsont.Object.opt_mem "reserved_memory" Jsont.int64 ~enc:(fun value ->
+      value.reserved_memory)
+  |> Jsont.Object.opt_mem "reserved_storage" Jsont.int64 ~enc:(fun value ->
+      value.reserved_storage)
+  |> Jsont.Object.opt_mem "streams" Jsont.int ~enc:(fun value -> value.streams)
+  |> Jsont.Object.opt_mem "consumers" Jsont.int ~enc:(fun value ->
+      value.consumers)
+  |> Jsont.Object.opt_mem "limits" account_limits_codec ~enc:(fun value ->
+      value.limits)
+  |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+
+type account_api_wire = {
+  level : int option;
+  total : int64 option;
+  errors : int64 option;
+  inflight : int64 option;
+}
+
+let account_api_codec =
+  Jsont.Object.map ~kind:"JetStream account API statistics"
+    (fun level total errors inflight -> { level; total; errors; inflight })
+  |> Jsont.Object.opt_mem "level" Jsont.int ~enc:(fun value -> value.level)
+  |> Jsont.Object.opt_mem "total" Jsont.int64 ~enc:(fun value -> value.total)
+  |> Jsont.Object.opt_mem "errors" Jsont.int64 ~enc:(fun value -> value.errors)
+  |> Jsont.Object.opt_mem "inflight" Jsont.int64 ~enc:(fun value ->
+      value.inflight)
+  |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+
+type account_info_wire = {
+  error : api_error option;
+  memory : int64 option;
+  storage : int64 option;
+  reserved_memory : int64 option;
+  reserved_storage : int64 option;
+  streams : int option;
+  consumers : int option;
+  limits : account_limits_wire option;
+  domain : string option;
+  api : account_api_wire option;
+  tiers : account_tier_wire String_map.t option;
+}
+
+let account_info_codec =
+  Jsont.Object.map ~kind:"JetStream account info response"
+    (fun
+      error
+      memory
+      storage
+      reserved_memory
+      reserved_storage
+      streams
+      consumers
+      limits
+      domain
+      api
+      tiers
+    ->
+      {
+        error;
+        memory;
+        storage;
+        reserved_memory;
+        reserved_storage;
+        streams;
+        consumers;
+        limits;
+        domain;
+        api;
+        tiers;
+      })
+  |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
+      value.error)
+  |> Jsont.Object.opt_mem "memory" Jsont.int64 ~enc:(fun value -> value.memory)
+  |> Jsont.Object.opt_mem "storage" Jsont.int64 ~enc:(fun value ->
+      value.storage)
+  |> Jsont.Object.opt_mem "reserved_memory" Jsont.int64 ~enc:(fun value ->
+      value.reserved_memory)
+  |> Jsont.Object.opt_mem "reserved_storage" Jsont.int64 ~enc:(fun value ->
+      value.reserved_storage)
+  |> Jsont.Object.opt_mem "streams" Jsont.int ~enc:(fun value -> value.streams)
+  |> Jsont.Object.opt_mem "consumers" Jsont.int ~enc:(fun value ->
+      value.consumers)
+  |> Jsont.Object.opt_mem "limits" account_limits_codec ~enc:(fun value ->
+      value.limits)
+  |> Jsont.Object.opt_mem "domain" Jsont.string ~enc:(fun value -> value.domain)
+  |> Jsont.Object.opt_mem "api" account_api_codec ~enc:(fun value -> value.api)
+  |> Jsont.Object.opt_mem "tiers"
+       (Jsont.Object.as_string_map account_tier_codec) ~enc:(fun value ->
+         value.tiers)
+  |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+
+let empty_limits =
+  {
+    max_memory = None;
+    max_storage = None;
+    max_streams = None;
+    max_consumers = None;
+    max_ack_pending = None;
+    memory_max_stream_bytes = None;
+    storage_max_stream_bytes = None;
+    max_bytes_required = None;
+  }
+
+let empty_api = { level = None; total = None; errors = None; inflight = None }
+
+module Account = struct
+  module Limits = struct
+    type t = {
+      max_memory : int64;
+      max_storage : int64;
+      max_streams : int;
+      max_consumers : int;
+      max_ack_pending : int;
+      memory_max_stream_bytes : int64;
+      storage_max_stream_bytes : int64;
+      max_bytes_required : bool;
+    }
+
+    let make (value : account_limits_wire) =
+      {
+        max_memory = Option.value ~default:0L value.max_memory;
+        max_storage = Option.value ~default:0L value.max_storage;
+        max_streams = Option.value ~default:0 value.max_streams;
+        max_consumers = Option.value ~default:0 value.max_consumers;
+        max_ack_pending = Option.value ~default:0 value.max_ack_pending;
+        memory_max_stream_bytes =
+          Option.value ~default:0L value.memory_max_stream_bytes;
+        storage_max_stream_bytes =
+          Option.value ~default:0L value.storage_max_stream_bytes;
+        max_bytes_required =
+          Option.value ~default:false value.max_bytes_required;
+      }
+
+    let max_memory value = value.max_memory
+    let max_storage value = value.max_storage
+    let max_streams value = value.max_streams
+    let max_consumers value = value.max_consumers
+    let max_ack_pending value = value.max_ack_pending
+    let memory_max_stream_bytes value = value.memory_max_stream_bytes
+    let storage_max_stream_bytes value = value.storage_max_stream_bytes
+    let max_bytes_required value = value.max_bytes_required
+  end
+
+  module Tier = struct
+    type t = {
+      memory : int64;
+      storage : int64;
+      reserved_memory : int64;
+      reserved_storage : int64;
+      streams : int;
+      consumers : int;
+      limits : Limits.t;
+    }
+
+    let make (value : account_tier_wire) =
+      {
+        memory = Option.value ~default:0L value.memory;
+        storage = Option.value ~default:0L value.storage;
+        reserved_memory = Option.value ~default:0L value.reserved_memory;
+        reserved_storage = Option.value ~default:0L value.reserved_storage;
+        streams = Option.value ~default:0 value.streams;
+        consumers = Option.value ~default:0 value.consumers;
+        limits = Limits.make (Option.value ~default:empty_limits value.limits);
+      }
+
+    let memory value = value.memory
+    let storage value = value.storage
+    let reserved_memory value = value.reserved_memory
+    let reserved_storage value = value.reserved_storage
+    let streams value = value.streams
+    let consumers value = value.consumers
+    let limits value = value.limits
+  end
+
+  module Api = struct
+    type t = { level : int; total : int64; errors : int64; inflight : int64 }
+
+    let make (value : account_api_wire) =
+      {
+        level = Option.value ~default:0 value.level;
+        total = Option.value ~default:0L value.total;
+        errors = Option.value ~default:0L value.errors;
+        inflight = Option.value ~default:0L value.inflight;
+      }
+
+    let level value = value.level
+    let total value = value.total
+    let errors value = value.errors
+    let inflight value = value.inflight
+  end
+
+  type t = {
+    domain : string option;
+    tier : Tier.t;
+    tiers : (string * Tier.t) list;
+    api : Api.t;
+  }
+
+  let make ~domain ~tier ~tiers ~api = { domain; tier; tiers; api }
+  let domain value = value.domain
+  let tier value = value.tier
+  let tiers value = value.tiers
+  let api value = value.api
+end
+
+let account_of_wire value =
+  match value.error with
+  | Some error -> Error (Error.Api error)
+  | None ->
+      let tier =
+        Account.Tier.make
+          {
+            memory = value.memory;
+            storage = value.storage;
+            reserved_memory = value.reserved_memory;
+            reserved_storage = value.reserved_storage;
+            streams = value.streams;
+            consumers = value.consumers;
+            limits = value.limits;
+          }
+      in
+      let tiers =
+        Option.value ~default:String_map.empty value.tiers
+        |> String_map.bindings
+        |> List.map (fun (name, value) -> (name, Account.Tier.make value))
+      in
+      let api = Account.Api.make (Option.value ~default:empty_api value.api) in
+      let domain =
+        match value.domain with
+        | None | Some "" -> None
+        | Some domain -> Some domain
+      in
+      Ok (Account.make ~domain ~tier ~tiers ~api)
+
+let account_info ?timeout jetstream =
+  let subject = api_subject jetstream [ "INFO" ] in
+  match request_msg ?timeout jetstream (Nats.Message.v ~subject "") with
+  | Error error -> Error error
+  | Ok message -> (
+      match decode account_info_codec message with
+      | Error error -> Error error
+      | Ok value -> account_of_wire value)
 
 module Stream = struct
   module Config = struct
@@ -1007,6 +1344,44 @@ module Stream = struct
            match value.missing with [] -> None | missing -> Some missing)
     |> Jsont.Object.skip_unknown |> Jsont.Object.finish
 
+  type names_response = {
+    error : api_error option;
+    total : int;
+    offset : int;
+    limit : int;
+    streams : string list;
+    missing : string list;
+  }
+
+  let names_response_codec =
+    Jsont.Object.map ~kind:"JetStream stream names response"
+      (fun error total offset limit streams missing ->
+        {
+          error;
+          total;
+          offset;
+          limit;
+          streams;
+          missing = Option.value ~default:[] missing;
+        })
+    |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
+        value.error)
+    |> Jsont.Object.mem "total" Jsont.int ~enc:(fun value -> value.total)
+    |> Jsont.Object.mem "offset" Jsont.int ~enc:(fun value -> value.offset)
+    |> Jsont.Object.mem "limit" Jsont.int ~enc:(fun value -> value.limit)
+    |> Jsont.Object.mem "streams" (Jsont.list Jsont.string) ~enc:(fun value ->
+        value.streams)
+    |> Jsont.Object.opt_mem "missing" (Jsont.list Jsont.string)
+         ~enc:(fun value ->
+           match value.missing with [] -> None | missing -> Some missing)
+    |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+
+  let decode_names_response message =
+    match decode names_response_codec message with
+    | Error error -> Error error
+    | Ok { error = Some error; _ } -> Error (Error.Api error)
+    | Ok response -> Ok response
+
   let wire_config value =
     {
       name = Config.name value;
@@ -1526,10 +1901,100 @@ module Stream = struct
     done;
     match !result with Some result -> result | None -> assert false
 
+  let names ?subject jetstream =
+    let offset = ref 0 in
+    let names = ref [] in
+    let result = ref None in
+    while Option.is_none !result do
+      let request =
+        {
+          offset = !offset;
+          subject = Option.map Nats.Subject.Filter.to_string subject;
+        }
+      in
+      match encode list_request_codec request with
+      | Error error -> result := Some (Error error)
+      | Ok payload -> (
+          let subject = api_subject jetstream [ "STREAM"; "NAMES" ] in
+          match request_msg jetstream (Nats.Message.v ~subject payload) with
+          | Error error -> result := Some (Error error)
+          | Ok message -> (
+              match decode_names_response message with
+              | Error error -> result := Some (Error error)
+              | Ok { total; offset = page_offset; limit; streams; missing } -> (
+                  match missing with
+                  | _ :: _ ->
+                      result :=
+                        Some
+                          (Error
+                             (Error.Incomplete_list
+                                { kind = Error.Streams; missing }))
+                  | [] ->
+                      let returned = List.length streams in
+                      let window =
+                        if Int.compare page_offset total < 0 then
+                          Int.min limit (total - page_offset)
+                        else 0
+                      in
+                      if
+                        (not (Int.equal page_offset !offset))
+                        || not (Int.equal returned window)
+                      then
+                        result :=
+                          Some
+                            (Error
+                               (Error.Incomplete_list
+                                  { kind = Error.Streams; missing = [] }))
+                      else names := List.rev_append streams !names;
+                      let next_offset = page_offset + window in
+                      if Int.compare page_offset total >= 0 then
+                        result := Some (Ok (List.rev !names))
+                      else if Int.compare next_offset !offset <= 0 then
+                        result :=
+                          Some
+                            (Error
+                               (Error.Incomplete_list
+                                  { kind = Error.Streams; missing = [] }))
+                      else if Int.compare next_offset total >= 0 then
+                        result := Some (Ok (List.rev !names))
+                      else offset := next_offset)))
+    done;
+    match !result with Some result -> result | None -> assert false
+
   let info stream =
     match info_response stream with
     | Error error -> Error error
     | Ok response -> info_of_response ~expected_name:stream.name response
+
+  let lookup jetstream ~name =
+    match bind jetstream ~name with
+    | Error error -> Error error
+    | Ok stream -> (
+        match info stream with
+        | Ok _ -> Ok stream
+        | Error (Error.Api { err_code = Some 10059; _ }) ->
+            Error Error.Stream_not_found
+        | Error error -> Error error)
+
+  let create_or_update jetstream config =
+    match bind jetstream ~name:(Config.name config) with
+    | Error error -> Error error
+    | Ok stream -> (
+        match update stream config with
+        | Ok _ -> Ok stream
+        | Error (Error.Api { err_code = Some 10059; _ }) ->
+            create jetstream config
+        | Error error -> Error error)
+
+  let name_by_subject jetstream ~subject =
+    match
+      names
+        ~subject:(Nats.Subject.Filter.literal (Nats.Subject.to_string subject))
+        jetstream
+    with
+    | Error error -> Error error
+    | Ok [] -> Error Error.Stream_not_found
+    | Ok (name :: _) -> Ok name
 
   let delete stream =
     let subject =
@@ -3153,6 +3618,7 @@ module Consumer = struct
     paused : bool option;
     pause_remaining : int64 option;
     priority_groups : wire_priority_group list option;
+    reset_seq : int64 option;
     unknown : Jsont.json;
   }
 
@@ -3173,6 +3639,7 @@ module Consumer = struct
         paused
         pause_remaining
         priority_groups
+        reset_seq
         unknown
       ->
         {
@@ -3190,6 +3657,7 @@ module Consumer = struct
           paused;
           pause_remaining;
           priority_groups;
+          reset_seq;
           unknown;
         })
     |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
@@ -3219,6 +3687,8 @@ module Consumer = struct
     |> Jsont.Object.opt_mem "priority_groups"
          (Jsont.list wire_priority_group_codec) ~enc:(fun value ->
            value.priority_groups)
+    |> Jsont.Object.opt_mem "reset_seq" Jsont.int64 ~enc:(fun value ->
+        value.reset_seq)
     |> Jsont.Object.keep_unknown
          ~enc:(fun value -> value.unknown)
          Jsont.json_mems
@@ -3270,8 +3740,46 @@ module Consumer = struct
            match value.missing with [] -> None | missing -> Some missing)
     |> Jsont.Object.skip_unknown |> Jsont.Object.finish
 
+  type names_response = {
+    error : api_error option;
+    total : int;
+    offset : int;
+    limit : int;
+    consumers : string list;
+    missing : string list;
+  }
+
+  let names_response_codec =
+    Jsont.Object.map ~kind:"JetStream consumer names response"
+      (fun error total offset limit consumers missing ->
+        {
+          error;
+          total;
+          offset;
+          limit;
+          consumers;
+          missing = Option.value ~default:[] missing;
+        })
+    |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
+        value.error)
+    |> Jsont.Object.mem "total" Jsont.int ~enc:(fun value -> value.total)
+    |> Jsont.Object.mem "offset" Jsont.int ~enc:(fun value -> value.offset)
+    |> Jsont.Object.mem "limit" Jsont.int ~enc:(fun value -> value.limit)
+    |> Jsont.Object.mem "consumers" (Jsont.list Jsont.string) ~enc:(fun value ->
+        value.consumers)
+    |> Jsont.Object.opt_mem "missing" (Jsont.list Jsont.string)
+         ~enc:(fun value ->
+           match value.missing with [] -> None | missing -> Some missing)
+    |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+
   let decode_list_response message =
     match decode list_response_codec message with
+    | Error error -> Error error
+    | Ok { error = Some error; _ } -> Error (Error.Api error)
+    | Ok response -> Ok response
+
+  let decode_names_response message =
+    match decode names_response_codec message with
     | Error error -> Error error
     | Ok { error = Some error; _ } -> Error (Error.Api error)
     | Ok response -> Ok response
@@ -3338,6 +3846,13 @@ module Consumer = struct
     let paused value = value.paused
     let pause_until value = value.pause_until
     let pause_remaining value = value.pause_remaining
+  end
+
+  module Reset = struct
+    type t = { sequence : int64; info : Info.t }
+
+    let sequence value = value.sequence
+    let info value = value.info
   end
 
   type pause_request = { pause_until : string option }
@@ -4271,7 +4786,7 @@ module Consumer = struct
   let stream value = value.stream
   let created_pending value = value.created_pending
 
-  let create ?timeout (stream : Stream.t) config =
+  let create_internal ?timeout ~action (stream : Stream.t) config =
     let jetstream = stream.jetstream in
     let stream_name = Stream.name stream in
     let subject =
@@ -4280,7 +4795,7 @@ module Consumer = struct
       | Some name ->
           api_subject jetstream [ "CONSUMER"; "CREATE"; stream_name; name ]
     in
-    let request = { stream_name; config = wire_config config; action = None } in
+    let request = { stream_name; config = wire_config config; action } in
     match encode create_request_codec request with
     | Error error -> Error error
     | Ok payload -> (
@@ -4333,6 +4848,12 @@ module Consumer = struct
                           }
                     | Error error -> Error error))))
 
+  let create ?timeout stream config =
+    create_internal ?timeout ~action:None stream config
+
+  let create_or_update ?timeout stream config =
+    create_internal ?timeout ~action:(Some "") stream config
+
   let info_response ?timeout consumer =
     let subject =
       api_subject consumer.jetstream
@@ -4359,6 +4880,70 @@ module Consumer = struct
         | Ok info ->
             consumer.pause_until := Info.pause_until info;
             Ok info)
+
+  let lookup stream ~name =
+    match bind stream ~name with
+    | Error error -> Error error
+    | Ok consumer -> (
+        match info consumer with
+        | Ok _ -> Ok consumer
+        | Error (Error.Api { err_code = Some 10014; _ }) ->
+            Error Error.Consumer_not_found
+        | Error error -> Error error)
+
+  type reset_request = { sequence : int64 option }
+
+  let reset_request_codec =
+    Jsont.Object.map ~kind:"JetStream consumer reset request" (fun sequence ->
+        { sequence })
+    |> Jsont.Object.opt_mem "seq" Jsont.int64 ~enc:(fun value -> value.sequence)
+    |> Jsont.Object.finish
+
+  let reset_internal ?timeout consumer ~sequence =
+    match sequence with
+    | Some value when Int64.compare value 0L <= 0 ->
+        Error (Error.Invalid_consumer_reset_sequence value)
+    | _ -> (
+        let request = { sequence } in
+        match encode reset_request_codec request with
+        | Error error -> Error error
+        | Ok payload -> (
+            let subject =
+              api_subject consumer.jetstream
+                [
+                  "CONSUMER";
+                  "RESET";
+                  Stream.name consumer.stream;
+                  consumer.name;
+                ]
+            in
+            match
+              request_msg ?timeout consumer.jetstream
+                (Nats.Message.v ~subject payload)
+            with
+            | Error error -> Error error
+            | Ok message -> (
+                match decode_response message with
+                | Error (Error.Api { err_code = Some 10014; _ }) ->
+                    Error Error.Consumer_not_found
+                | Error error -> Error error
+                | Ok response -> (
+                    match response.reset_seq with
+                    | None -> Error (Error.Missing_field "reset_seq")
+                    | Some sequence -> (
+                        match
+                          info_of_response ~stream:consumer.stream
+                            ~expected_name:consumer.name response
+                        with
+                        | Error error -> Error error
+                        | Ok info ->
+                            consumer.pause_until := Info.pause_until info;
+                            Ok { Reset.sequence; info })))))
+
+  let reset ?timeout consumer = reset_internal ?timeout consumer ~sequence:None
+
+  let reset_to_sequence ?timeout consumer ~sequence =
+    reset_internal ?timeout consumer ~sequence:(Some sequence)
 
   let pause ?timeout consumer ~until =
     let request =
@@ -5492,6 +6077,68 @@ module Consumer = struct
                             else if Int.compare next_offset total >= 0 then
                               result := Some (Ok (List.rev !infos))
                             else offset := next_offset))))
+    done;
+    match !result with Some result -> result | None -> assert false
+
+  let names ?timeout (stream : stream) =
+    let offset = ref 0 in
+    let names = ref [] in
+    let result = ref None in
+    while Option.is_none !result do
+      let request = { offset = !offset } in
+      match encode list_request_codec request with
+      | Error error -> result := Some (Error error)
+      | Ok payload -> (
+          let subject =
+            api_subject stream.jetstream
+              [ "CONSUMER"; "NAMES"; Stream.name stream ]
+          in
+          match
+            request_msg ?timeout stream.jetstream
+              (Nats.Message.v ~subject payload)
+          with
+          | Error error -> result := Some (Error error)
+          | Ok message -> (
+              match decode_names_response message with
+              | Error error -> result := Some (Error error)
+              | Ok { total; offset = page_offset; limit; consumers; missing }
+                -> (
+                  match missing with
+                  | _ :: _ ->
+                      result :=
+                        Some
+                          (Error
+                             (Error.Incomplete_list
+                                { kind = Error.Consumers; missing }))
+                  | [] ->
+                      let returned = List.length consumers in
+                      let window =
+                        if Int.compare page_offset total < 0 then
+                          Int.min limit (total - page_offset)
+                        else 0
+                      in
+                      if
+                        (not (Int.equal page_offset !offset))
+                        || not (Int.equal returned window)
+                      then
+                        result :=
+                          Some
+                            (Error
+                               (Error.Incomplete_list
+                                  { kind = Error.Consumers; missing = [] }))
+                      else names := List.rev_append consumers !names;
+                      let next_offset = page_offset + window in
+                      if Int.compare page_offset total >= 0 then
+                        result := Some (Ok (List.rev !names))
+                      else if Int.compare next_offset !offset <= 0 then
+                        result :=
+                          Some
+                            (Error
+                               (Error.Incomplete_list
+                                  { kind = Error.Consumers; missing = [] }))
+                      else if Int.compare next_offset total >= 0 then
+                        result := Some (Ok (List.rev !names))
+                      else offset := next_offset)))
     done;
     match !result with Some result -> result | None -> assert false
 end

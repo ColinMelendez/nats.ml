@@ -48,6 +48,8 @@ module Error : sig
     | Invalid_config of config
     | Invalid_headers of Nats.Header.error
     | Message_not_found
+    | Stream_not_found
+    | Consumer_not_found
     | Message_delete_failed of { sequence : int64; secure : bool }
     | Invalid_message_header of { name : string; value : string }
     | Empty_msg_id
@@ -59,6 +61,7 @@ module Error : sig
     | Invalid_priority_group of string
     | Invalid_priority_threshold of { field : string; value : int64 }
     | Invalid_priority of int
+    | Invalid_consumer_reset_sequence of int64
     | Invalid_fetch_span
     | Invalid_idle_heartbeat
     | Idle_heartbeat_expires_too_short
@@ -89,6 +92,53 @@ val v : ?prefix:string -> Connection.t -> (t, Error.t) result
 val of_connection : ?prefix:string -> Connection.t -> (t, Error.t) result
 val connection : t -> Connection.t
 val prefix : t -> string
+
+module Account : sig
+  module Limits : sig
+    type t
+
+    val max_memory : t -> int64
+    val max_storage : t -> int64
+    val max_streams : t -> int
+    val max_consumers : t -> int
+    val max_ack_pending : t -> int
+    val memory_max_stream_bytes : t -> int64
+    val storage_max_stream_bytes : t -> int64
+    val max_bytes_required : t -> bool
+  end
+
+  module Tier : sig
+    type t
+
+    val memory : t -> int64
+    val storage : t -> int64
+    val reserved_memory : t -> int64
+    val reserved_storage : t -> int64
+    val streams : t -> int
+    val consumers : t -> int
+    val limits : t -> Limits.t
+  end
+
+  module Api : sig
+    type t
+
+    val level : t -> int
+    val total : t -> int64
+    val errors : t -> int64
+    val inflight : t -> int64
+  end
+
+  type t
+
+  val domain : t -> string option
+  val tier : t -> Tier.t
+  val tiers : t -> (string * Tier.t) list
+  val api : t -> Api.t
+end
+
+val account_info : ?timeout:Mtime.Span.t -> t -> (Account.t, Error.t) result
+(** [account_info ?timeout jetstream] returns usage, limits, API statistics, and
+    domain-tier information for the current JetStream account. *)
 
 module Stream : sig
   type jetstream = t
@@ -290,9 +340,17 @@ module Stream : sig
   (** [bind jetstream ~name] creates a local handle without contacting the
       server. It is useful for existing streams. *)
 
+  val lookup : jetstream -> name:string -> (t, Error.t) result
+  (** [lookup jetstream ~name] validates that [name] exists on the server and
+      returns a handle for it. *)
+
   val create : jetstream -> Config.t -> (t, Error.t) result
   (** [create jetstream config] creates the server-side stream and returns a
       handle for it. *)
+
+  val create_or_update : jetstream -> Config.t -> (t, Error.t) result
+  (** [create_or_update jetstream config] updates an existing stream or creates
+      it when it is not present. *)
 
   val update : t -> Config.t -> (Info.t, Error.t) result
   (** [update stream config] applies the modeled fields in [config] to an
@@ -307,6 +365,16 @@ module Stream : sig
     ?subject:Nats.Subject.Filter.t -> jetstream -> (Info.t list, Error.t) result
   (** [list jetstream] returns detailed information for all matching streams.
       The optional [subject] filters streams by their captured subjects. *)
+
+  val names :
+    ?subject:Nats.Subject.Filter.t -> jetstream -> (string list, Error.t) result
+  (** [names ?subject jetstream] returns names for all matching streams. The
+      request is paged internally; [subject] filters captured subjects. *)
+
+  val name_by_subject :
+    jetstream -> subject:Nats.Subject.t -> (string, Error.t) result
+  (** [name_by_subject jetstream ~subject] returns the first stream capturing
+      [subject], or [Stream_not_found] when none does. *)
 
   val name : t -> string
   val info : t -> (Info.t, Error.t) result
@@ -659,6 +727,16 @@ module Consumer : sig
     val pause_remaining : t -> Mtime.Span.t option
   end
 
+  module Reset : sig
+    type t
+
+    val sequence : t -> int64
+    (** [sequence reset] is the stream sequence selected by the server. *)
+
+    val info : t -> Info.t
+    (** [info reset] is the consumer state after the reset. *)
+  end
+
   type jetstream = t
   type stream = Stream.t
   type t
@@ -667,10 +745,19 @@ module Consumer : sig
   (** [bind stream ~name] creates a local handle without contacting the server.
   *)
 
+  val lookup : stream -> name:string -> (t, Error.t) result
+  (** [lookup stream ~name] validates that [name] exists on the server and
+      returns a handle for it. *)
+
   val create :
     ?timeout:Mtime.Span.t -> stream -> Config.t -> (t, Error.t) result
   (** [create ?timeout stream config] creates a server-side consumer and returns
       its name. *)
+
+  val create_or_update :
+    ?timeout:Mtime.Span.t -> stream -> Config.t -> (t, Error.t) result
+  (** [create_or_update ?timeout stream config] creates a consumer or updates
+      the existing consumer with the same name. *)
 
   val update :
     ?timeout:Mtime.Span.t -> t -> Config.t -> (Info.t, Error.t) result
@@ -703,6 +790,10 @@ module Consumer : sig
   val list : stream -> (Info.t list, Error.t) result
   (** [list stream] returns detailed information for all consumers on [stream].
   *)
+
+  val names : ?timeout:Mtime.Span.t -> stream -> (string list, Error.t) result
+  (** [names ?timeout stream] returns the names of all consumers on [stream].
+      The request is paged internally. *)
 
   val name : t -> string
   val stream : t -> stream
@@ -911,6 +1002,15 @@ module Consumer : sig
 
   val info : ?timeout:Mtime.Span.t -> t -> (Info.t, Error.t) result
   val delete : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
+
+  val reset : ?timeout:Mtime.Span.t -> t -> (Reset.t, Error.t) result
+  (** [reset ?timeout consumer] resets delivery to the server-selected
+      acknowledgement floor. *)
+
+  val reset_to_sequence :
+    ?timeout:Mtime.Span.t -> t -> sequence:int64 -> (Reset.t, Error.t) result
+  (** [reset_to_sequence ?timeout consumer ~sequence] resets delivery to a
+      positive stream sequence compatible with the consumer policy. *)
 end
 
 module Publish_ack : sig
