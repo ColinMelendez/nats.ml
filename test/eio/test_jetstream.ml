@@ -1470,6 +1470,32 @@ let () =
               | _ -> fail "account info lost tiered usage");
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "account info accepts unsigned usage sentinels" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.account_info jetstream));
+              yield_n 5;
+              Eio.Promise.resolve response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"memory":18446744073709551615,"storage":18446744073709551615,"reserved_memory":18446744073709551615,"reserved_storage":18446744073709551615}|}));
+              let account = expect_jetstream_ok (Eio.Promise.await result) in
+              let tier = Nats_eio.Jetstream.Account.tier account in
+              equal int64 Int64.minus_one
+                (Nats_eio.Jetstream.Account.Tier.memory tier);
+              equal int64 Int64.minus_one
+                (Nats_eio.Jetstream.Account.Tier.reserved_storage tier);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream names page and filter through the names API" (fun () ->
           let first_response, first_response_u = Eio.Promise.create () in
           let second_response, second_response_u = Eio.Promise.create () in

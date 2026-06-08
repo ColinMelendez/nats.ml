@@ -111,6 +111,10 @@ module Account : sig
     type t
 
     val memory : t -> int64
+    (** Usage values use the server's unsigned 64-bit wire representation. The
+        server's unsigned maximum sentinel for an unlimited reservation is
+        exposed as [Int64.minus_one]. *)
+
     val storage : t -> int64
     val reserved_memory : t -> int64
     val reserved_storage : t -> int64

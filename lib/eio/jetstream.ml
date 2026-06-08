@@ -345,6 +345,18 @@ type account_tier_wire = {
   limits : account_limits_wire option;
 }
 
+(* JetStream reports tier usage as unsigned 64-bit values. [Jsont.int64] quite
+   correctly rejects the unsigned maximum used by the server for an unlimited
+   reservation, so preserve that sentinel in the signed representation used by
+   this API. Real account usage remains well within the signed range. *)
+let account_uint64_codec =
+  Jsont.recode ~dec:Jsont.number
+    (fun value ->
+      if Float.is_nan value then 0L
+      else if value >= 9.223372036854776e18 then Int64.minus_one
+      else Int64.of_float value)
+    ~enc:Jsont.int64
+
 let account_tier_codec =
   Jsont.Object.map ~kind:"JetStream account tier"
     (fun
@@ -365,13 +377,14 @@ let account_tier_codec =
         consumers;
         limits;
       })
-  |> Jsont.Object.opt_mem "memory" Jsont.int64 ~enc:(fun value -> value.memory)
-  |> Jsont.Object.opt_mem "storage" Jsont.int64 ~enc:(fun value ->
+  |> Jsont.Object.opt_mem "memory" account_uint64_codec ~enc:(fun value ->
+      value.memory)
+  |> Jsont.Object.opt_mem "storage" account_uint64_codec ~enc:(fun value ->
       value.storage)
-  |> Jsont.Object.opt_mem "reserved_memory" Jsont.int64 ~enc:(fun value ->
-      value.reserved_memory)
-  |> Jsont.Object.opt_mem "reserved_storage" Jsont.int64 ~enc:(fun value ->
-      value.reserved_storage)
+  |> Jsont.Object.opt_mem "reserved_memory" account_uint64_codec
+       ~enc:(fun value -> value.reserved_memory)
+  |> Jsont.Object.opt_mem "reserved_storage" account_uint64_codec
+       ~enc:(fun value -> value.reserved_storage)
   |> Jsont.Object.opt_mem "streams" Jsont.int ~enc:(fun value -> value.streams)
   |> Jsont.Object.opt_mem "consumers" Jsont.int ~enc:(fun value ->
       value.consumers)
@@ -440,13 +453,14 @@ let account_info_codec =
       })
   |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
       value.error)
-  |> Jsont.Object.opt_mem "memory" Jsont.int64 ~enc:(fun value -> value.memory)
-  |> Jsont.Object.opt_mem "storage" Jsont.int64 ~enc:(fun value ->
+  |> Jsont.Object.opt_mem "memory" account_uint64_codec ~enc:(fun value ->
+      value.memory)
+  |> Jsont.Object.opt_mem "storage" account_uint64_codec ~enc:(fun value ->
       value.storage)
-  |> Jsont.Object.opt_mem "reserved_memory" Jsont.int64 ~enc:(fun value ->
-      value.reserved_memory)
-  |> Jsont.Object.opt_mem "reserved_storage" Jsont.int64 ~enc:(fun value ->
-      value.reserved_storage)
+  |> Jsont.Object.opt_mem "reserved_memory" account_uint64_codec
+       ~enc:(fun value -> value.reserved_memory)
+  |> Jsont.Object.opt_mem "reserved_storage" account_uint64_codec
+       ~enc:(fun value -> value.reserved_storage)
   |> Jsont.Object.opt_mem "streams" Jsont.int ~enc:(fun value -> value.streams)
   |> Jsont.Object.opt_mem "consumers" Jsont.int ~enc:(fun value ->
       value.consumers)
