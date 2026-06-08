@@ -22,7 +22,7 @@ the capabilities marked as covered.
 | Authentication and TLS | Covered | Dynamic callback and transport-option breadth is narrower |
 | Reconnect, discovery, drain | Covered | Go-style callback hooks and connection statistics are not mirrored |
 | JetStream management | Account info, stream/consumer lookup, upsert, names, reset, detailed lists | Newer stream fields and system-level administration |
-| JetStream publishing | Synchronous publish acknowledgements | Async publishing and expectation/retry/TTL/schedule/batch options |
+| JetStream publishing | Synchronous and switch-owned asynchronous acknowledgements; expectation/retry/TTL/schedule options; atomic and fast batch wire paths | Shared async reply multiplexing and a few newer server-only publish controls |
 | JetStream consumption | Pull, push, ordered, heartbeats, flow control, priority, consumer reset | Some ordered/ack fields and Go's continuous batching controls |
 | Key-Value | CRUD, CAS, history, finite keys, watches, per-key/marker TTL, purge-delete cleanup, resumable/multi-filter watches, listers | Bucket manager/listers |
 | Object Store | Streaming CRUD, links, metadata, watches, list, seal, and Go interop | Bucket manager/listers and file helpers |
@@ -96,14 +96,28 @@ collect the server's paged responses into ordered lists, while `bind` remains
 the explicit local-handle operation for callers that already know a resource
 exists.
 
-### Publishing gaps
+### Publishing
 
-The current OCaml publisher waits for each acknowledgement. Go additionally
-supports asynchronous publish futures, pending/completion tracking, and publish
-options for expected stream/sequence/message IDs, retry policy, stall waits,
-per-message TTL, scheduling, atomic publish, and fast batch publish. These need a
-deliberate asynchronous publisher design rather than a collection of optional
-arguments on the synchronous function.
+The OCaml publisher exposes both synchronous acknowledgements and a
+switch-owned asynchronous `Publisher` with bounded pending state, per-future
+await/cancel operations, completion waiting, no-responder retries, and stall
+timeouts. `Publish_options` covers message IDs, optimistic-concurrency
+expectations, retry policy, per-message TTL, and scheduled-message headers.
+Publish acknowledgements retain the server stream, sequence, duplicate,
+domain, batch, and count fields.
+
+The server-side atomic and fast batch protocols are exposed as separate
+`Atomic_batch` and `Batch` operations. They validate reserved control headers,
+use the exact `Nats-Batch-*` headers and `$FI` reply grammar, consume fast-batch
+flow acknowledgements/gaps/errors, and preserve batch/count metadata. The
+stream configuration projection also models `allow_atomic`,
+`allow_msg_schedules`, and `allow_batched`.
+
+The remaining publishing optimization is to replace the current per-future
+private request subscriptions with a shared wildcard acknowledgement
+subscription. That is an allocation/throughput improvement, not a wire
+capability gap; the current implementation retains explicit request ownership
+and cancellation semantics.
 
 ### Consumption gaps
 
@@ -163,9 +177,8 @@ added as unstructured mutable hooks.
 
 ## Prioritized follow-up
 
-1. **Stream configuration and publishing expansion.** Add mirrors/sources and
-   their transforms before the newer server feature flags; then design an async
-   publisher around explicit futures/handles and expectation options.
+1. **Stream configuration expansion.** Add mirrors/sources and their transforms
+   before the newer server-only configuration fields.
 2. **Transport and service breadth.** Add WebSocket as a separate adapter and
    service reset/stopped/pending-limit behavior after the protocol gaps above.
 

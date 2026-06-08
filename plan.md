@@ -721,8 +721,20 @@ request/reply and subscription primitives.
   resume operations through `CONSUMER.PAUSE`. Consumer updates preserve the
   current server deadline instead of pretending that the create/update API can
   change it.
-- Extend publish acknowledgements with all server status fields and feature
-  gates where supported.
+- Completed locally: extend publish acknowledgements with stream, sequence,
+  duplicate, domain, batch, and count fields. Add typed publish options for
+  message IDs, optimistic-concurrency expectations, per-message TTL, scheduled
+  messages, retry policy, and asynchronous stall limits. Synchronous publishing
+  retries `No_responders` through the connection-owned monotonic clock; the
+  switch-owned asynchronous publisher provides bounded pending state, futures,
+  cancellation, retries, and completion waiting.
+- Completed locally: add atomic and fast batch publishing over the server's
+  `Nats-Batch-*` and `$FI` protocols. Atomic staging uses a final request-backed
+  commit; fast batches consume flow acknowledgements, gap notices, and flow
+  errors. Stream configuration now models the `allow_atomic`,
+  `allow_msg_schedules`, and `allow_batched` feature gates.
+- Remaining: replace per-future private request subscriptions with a shared
+  wildcard acknowledgement subscription for higher async publish throughput.
 - Gate features by server version and return structured unsupported-feature
   errors.
 
