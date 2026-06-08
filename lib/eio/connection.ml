@@ -597,6 +597,7 @@ and command =
       timeout : Mtime.Span.t;
       setup : (int, Error.t) result Eio.Promise.u;
       resolver : (Nats.Message.t, Error.t) result Eio.Promise.u;
+      cancelled : bool ref;
     }
   | Cancel_request of { sid : int }
   | Unsubscribe of {
@@ -690,6 +691,8 @@ type t = {
   ready : (unit, Error.t) result Eio.Promise.u;
   barriers : barrier Queue.t;
 }
+
+type connection = t
 
 let protocol error = Error.Protocol error
 let io_error error = Error.Io error
@@ -1709,7 +1712,10 @@ let apply_outgoing t command =
       | Some subscription ->
           Subscription.cancel_drain subscription;
           Ok ())
-  | Request { message; timeout; setup; resolver } -> (
+  | Request { setup; cancelled; _ } when !cancelled ->
+      resolve_setup t setup (Error Error.Closed);
+      Ok ()
+  | Request { message; timeout; setup; resolver; _ } -> (
       match Mtime.add_span (now t) timeout with
       | None ->
           resolve_setup t setup (Error Error.Timeout);
@@ -2439,32 +2445,67 @@ let validate_timeout name timeout =
   if Mtime.Span.compare timeout Mtime.Span.zero > 0 then Ok timeout
   else Error (Error.Invalid_timeout name)
 
-let request_msg ?timeout t message =
+module Request = struct
+  type t = {
+    connection : connection;
+    sid : int;
+    response : (Nats.Message.t, Error.t) result Eio.Promise.t;
+    cancelled : bool ref;
+  }
+
+  let await request = Eio.Promise.await request.response
+
+  let cancel request =
+    if !(request.cancelled) then Ok ()
+    else (
+      request.cancelled := true;
+      cancel_request request.connection request.sid)
+end
+
+let request_async ?timeout t message =
   let timeout = Option.value timeout ~default:t.config.Config.request_timeout in
   match validate_timeout "request" timeout with
   | Error error -> Error error
   | Ok timeout -> (
       let setup, setup_resolver = Eio.Promise.create () in
       let response, response_resolver = Eio.Promise.create () in
+      let sid = ref None in
+      let cancelled = ref false in
       let setup_result =
-        Eio.Cancel.protect (fun () ->
-            send t
-              (Request
-                 {
-                   message;
-                   timeout;
-                   setup = setup_resolver;
-                   resolver = response_resolver;
-                 })
-              setup)
+        try
+          Eio.Cancel.protect (fun () ->
+              send t
+                (Request
+                   {
+                     message;
+                     timeout;
+                     setup = setup_resolver;
+                     resolver = response_resolver;
+                     cancelled;
+                   })
+                setup)
+        with Eio.Cancel.Cancelled _ as cancellation ->
+          cancelled := true;
+          (match !sid with
+          | None -> ()
+          | Some sid ->
+              ignore (Eio.Cancel.protect (fun () -> cancel_request t sid)));
+          raise cancellation
       in
       match setup_result with
       | Error error -> Error error
-      | Ok sid -> (
-          try Eio.Promise.await response
-          with Eio.Cancel.Cancelled _ as cancellation ->
-            ignore (Eio.Cancel.protect (fun () -> cancel_request t sid));
-            raise cancellation))
+      | Ok request_sid ->
+          sid := Some request_sid;
+          Ok { Request.connection = t; sid = request_sid; response; cancelled })
+
+let request_msg ?timeout t message =
+  match request_async ?timeout t message with
+  | Error error -> Error error
+  | Ok request -> (
+      try Request.await request
+      with Eio.Cancel.Cancelled _ as cancellation ->
+        ignore (Eio.Cancel.protect (fun () -> Request.cancel request));
+        raise cancellation)
 
 let request ?timeout ?(headers = Nats.Header.empty) t subject payload =
   request_msg ?timeout t (Nats.Message.v ~subject ~headers payload)

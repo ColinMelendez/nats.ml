@@ -160,6 +160,28 @@ val subscribe :
     and an in-flight drain receive [Disconnected]; already queued deliveries
     remain available before the terminal marker. *)
 
+module Request : sig
+  type t
+
+  val await : t -> (Nats.Message.t, Error.t) result
+  (** [await request] waits for the request reply or its terminal connection
+      error. Cancelling the fiber waiting on [await] does not cancel the
+      request; use {!cancel} when that is required. *)
+
+  val cancel : t -> (unit, Error.t) result
+  (** [cancel request] cancels the request subscription. It is idempotent. *)
+end
+
+val request_async :
+  ?timeout:Mtime.Span.t ->
+  t ->
+  Nats.Message.t ->
+  (Request.t, Error.t) result
+(** [request_async ?timeout connection message] starts a request and returns
+    once its private reply subscription is installed. The request remains
+    owned by [connection]'s switch until it replies, times out, is cancelled,
+    or the connection terminates. *)
+
 val request :
   ?timeout:Mtime.Span.t ->
   ?headers:Nats.Header.t ->
