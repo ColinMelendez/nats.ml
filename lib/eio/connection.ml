@@ -2507,6 +2507,76 @@ let request_msg ?timeout t message =
         ignore (Eio.Cancel.protect (fun () -> Request.cancel request));
         raise cancellation)
 
+let request_msg_retry ?timeout ~retry_wait ~retry_attempts t message =
+  match validate_timeout "request retry" retry_wait with
+  | Error error -> Error error
+  | Ok _ -> (
+      match retry_attempts with
+      | Some attempts when Int.compare attempts 0 < 0 ->
+          Error (Error.Invalid_reconnect_attempts attempts)
+      | _ ->
+          let deadline =
+            match timeout with
+            | None -> Ok None
+            | Some timeout -> (
+                match validate_timeout "request" timeout with
+                | Error error -> Error error
+                | Ok timeout -> (
+                    match Mtime.add_span (now t) timeout with
+                    | None -> Error Error.Timeout
+                    | Some deadline -> Ok (Some deadline)))
+          in
+          match deadline with
+          | Error error -> Error error
+          | Ok deadline ->
+              let remaining_timeout () =
+                match deadline with
+                | None -> Ok None
+                | Some deadline ->
+                    let now = now t in
+                    if Mtime.compare now deadline >= 0 then Error Error.Timeout
+                    else Ok (Some (Mtime.span now deadline))
+              in
+              let wait_before_retry () =
+                let current = now t in
+                match Mtime.add_span current retry_wait with
+                | None -> Error Error.Timeout
+                | Some retry_deadline -> (
+                    match deadline with
+                    | None ->
+                        t.clock.sleep_until retry_deadline;
+                        Ok ()
+                    | Some deadline ->
+                        let wait_until =
+                          if Mtime.compare retry_deadline deadline < 0 then
+                            retry_deadline
+                          else deadline
+                        in
+                        t.clock.sleep_until wait_until;
+                        if Mtime.compare (now t) deadline >= 0 then
+                          Error Error.Timeout
+                        else Ok ())
+              in
+              let rec loop retries =
+                match remaining_timeout () with
+                | Error error -> Error error
+                | Ok timeout -> (
+                    match request_msg ?timeout t message with
+                    | (Error Error.No_responders as result) ->
+                        let should_retry =
+                          match retry_attempts with
+                          | None -> true
+                          | Some attempts -> Int.compare retries attempts < 0
+                        in
+                        if not should_retry then result
+                        else (
+                          match wait_before_retry () with
+                          | Error error -> Error error
+                          | Ok () -> loop (retries + 1))
+                    | result -> result)
+              in
+              loop 0)
+
 let request ?timeout ?(headers = Nats.Header.empty) t subject payload =
   request_msg ?timeout t (Nats.Message.v ~subject ~headers payload)
 

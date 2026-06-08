@@ -196,6 +196,18 @@ val request_msg :
   Nats.Message.t ->
   (Nats.Message.t, Error.t) result
 
+val request_msg_retry :
+  ?timeout:Mtime.Span.t ->
+  retry_wait:Mtime.Span.t ->
+  retry_attempts:int option ->
+  t ->
+  Nats.Message.t ->
+  (Nats.Message.t, Error.t) result
+(** [request_msg_retry ?timeout ~retry_wait ~retry_attempts connection message]
+    retries only [No_responders] failures. [retry_attempts] counts retries
+    after the initial request; [None] retries without a limit. The wait uses
+    the connection's monotonic clock and remains cancellation-safe. *)
+
 val flush : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
 val drain : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
 val close : t -> (unit, Error.t) result
