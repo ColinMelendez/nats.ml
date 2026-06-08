@@ -24,7 +24,7 @@ the capabilities marked as covered.
 | JetStream management | Broad partial coverage | Manager/upsert/account operations and newer stream fields |
 | JetStream publishing | Synchronous publish acknowledgements | Async publishing and expectation/retry/TTL/schedule/batch options |
 | JetStream consumption | Pull, push, ordered, heartbeats, flow control, priority | Consumer reset, some ordered/ack fields, and Go's continuous batching controls |
-| Key-Value | CRUD, CAS, history, finite keys, watches | Per-key TTL, purge-delete cleanup, resumable/multi-filter watches, listers |
+| Key-Value | CRUD, CAS, history, finite keys, watches, per-key/marker TTL, purge-delete cleanup, resumable/multi-filter watches, listers | Bucket manager/listers |
 | Object Store | Streaming CRUD, links, metadata, watches, list, seal, and Go interop | Bucket manager/listers and file helpers |
 | Services | Registration, groups, requests, errors, discovery, stats | Reset/stopped state, pending limits, custom lifecycle/stat callbacks |
 
@@ -122,15 +122,17 @@ are:
 The OCaml module covers bucket configuration, revisioned get/put/create/update,
 compare-and-set delete/purge, exact revision reads, finite key scans, history,
 and switch-owned watches with initial markers, delivery policies, delete
-filtering, and metadata-only delivery.
+filtering, metadata-only delivery, multiple filters, and revision resumption.
+It also exposes per-key and purge-marker TTLs, marker age cleanup, and a
+switch-owned streaming key lister. The local black-box suite covers the wire
+contracts, while the KV interop runner exchanges TTL-bearing values and purge
+markers with the pinned Go SDK and validates marker cleanup across SDKs.
 
-The Go SDK additionally supports per-key TTL on create, purge-marker cleanup
-(`PurgeDeletes`, including age selection), resumable watches, updates-only /
-ignore-delete / metadata-only watch options as separate controls, multi-filter
-watches, streaming key listers, filtered key listers, and bucket manager
-create/update/upsert/name/status listers. These are real follow-up capabilities;
-the current `New`/`Last_per_subject`/`All` watch policies intentionally cover only
-the existing snapshot-vs-history choices.
+The remaining Go KV capability gap is the bucket manager surface: create,
+update/upsert, and name/status listers. Go's ordered watcher recovery is also
+stronger than the current OCaml watch's ordinary ephemeral-consumer recovery;
+the OCaml API documents that distinction rather than presenting a resumable
+watch as an ordered consumer.
 
 ## Object Store
 
@@ -160,15 +162,12 @@ added as unstructured mutable hooks.
 
 ## Prioritized follow-up
 
-1. **KV lifecycle and watch controls.** Add purge-delete cleanup, per-key TTL,
-   resumable/multi-filter watches, and streaming key iteration where the Eio
-   ownership model can express them cleanly.
-2. **JetStream manager and consumer administration.** Add account information,
+1. **JetStream manager and consumer administration.** Add account information,
    consumer reset, and compositional manager-level upsert/lister helpers.
-3. **Stream configuration and publishing expansion.** Add mirrors/sources and
+2. **Stream configuration and publishing expansion.** Add mirrors/sources and
    their transforms before the newer server feature flags; then design an async
    publisher around explicit futures/handles and expectation options.
-4. **Transport and service breadth.** Add WebSocket as a separate adapter and
+3. **Transport and service breadth.** Add WebSocket as a separate adapter and
    service reset/stopped/pending-limit behavior after the protocol gaps above.
 
 This ordering keeps the narrow protocol waist intact, gives each addition a
