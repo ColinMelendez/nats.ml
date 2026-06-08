@@ -109,6 +109,9 @@ let reply_subject = function
   | None -> Ok None
   | Some value -> subject value |> Result.map (fun subject -> Some subject)
 
+let optional_reply_value value =
+  if String.equal value "" then None else Some value
+
 let message ~subject_value ~reply_value ~headers payload =
   match subject subject_value with
   | Error error -> Error error
@@ -318,7 +321,8 @@ and decode_pub packet =
               | None -> Error (Invalid_value { keyword = operation }))
           | Error error -> Error error)
       | [ "PUB"; subject_value; reply_value; _payload_length ] ->
-          message ~subject_value ~reply_value:(Some reply_value)
+          message ~subject_value
+            ~reply_value:(optional_reply_value reply_value)
             ~headers:Header.empty (Packet.body packet)
           |> Result.map (fun message -> Op.Pub message)
       | _ -> Error (Invalid_field_count { keyword = operation }))
@@ -333,7 +337,7 @@ and decode_hpub packet =
           decode_hpub_message packet ~subject_value ~reply_value:None
       | [ "HPUB"; subject_value; reply_value; _header_length; _total_length ] ->
           decode_hpub_message packet ~subject_value
-            ~reply_value:(Some reply_value)
+            ~reply_value:(optional_reply_value reply_value)
       | _ -> Error (Invalid_field_count { keyword = operation }))
   | _ -> Error (Invalid_operation { keyword = operation })
 
@@ -360,7 +364,8 @@ and decode_msg packet =
           match parse_sid sid_value with
           | Error error -> Error error
           | Ok sid ->
-              message ~subject_value ~reply_value:(Some reply_value)
+              message ~subject_value
+                ~reply_value:(optional_reply_value reply_value)
                 ~headers:Header.empty (Packet.body packet)
               |> Result.map (fun message -> Op.Msg { sid; message }))
       | _ -> Error (Invalid_field_count { keyword = operation }))
@@ -388,7 +393,7 @@ and decode_hmsg packet =
           | Error error -> Error error
           | Ok sid ->
               decode_hmsg_message packet ~sid ~subject_value
-                ~reply_value:(Some reply_value))
+                ~reply_value:(optional_reply_value reply_value))
       | _ -> Error (Invalid_field_count { keyword = operation }))
   | _ -> Error (Invalid_operation { keyword = operation })
 

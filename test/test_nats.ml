@@ -315,6 +315,21 @@ let () =
                    (Nats.Message.with_headers Nats.Header.empty message)
                    decoded)
           | _ -> fail "expected a message operation");
+      test "accepts empty reply fields in MSG and HMSG" (fun () ->
+          (match read_operation "MSG inbox 1  3\r\nfoo\r\n" with
+          | Nats.Op.Msg { sid = 1; message } -> (
+              match Nats.Message.reply_to message with
+              | None -> ()
+              | Some _ -> fail "expected no reply subject")
+          | _ -> fail "expected a message operation");
+          match
+            read_operation "HMSG inbox 1  12 12\r\nNATS/1.0\r\n\r\n\r\n"
+          with
+          | Nats.Op.Hmsg { sid = 1; message; status = None } -> (
+              match Nats.Message.reply_to message with
+              | None -> ()
+              | Some _ -> fail "expected no reply subject")
+          | _ -> fail "expected a header-bearing message");
       test "encodes subscription control operations" (fun () ->
           let filter = expect_ok (Nats.Subject.Filter.of_string "orders.*") in
           let operation =
