@@ -30,6 +30,13 @@ bucket="OCAML_INTEROP_KV_$$"
 
 case "$jetstream_mode" in
   pull) peer_mode=jetstream ;;
+  admin)
+    peer_mode=jetstream-admin
+    # Consumer reset support requires the JetStream API in NATS 2.14.
+    if [ -z "${NATS_SERVER_IMAGE+x}" ]; then
+      image=nats:2.14.2
+    fi
+    ;;
   push) peer_mode=jetstream-push ;;
   ordered) peer_mode=jetstream-ordered ;;
   kv)
@@ -43,7 +50,7 @@ case "$jetstream_mode" in
     ;;
   object) peer_mode=jetstream-object ;;
   *)
-    echo "NATS_TEST_INTEROP_JETSTREAM_MODE must be pull, push, ordered, kv, or object" >&2
+    echo "NATS_TEST_INTEROP_JETSTREAM_MODE must be pull, admin, push, ordered, kv, or object" >&2
     exit 1
     ;;
 esac
@@ -222,6 +229,7 @@ fi
 status=0
 case "$jetstream_mode" in
   pull) acceptance_executable=test/interop/interop_jetstream_acceptance.exe ;;
+  admin) acceptance_executable=test/interop/interop_jetstream_admin_acceptance.exe ;;
   push) acceptance_executable=test/interop/interop_jetstream_push_acceptance.exe ;;
   ordered) acceptance_executable=test/interop/interop_jetstream_ordered_acceptance.exe ;;
   kv) acceptance_executable=test/interop/interop_key_value_acceptance.exe ;;

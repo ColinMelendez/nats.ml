@@ -238,6 +238,11 @@ func runMode(config options) error {
 			return fmt.Errorf("stream is required in jetstream mode")
 		}
 		return runJetStreamPeer(config)
+	case "jetstream-admin":
+		if config.stream == "" {
+			return fmt.Errorf("stream is required in jetstream-admin mode")
+		}
+		return runJetStreamAdminPeer(config)
 	case "jetstream-push":
 		if config.stream == "" {
 			return fmt.Errorf("stream is required in jetstream-push mode")
