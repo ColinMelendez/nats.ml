@@ -21,9 +21,9 @@ the capabilities marked as covered.
 | Core NATS | Covered for the Eio model | WebSocket transport and some Go-specific diagnostics/options |
 | Authentication and TLS | Covered | Dynamic callback and transport-option breadth is narrower |
 | Reconnect, discovery, drain | Covered | Go-style callback hooks and connection statistics are not mirrored |
-| JetStream management | Broad partial coverage | Manager/upsert/account operations and newer stream fields |
+| JetStream management | Account info, stream/consumer lookup, upsert, names, reset, detailed lists | Newer stream fields and system-level administration |
 | JetStream publishing | Synchronous publish acknowledgements | Async publishing and expectation/retry/TTL/schedule/batch options |
-| JetStream consumption | Pull, push, ordered, heartbeats, flow control, priority | Consumer reset, some ordered/ack fields, and Go's continuous batching controls |
+| JetStream consumption | Pull, push, ordered, heartbeats, flow control, priority, consumer reset | Some ordered/ack fields and Go's continuous batching controls |
 | Key-Value | CRUD, CAS, history, finite keys, watches, per-key/marker TTL, purge-delete cleanup, resumable/multi-filter watches, listers | Bucket manager/listers |
 | Object Store | Streaming CRUD, links, metadata, watches, list, seal, and Go interop | Bucket manager/listers and file helpers |
 | Services | Registration, groups, requests, errors, discovery, stats | Reset/stopped state, pending limits, custom lifecycle/stat callbacks |
@@ -90,9 +90,11 @@ listed above.
 
 The Go SDK also exposes manager-level create/update/upsert operations, stream
 and stream-name listers, account information, and consumer reset operations.
-OCaml callers can compose some of these from `Stream.bind`, `create`, `update`,
-and `list`, but there is no equivalent for account information or resetting a
-consumer's delivery state.
+The OCaml surface now exposes those operations compositionally through the
+JetStream capability and typed stream/consumer handles. Name listers eagerly
+collect the server's paged responses into ordered lists, while `bind` remains
+the explicit local-handle operation for callers that already know a resource
+exists.
 
 ### Publishing gaps
 
@@ -110,7 +112,6 @@ are:
 
 - `AckFlowControlPolicy` and the corresponding acknowledgement semantics;
 - the separate consumer name field, where it is distinct from a durable name;
-- consumer reset/reset-to-sequence operations;
 - ordered-consumer multi-subject filters, metadata, headers-only mode, inactive
   threshold, reset-attempt limit, and custom name prefix;
 - Go's fetch-by-bytes/no-wait and continuously overlapping `Messages`/`Consume`
@@ -162,12 +163,10 @@ added as unstructured mutable hooks.
 
 ## Prioritized follow-up
 
-1. **JetStream manager and consumer administration.** Add account information,
-   consumer reset, and compositional manager-level upsert/lister helpers.
-2. **Stream configuration and publishing expansion.** Add mirrors/sources and
+1. **Stream configuration and publishing expansion.** Add mirrors/sources and
    their transforms before the newer server feature flags; then design an async
    publisher around explicit futures/handles and expectation options.
-3. **Transport and service breadth.** Add WebSocket as a separate adapter and
+2. **Transport and service breadth.** Add WebSocket as a separate adapter and
    service reset/stopped/pending-limit behavior after the protocol gaps above.
 
 This ordering keeps the narrow protocol waist intact, gives each addition a
