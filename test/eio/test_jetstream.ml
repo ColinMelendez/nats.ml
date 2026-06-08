@@ -1137,6 +1137,132 @@ let () =
               equal string "worker" (Nats_eio.Jetstream.Consumer.name consumer);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "consumer names page through the names API" (fun () ->
+          let first_response, first_response_u = Eio.Promise.create () in
+          let second_response, second_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await first_response;
+                `Await second_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind
+                     (expect_jetstream_ok (Nats_eio.Jetstream.v connection))
+                     ~name:"ORDERS")
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.names stream));
+              yield_n 5;
+              Eio.Promise.resolve first_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"total":2,"offset":0,"limit":1,"consumers":["worker"]}|}));
+              yield_n 5;
+              if
+                not
+                  (contains_substring ~needle:"CONSUMER.NAMES.ORDERS"
+                     (Buffer.contents trace))
+              then fail "consumer names used the wrong endpoint";
+              if
+                not
+                  (contains_substring ~needle:"\\\"offset\\\":1"
+                     (Buffer.contents trace))
+              then fail "consumer names did not request the next page";
+              Eio.Promise.resolve second_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:2
+                      {|{"total":2,"offset":1,"limit":1,"consumers":["archiver"]}|}));
+              equal (list string) [ "worker"; "archiver" ]
+                (expect_jetstream_ok (Eio.Promise.await result));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "consumer create-or-update emits the empty action" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind
+                     (expect_jetstream_ok (Nats_eio.Jetstream.v connection))
+                     ~name:"ORDERS")
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"worker"
+                     ())
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.create_or_update stream config));
+              yield_n 5;
+              let trace = Buffer.contents trace in
+              if
+                not
+                  (contains_substring ~needle:"CONSUMER.CREATE.ORDERS.worker"
+                     trace)
+              then fail "consumer create-or-update used the wrong endpoint";
+              if
+                not (contains_substring ~needle:"\\\"action\\\":\\\"\\\"" trace)
+              then fail "consumer create-or-update omitted its empty action";
+              Eio.Promise.resolve response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant"}}|}));
+              let consumer = expect_jetstream_ok (Eio.Promise.await result) in
+              equal string "worker" (Nats_eio.Jetstream.Consumer.name consumer);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "consumer reset sends a sequence and returns updated info" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let consumer = consumer connection in
+              let invalid =
+                Nats_eio.Jetstream.Consumer.reset_to_sequence consumer
+                  ~sequence:0L
+              in
+              expect_jetstream_error invalid (function
+                | Nats_eio.Jetstream.Error.Invalid_consumer_reset_sequence 0L ->
+                    true
+                | _ -> false);
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.reset_to_sequence consumer
+                       ~sequence:42L));
+              yield_n 5;
+              let trace = Buffer.contents trace in
+              if
+                not
+                  (contains_substring ~needle:"CONSUMER.RESET.ORDERS.worker"
+                     trace)
+              then fail "consumer reset used the wrong endpoint";
+              if not (contains_substring ~needle:"\\\"seq\\\":42" trace) then
+                fail "consumer reset omitted its sequence";
+              Eio.Promise.resolve response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"stream_name":"ORDERS","name":"worker","reset_seq":42,"delivered":{"consumer_seq":3,"stream_seq":41},"ack_floor":{"consumer_seq":2,"stream_seq":40},"config":{"durable_name":"worker","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant"}}|}));
+              let reset = expect_jetstream_ok (Eio.Promise.await result) in
+              equal int64 42L (Nats_eio.Jetstream.Consumer.Reset.sequence reset);
+              equal string "worker"
+                (Nats_eio.Jetstream.Consumer.Info.name
+                   (Nats_eio.Jetstream.Consumer.Reset.info reset));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "consumer pause and resume use the dedicated control endpoint"
         (fun () ->
           let pause_response, pause_response_u = Eio.Promise.create () in
@@ -1296,6 +1422,173 @@ let () =
                           members
                     | _ -> false)
                 | _ -> false);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "account info decodes limits, usage, API stats, and tiers" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.account_info jetstream));
+              yield_n 5;
+              if
+                not
+                  (contains_substring ~needle:"$JS.API.INFO"
+                     (Buffer.contents trace))
+              then fail "account info used the wrong endpoint";
+              Eio.Promise.resolve response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"memory":11,"storage":22,"reserved_memory":3,"reserved_storage":4,"streams":5,"consumers":6,"limits":{"max_memory":101,"max_storage":102,"max_streams":7,"max_consumers":8,"max_ack_pending":9,"memory_max_stream_bytes":10,"storage_max_stream_bytes":11,"max_bytes_required":true},"domain":"EU","api":{"level":2,"total":12,"errors":13,"inflight":14},"tiers":{"R1":{"memory":21,"storage":22,"reserved_memory":23,"reserved_storage":24,"streams":25,"consumers":26,"limits":{"max_memory":201,"max_storage":202,"max_streams":27,"max_consumers":28,"max_ack_pending":29,"memory_max_stream_bytes":30,"storage_max_stream_bytes":31,"max_bytes_required":false}}},"future_field":true}|}));
+              let account = expect_jetstream_ok (Eio.Promise.await result) in
+              equal (option string) (Some "EU")
+                (Nats_eio.Jetstream.Account.domain account);
+              let tier = Nats_eio.Jetstream.Account.tier account in
+              equal int64 11L (Nats_eio.Jetstream.Account.Tier.memory tier);
+              equal int64 102L
+                (Nats_eio.Jetstream.Account.Limits.max_storage
+                   (Nats_eio.Jetstream.Account.Tier.limits tier));
+              equal int 6 (Nats_eio.Jetstream.Account.Tier.consumers tier);
+              let limits = Nats_eio.Jetstream.Account.Tier.limits tier in
+              equal int64 101L
+                (Nats_eio.Jetstream.Account.Limits.max_memory limits);
+              equal bool true
+                (Nats_eio.Jetstream.Account.Limits.max_bytes_required limits);
+              let api = Nats_eio.Jetstream.Account.api account in
+              equal int 2 (Nats_eio.Jetstream.Account.Api.level api);
+              equal int64 14L (Nats_eio.Jetstream.Account.Api.inflight api);
+              (match Nats_eio.Jetstream.Account.tiers account with
+              | [ ("R1", tier) ] ->
+                  equal int64 21L (Nats_eio.Jetstream.Account.Tier.memory tier)
+              | _ -> fail "account info lost tiered usage");
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "stream names page and filter through the names API" (fun () ->
+          let first_response, first_response_u = Eio.Promise.create () in
+          let second_response, second_response_u = Eio.Promise.create () in
+          let subject_response, subject_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await first_response;
+                `Await second_response;
+                `Await subject_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Stream.names jetstream));
+              yield_n 5;
+              Eio.Promise.resolve first_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"total":2,"offset":0,"limit":1,"streams":["ORDERS"]}|}));
+              yield_n 5;
+              if
+                not
+                  (contains_substring ~needle:"\\\"offset\\\":1"
+                     (Buffer.contents trace))
+              then fail "stream names did not request the next page";
+              Eio.Promise.resolve second_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:2
+                      {|{"total":2,"offset":1,"limit":1,"streams":["EVENTS"]}|}));
+              equal (list string) [ "ORDERS"; "EVENTS" ]
+                (expect_jetstream_ok (Eio.Promise.await result));
+              let subject_result, subject_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve subject_result_u
+                    (Nats_eio.Jetstream.Stream.name_by_subject jetstream
+                       ~subject:(Nats.Subject.literal "orders.created")));
+              yield_n 5;
+              let trace = Buffer.contents trace in
+              if not (contains_substring ~needle:"STREAM.NAMES" trace) then
+                fail "stream subject lookup did not use names";
+              if
+                not
+                  (contains_substring ~needle:"subject\\\":\\\"orders.created"
+                     trace)
+              then fail "stream subject lookup omitted its filter";
+              Eio.Promise.resolve subject_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:3
+                      {|{"total":1,"offset":0,"limit":1,"streams":["ORDERS"]}|}));
+              equal string "ORDERS"
+                (expect_jetstream_ok (Eio.Promise.await subject_result));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "stream lookup and create-or-update classify a missing stream"
+        (fun () ->
+          let lookup_response, lookup_response_u = Eio.Promise.create () in
+          let update_response, update_response_u = Eio.Promise.create () in
+          let create_response, create_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await lookup_response;
+                `Await update_response;
+                `Await create_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let lookup_result, lookup_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve lookup_result_u
+                    (Nats_eio.Jetstream.Stream.lookup jetstream ~name:"ORDERS"));
+              yield_n 5;
+              Eio.Promise.resolve lookup_response_u
+                (Ok
+                   (api_error_wire ~sid:1 ~code:404 ~err_code:10059
+                      ~description:"stream not found"));
+              expect_jetstream_error (Eio.Promise.await lookup_result) (function
+                | Nats_eio.Jetstream.Error.Stream_not_found -> true
+                | _ -> false);
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Stream.Config.v ~name:"ORDERS"
+                     ~subjects:[ Nats.Subject.Filter.literal "orders.>" ]
+                     ())
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Stream.create_or_update jetstream config));
+              yield_n 5;
+              Eio.Promise.resolve update_response_u
+                (Ok
+                   (api_error_wire ~sid:2 ~code:404 ~err_code:10059
+                      ~description:"stream not found"));
+              yield_n 5;
+              if
+                not
+                  (contains_substring ~needle:"STREAM.CREATE.ORDERS"
+                     (Buffer.contents trace))
+              then fail "stream create-or-update did not fall back to create";
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:3
+                      {|{"config":{"name":"ORDERS","subjects":["orders.>"],"storage":"memory","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":-1,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":false,"allow_direct":false,"num_replicas":1,"sealed":false}}|}));
+              let stream = expect_jetstream_ok (Eio.Promise.await result) in
+              equal string "ORDERS" (Nats_eio.Jetstream.Stream.name stream);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream create emits retained config fields" (fun () ->
