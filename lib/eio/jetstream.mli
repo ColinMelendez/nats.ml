@@ -12,6 +12,15 @@ module Error : sig
     | Empty_placement
     | Empty_placement_cluster
     | Empty_placement_tag
+    | Mirror_and_sources
+    | Mirror_and_subjects
+    | Source_filter_and_transforms
+    | Invalid_source_start
+    | Invalid_source_start_sequence of int64
+    | Invalid_source_start_time of string
+    | Empty_external_api_prefix
+    | Invalid_external_prefix of { field : string; error : Nats.Subject.error }
+    | Invalid_transform_destination of string
     | Empty_consumer_name
     | Invalid_consumer_name_character of { position : int; character : char }
     | Invalid_consumer_limit of { field : string; value : int64 }
@@ -154,6 +163,10 @@ module Stream : sig
   type jetstream = t
 
   module Config : sig
+    (** Validated stream configuration values and their persistent updates. A
+        configuration may describe ordinary capture subjects, a mirror, or
+        one or more sources. *)
+
     type storage = Memory | File
     type retention = Limits | Interest | Work_queue
     type discard = Old | New
@@ -174,6 +187,89 @@ module Stream : sig
       val tags : t -> string list
     end
 
+    module Transform : sig
+      type t
+      (** A subject mapping used by a stream, source, or republish rule. *)
+      type error = Error.config
+
+      val v :
+        ?source:Nats.Subject.Filter.t ->
+        destination:string ->
+        unit ->
+        (t, error) result
+      (** [v ?source ~destination ()] builds a subject mapping. An omitted
+          [source] means all subjects; an empty [destination] filters matching
+          messages when used in a source transform. *)
+
+      val source : t -> Nats.Subject.Filter.t option
+      val destination : t -> string
+    end
+
+    module External : sig
+      type t
+      (** Cross-account or cross-domain JetStream API and delivery prefixes. *)
+      type error = Error.config
+
+      val v :
+        api_prefix:string ->
+        ?deliver_prefix:string ->
+        unit ->
+        (t, error) result
+      (** [v ~api_prefix ?deliver_prefix ()] qualifies a source in another
+          account or JetStream domain using the server's wire prefixes. *)
+
+      val api_prefix : t -> string
+      val deliver_prefix : t -> string option
+    end
+
+    module Source : sig
+      type start =
+        | Sequence of int64
+        | Time of Ptime.t
+      (** A source's optional replay start point. Sequence numbers are
+          positive; times are encoded as RFC3339 timestamps. *)
+
+      type t
+      (** A mirror or source stream reference. *)
+      type error = Error.config
+
+      val v :
+        name:string ->
+        ?start:start ->
+        ?filter_subject:Nats.Subject.Filter.t ->
+        ?subject_transforms:Transform.t list ->
+        ?external_:External.t ->
+        unit ->
+        (t, error) result
+      (** [v ~name ()] describes a mirrored or sourced stream. A source may
+          have one filter or a non-empty list of transforms, but not both. *)
+
+      val name : t -> string
+      val start : t -> start option
+      val filter_subject : t -> Nats.Subject.Filter.t option
+      val subject_transforms : t -> Transform.t list
+      val external_ : t -> External.t option
+    end
+
+    module Republish : sig
+      type t
+      (** A post-storage subject republish rule. *)
+      type error = Error.config
+
+      val v :
+        ?source:Nats.Subject.Filter.t ->
+        destination:string ->
+        ?headers_only:bool ->
+        unit ->
+        (t, error) result
+      (** [v ?source ~destination ?headers_only ()] configures immediate
+          republishing after a message is stored. *)
+
+      val source : t -> Nats.Subject.Filter.t option
+      val destination : t -> string
+      val headers_only : t -> bool
+    end
+
     type t
     type error = Error.config
 
@@ -184,6 +280,11 @@ module Stream : sig
       ?storage:storage ->
       ?replicas:int ->
       ?placement:Placement.t ->
+      ?mirror:Source.t ->
+      ?sources:Source.t list ->
+      ?subject_transform:Transform.t ->
+      ?republish:Republish.t ->
+      ?mirror_direct:bool ->
       ?compression:compression ->
       ?metadata:(string * string) list ->
       ?retention:retention ->
@@ -206,8 +307,9 @@ module Stream : sig
       (t, error) result
     (** [v] validates a stream name, capture filters, and limits. Limits use
         [-1] for the JetStream unlimited value when supplied. [replicas] must be
-        between 1 and 5. [deny_delete] controls whether stream-level message
-        deletion is rejected. *)
+        between 1 and 5. A mirror requires an empty [subjects] list and cannot
+        be combined with [sources]. [deny_delete] controls whether stream-level
+        message deletion is rejected. *)
 
     val name : t -> string
     val subjects : t -> Nats.Subject.Filter.t list
@@ -215,6 +317,16 @@ module Stream : sig
     val storage : t -> storage
     val replicas : t -> int
     val placement : t -> Placement.t option
+    val mirror : t -> Source.t option
+    (** [mirror config] is the configured mirror, if any. *)
+    val sources : t -> Source.t list
+    (** [sources config] is the ordered list of source streams. *)
+    val subject_transform : t -> Transform.t option
+    (** [subject_transform config] is the input subject mapping, if any. *)
+    val republish : t -> Republish.t option
+    (** [republish config] is the post-storage republish rule, if any. *)
+    val mirror_direct : t -> bool
+    (** [mirror_direct config] controls direct reads through a mirror. *)
     val compression : t -> compression
     val metadata : t -> (string * string) list
     val retention : t -> retention
@@ -263,6 +375,22 @@ module Stream : sig
 
     val with_placement : t -> Placement.t option -> (t, error) result
     (** [with_placement config value] replaces the placement constraint. *)
+
+    val with_mirror : t -> Source.t option -> (t, error) result
+    (** [with_mirror config value] replaces the mirror configuration. *)
+
+    val with_sources : t -> Source.t list -> (t, error) result
+    (** [with_sources config value] replaces the source list. *)
+
+    val with_subject_transform : t -> Transform.t option -> (t, error) result
+    (** [with_subject_transform config value] replaces the input subject
+        transform. *)
+
+    val with_republish : t -> Republish.t option -> (t, error) result
+    (** [with_republish config value] replaces the republish configuration. *)
+
+    val with_mirror_direct : t -> bool -> (t, error) result
+    (** [with_mirror_direct config value] replaces mirror direct-read access. *)
 
     val with_compression : t -> compression -> (t, error) result
     (** [with_compression config value] replaces the storage compression mode.

@@ -13,6 +13,15 @@ module Error = struct
     | Empty_placement
     | Empty_placement_cluster
     | Empty_placement_tag
+    | Mirror_and_sources
+    | Mirror_and_subjects
+    | Source_filter_and_transforms
+    | Invalid_source_start
+    | Invalid_source_start_sequence of int64
+    | Invalid_source_start_time of string
+    | Empty_external_api_prefix
+    | Invalid_external_prefix of { field : string; error : Nats.Subject.error }
+    | Invalid_transform_destination of string
     | Empty_consumer_name
     | Invalid_consumer_name_character of { position : int; character : char }
     | Invalid_consumer_limit of { field : string; value : int64 }
@@ -103,6 +112,30 @@ module Error = struct
         Format.pp_print_string ppf "stream placement cluster name is empty"
     | Empty_placement_tag ->
         Format.pp_print_string ppf "stream placement contains an empty tag"
+    | Mirror_and_sources ->
+        Format.pp_print_string ppf
+          "a stream cannot be configured as both a mirror and a source"
+    | Mirror_and_subjects ->
+        Format.pp_print_string ppf
+          "a mirror stream cannot also capture configured subjects"
+    | Source_filter_and_transforms ->
+        Format.pp_print_string ppf
+          "a stream source cannot combine a filter with subject transforms"
+    | Invalid_source_start ->
+        Format.pp_print_string ppf
+          "a stream source cannot have both a sequence and time start"
+    | Invalid_source_start_sequence value ->
+        Format.fprintf ppf "stream source start sequence must be positive, got %Ld"
+          value
+    | Invalid_source_start_time value ->
+        Format.fprintf ppf "invalid stream source start time %S" value
+    | Empty_external_api_prefix ->
+        Format.pp_print_string ppf "external stream API prefix is empty"
+    | Invalid_external_prefix { field; error } ->
+        Format.fprintf ppf "invalid external stream %s: %a" field
+          Nats.Subject.pp_error error
+    | Invalid_transform_destination value ->
+        Format.fprintf ppf "invalid subject transform destination %S" value
     | Empty_consumer_name -> Format.pp_print_string ppf "consumer name is empty"
     | Invalid_consumer_name_character { position; character } ->
         Format.fprintf ppf "invalid consumer-name character %C at position %d"
@@ -649,54 +682,6 @@ module Stream = struct
     type discard = Old | New
     type compression = Uncompressed | S2
 
-    module Placement = struct
-      type t = { cluster : string option; tags : string list }
-      type error = config_error
-
-      let v ?cluster ?(tags = []) () =
-        match cluster with
-        | Some value when Int.equal (String.length value) 0 ->
-            Error Error.Empty_placement_cluster
-        | _ when Option.is_none cluster && Int.equal (List.length tags) 0 ->
-            Error Error.Empty_placement
-        | _ when List.exists (fun tag -> Int.equal (String.length tag) 0) tags
-          ->
-            Error Error.Empty_placement_tag
-        | _ -> Ok { cluster; tags }
-
-      let cluster value = value.cluster
-      let tags value = value.tags
-    end
-
-    type t = {
-      name : string;
-      subjects : Nats.Subject.Filter.t list;
-      description : string option;
-      storage : storage;
-      replicas : int;
-      placement : Placement.t option;
-      compression : compression;
-      metadata : (string * string) list;
-      retention : retention;
-      discard : discard;
-      max_msgs : int64 option;
-      max_msgs_per_subject : int64 option;
-      max_bytes : int64 option;
-      max_age : Mtime.Span.t option;
-      max_msg_size : int64 option;
-      allow_msg_ttl : bool;
-      allow_atomic_publish : bool;
-      allow_msg_schedules : bool;
-      allow_batch_publish : bool;
-      subject_delete_marker_ttl : Mtime.Span.t option;
-      allow_rollup : bool;
-      allow_direct : bool;
-      deny_delete : bool;
-      sealed : bool;
-    }
-
-    type error = config_error
-
     let allowed_name_character character =
       let code = Char.code character in
       (code >= Char.code 'A' && code <= Char.code 'Z')
@@ -720,6 +705,235 @@ module Stream = struct
         done;
         match !invalid with None -> Ok () | Some error -> Error error
 
+    module Placement = struct
+      type t = { cluster : string option; tags : string list }
+      type error = config_error
+
+      let v ?cluster ?(tags = []) () =
+        match cluster with
+        | Some value when Int.equal (String.length value) 0 ->
+            Error Error.Empty_placement_cluster
+        | _ when Option.is_none cluster && Int.equal (List.length tags) 0 ->
+            Error Error.Empty_placement
+        | _ when List.exists (fun tag -> Int.equal (String.length tag) 0) tags
+          ->
+            Error Error.Empty_placement_tag
+        | _ -> Ok { cluster; tags }
+
+      let cluster value = value.cluster
+      let tags value = value.tags
+    end
+
+    module Transform = struct
+      type t = {
+        source : Nats.Subject.Filter.t option;
+        destination : string;
+        unknown : Jsont.json;
+      }
+
+      type error = config_error
+
+      let valid_destination value =
+        if Int.equal (String.length value) 0 then Ok ()
+        else
+          let invalid = ref None in
+          let token_start = ref 0 in
+          let length = String.length value in
+          for position = 0 to length do
+            match !invalid with
+            | Some _ -> ()
+            | None ->
+                let at_end = Int.equal position length in
+                let at_separator =
+                  (not at_end) && Char.equal (String.get value position) '.'
+                in
+                if at_end || at_separator then
+                  let token_length = position - !token_start in
+                  if Int.equal token_length 0 then
+                    invalid := Some (Error.Invalid_transform_destination value)
+                  else (
+                    let token = String.sub value !token_start token_length in
+                    if String.contains token '*' then
+                      invalid :=
+                        Some (Error.Invalid_transform_destination value)
+                    else if Char.equal (String.get token 0) '>'
+                            && not (String.equal token ">")
+                    then
+                      invalid :=
+                        Some (Error.Invalid_transform_destination value)
+                    else if String.equal token ">" && not at_end then
+                      invalid :=
+                        Some (Error.Invalid_transform_destination value);
+                    token_start := position + 1)
+          done;
+          match !invalid with None -> Ok () | Some error -> Error error
+
+      let v ?source ~destination () =
+        match valid_destination destination with
+        | Error error -> Error error
+        | Ok () -> Ok { source; destination; unknown = Jsont.Json.object' [] }
+
+      let source value = value.source
+      let destination value = value.destination
+      let unknown value = value.unknown
+      let with_unknown value unknown = { value with unknown }
+    end
+
+    module External = struct
+      type t = {
+        api_prefix : string;
+        deliver_prefix : string option;
+        unknown : Jsont.json;
+      }
+
+      type error = config_error
+
+      let validate_prefix field value =
+        match Nats.Subject.of_string value with
+        | Ok _ -> Ok value
+        | Error error -> Error (Error.Invalid_external_prefix { field; error })
+
+      let v ~api_prefix ?deliver_prefix () =
+        if Int.equal (String.length api_prefix) 0 then
+          Error Error.Empty_external_api_prefix
+        else
+          match validate_prefix "API prefix" api_prefix with
+          | Error error -> Error error
+          | Ok api_prefix -> (
+              match deliver_prefix with
+              | None ->
+                  Ok
+                    {
+                      api_prefix;
+                      deliver_prefix = None;
+                      unknown = Jsont.Json.object' [];
+                    }
+              | Some deliver_prefix -> (
+                  match validate_prefix "delivery prefix" deliver_prefix with
+                  | Error error -> Error error
+                  | Ok deliver_prefix ->
+                      Ok
+                        {
+                          api_prefix;
+                          deliver_prefix = Some deliver_prefix;
+                          unknown = Jsont.Json.object' [];
+                        }))
+
+      let api_prefix value = value.api_prefix
+      let deliver_prefix value = value.deliver_prefix
+      let unknown value = value.unknown
+      let with_unknown value unknown = { value with unknown }
+    end
+
+    module Source = struct
+      type start = Sequence of int64 | Time of Ptime.t
+
+      type t = {
+        name : string;
+        start : start option;
+        filter_subject : Nats.Subject.Filter.t option;
+        subject_transforms : Transform.t list;
+        external_ : External.t option;
+        unknown : Jsont.json;
+      }
+
+      type error = config_error
+
+      let v ~name ?start ?filter_subject ?(subject_transforms = [])
+          ?external_ () =
+        match validate_name name with
+        | Error error -> Error error
+        | Ok () -> (
+            match start with
+            | Some (Sequence value) when Int64.compare value 0L <= 0 ->
+                Error (Error.Invalid_source_start_sequence value)
+            | _ ->
+                if Option.is_some filter_subject
+                   && List.length subject_transforms > 0
+                then Error Error.Source_filter_and_transforms
+                else
+                  Ok
+                    {
+                      name;
+                      start;
+                      filter_subject;
+                      subject_transforms;
+                      external_;
+                      unknown = Jsont.Json.object' [];
+                    })
+
+      let name value = value.name
+      let start value = value.start
+      let filter_subject value = value.filter_subject
+      let subject_transforms value = value.subject_transforms
+      let external_ value = value.external_
+      let unknown value = value.unknown
+      let with_unknown value unknown = { value with unknown }
+    end
+
+    module Republish = struct
+      type t = {
+        transform : Transform.t;
+        headers_only : bool;
+        unknown : Jsont.json;
+      }
+
+      type error = config_error
+
+      let v ?source ~destination ?(headers_only = false) () =
+        match Transform.v ?source ~destination () with
+        | Error error -> Error error
+        | Ok transform when Int.equal (String.length destination) 0 ->
+            Error (Error.Invalid_transform_destination destination)
+        | Ok transform ->
+            Ok
+              {
+                transform;
+                headers_only;
+                unknown = Jsont.Json.object' [];
+              }
+
+      let source value = Transform.source value.transform
+      let destination value = Transform.destination value.transform
+      let headers_only value = value.headers_only
+      let unknown value = value.unknown
+      let with_unknown value unknown = { value with unknown }
+    end
+
+    type t = {
+      name : string;
+      subjects : Nats.Subject.Filter.t list;
+      description : string option;
+      storage : storage;
+      replicas : int;
+      placement : Placement.t option;
+      mirror : Source.t option;
+      sources : Source.t list;
+      subject_transform : Transform.t option;
+      republish : Republish.t option;
+      mirror_direct : bool;
+      compression : compression;
+      metadata : (string * string) list;
+      retention : retention;
+      discard : discard;
+      max_msgs : int64 option;
+      max_msgs_per_subject : int64 option;
+      max_bytes : int64 option;
+      max_age : Mtime.Span.t option;
+      max_msg_size : int64 option;
+      allow_msg_ttl : bool;
+      allow_atomic_publish : bool;
+      allow_msg_schedules : bool;
+      allow_batch_publish : bool;
+      subject_delete_marker_ttl : Mtime.Span.t option;
+      allow_rollup : bool;
+      allow_direct : bool;
+      deny_delete : bool;
+      sealed : bool;
+    }
+
+    type error = config_error
+
     let validate_limit field = function
       | None -> Ok ()
       | Some value when Int64.compare value (-1L) >= 0 -> Ok ()
@@ -737,6 +951,8 @@ module Stream = struct
 
     let v_internal ~allow_empty_subjects ~name ~subjects ?description
         ?(storage = File) ?(replicas = 1) ?placement
+        ?mirror ?(sources = []) ?subject_transform ?republish
+        ?(mirror_direct = false)
         ?(compression = Uncompressed) ?(metadata = []) ?(retention = Limits)
         ?(discard = Old) ?max_msgs ?max_msgs_per_subject ?max_bytes ?max_age
         ?max_msg_size ?(allow_msg_ttl = false) ?(allow_atomic_publish = false)
@@ -754,8 +970,16 @@ module Stream = struct
       let subject_delete_marker_ttl =
         normalize_span subject_delete_marker_ttl
       in
+      let allow_empty_subjects =
+        allow_empty_subjects || Option.is_some mirror
+        || List.length sources > 0
+      in
       match validate_name name with
       | Error error -> Error error
+      | Ok () when Option.is_some mirror && List.length sources > 0 ->
+          Error Error.Mirror_and_sources
+      | Ok () when Option.is_some mirror && List.length subjects > 0 ->
+          Error Error.Mirror_and_subjects
       | Ok ()
         when Int.equal (List.length subjects) 0 && not allow_empty_subjects ->
           Error Error.Empty_subjects
@@ -800,6 +1024,11 @@ module Stream = struct
                                           storage;
                                           replicas;
                                           placement;
+                                          mirror;
+                                          sources;
+                                          subject_transform;
+                                          republish;
+                                          mirror_direct;
                                           compression;
                                           metadata;
                                           retention;
@@ -820,14 +1049,16 @@ module Stream = struct
                                           sealed;
                                         })))))))
 
-    let v ~name ~subjects ?description ?storage ?replicas ?placement
-        ?compression ?metadata ?retention ?discard ?max_msgs
+    let v ~name ~subjects ?description ?storage ?replicas ?placement ?mirror
+        ?sources ?subject_transform ?republish ?mirror_direct ?compression
+        ?metadata ?retention ?discard ?max_msgs
         ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size ?allow_msg_ttl
         ?allow_atomic_publish ?allow_msg_schedules ?allow_batch_publish
         ?subject_delete_marker_ttl ?allow_rollup ?allow_direct ?deny_delete
         ?sealed () =
       v_internal ~allow_empty_subjects:false ~name ~subjects ?description
-        ?storage ?replicas ?placement ?compression ?metadata ?retention ?discard
+        ?storage ?replicas ?placement ?mirror ?sources ?subject_transform
+        ?republish ?mirror_direct ?compression ?metadata ?retention ?discard
         ?max_msgs ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size
         ?allow_msg_ttl ?allow_atomic_publish ?allow_msg_schedules
         ?allow_batch_publish ?subject_delete_marker_ttl ?allow_rollup
@@ -839,6 +1070,11 @@ module Stream = struct
     let storage value = value.storage
     let replicas value = value.replicas
     let placement value = value.placement
+    let mirror value = value.mirror
+    let sources value = value.sources
+    let subject_transform value = value.subject_transform
+    let republish value = value.republish
+    let mirror_direct value = value.mirror_direct
     let compression value = value.compression
     let metadata value = value.metadata
     let retention value = value.retention
@@ -858,13 +1094,23 @@ module Stream = struct
     let deny_delete value = value.deny_delete
     let sealed value = value.sealed
 
-    let rebuild ?sealed ?replicas ?placement ?compression ?metadata
+    let rebuild ?sealed ?replicas ?placement ?mirror ?sources ?subject_transform
+        ?republish ?mirror_direct ?compression ?metadata
         ?allow_msg_ttl ?allow_atomic_publish ?allow_msg_schedules
         ?allow_batch_publish ?subject_delete_marker_ttl value ~name ~subjects ~storage
         ~retention ~discard ~max_msgs ~max_msgs_per_subject ~max_bytes ~max_age
         ~max_msg_size ~allow_rollup ~allow_direct ~deny_delete =
       let replicas = Option.value ~default:value.replicas replicas in
       let placement = Option.value ~default:value.placement placement in
+      let mirror = Option.value ~default:value.mirror mirror in
+      let sources = Option.value ~default:value.sources sources in
+      let subject_transform =
+        Option.value ~default:value.subject_transform subject_transform
+      in
+      let republish = Option.value ~default:value.republish republish in
+      let mirror_direct =
+        Option.value ~default:value.mirror_direct mirror_direct
+      in
       let compression = Option.value ~default:value.compression compression in
       let metadata = Option.value ~default:value.metadata metadata in
       let allow_msg_ttl =
@@ -886,7 +1132,8 @@ module Stream = struct
       v_internal
         ~allow_empty_subjects:(Int.equal (List.length value.subjects) 0)
         ~name ~subjects ?description:value.description ~storage ~retention
-        ~replicas ?placement ~compression ~metadata ~discard ?max_msgs
+        ~replicas ?placement ?mirror ~sources ?subject_transform ?republish
+        ~mirror_direct ~compression ~metadata ~discard ?max_msgs
         ?max_bytes ?max_msgs_per_subject ?max_age ?max_msg_size ~allow_rollup
         ~allow_msg_ttl ~allow_atomic_publish ~allow_msg_schedules
         ~allow_batch_publish ?subject_delete_marker_ttl ~allow_direct
@@ -918,7 +1165,10 @@ module Stream = struct
         ~allow_batch_publish:value.allow_batch_publish
         ?subject_delete_marker_ttl:value.subject_delete_marker_ttl
         ~sealed:value.sealed ~replicas:value.replicas ?placement:value.placement
-        ~compression:value.compression ~metadata:value.metadata ()
+        ?mirror:value.mirror ~sources:value.sources
+        ?subject_transform:value.subject_transform ?republish:value.republish
+        ~mirror_direct:value.mirror_direct ~compression:value.compression
+        ~metadata:value.metadata ()
 
     let with_subjects value subjects =
       rebuild value ~name:value.name ~subjects ~storage:value.storage
@@ -1110,7 +1360,55 @@ module Stream = struct
         ~allow_msg_schedules:value.allow_msg_schedules
         ~allow_batch_publish:value.allow_batch_publish
         ?subject_delete_marker_ttl:value.subject_delete_marker_ttl
-        ~sealed:value.sealed ()
+        ~sealed:value.sealed ?mirror:value.mirror ~sources:value.sources
+        ?subject_transform:value.subject_transform ?republish:value.republish
+        ~mirror_direct:value.mirror_direct ()
+
+    let rebuild_with_relations value ~mirror ~sources ~subject_transform
+        ~republish ~mirror_direct =
+      v_internal
+        ~allow_empty_subjects:false
+        ~name:value.name ~subjects:value.subjects ?description:value.description
+        ~storage:value.storage ~replicas:value.replicas
+        ?placement:value.placement ?mirror ~sources ?subject_transform ?republish
+        ~mirror_direct ~compression:value.compression ~metadata:value.metadata
+        ~retention:value.retention ~discard:value.discard
+        ?max_msgs:value.max_msgs
+        ?max_msgs_per_subject:value.max_msgs_per_subject
+        ?max_bytes:value.max_bytes ?max_age:value.max_age
+        ?max_msg_size:value.max_msg_size
+        ~allow_msg_ttl:value.allow_msg_ttl
+        ~allow_atomic_publish:value.allow_atomic_publish
+        ~allow_msg_schedules:value.allow_msg_schedules
+        ~allow_batch_publish:value.allow_batch_publish
+        ?subject_delete_marker_ttl:value.subject_delete_marker_ttl
+        ~allow_rollup:value.allow_rollup ~allow_direct:value.allow_direct
+        ~deny_delete:value.deny_delete ~sealed:value.sealed ()
+
+    let with_mirror value mirror =
+      rebuild_with_relations value ~mirror ~sources:value.sources
+        ~subject_transform:value.subject_transform ~republish:value.republish
+        ~mirror_direct:value.mirror_direct
+
+    let with_sources value sources =
+      rebuild_with_relations value ~mirror:value.mirror ~sources
+        ~subject_transform:value.subject_transform ~republish:value.republish
+        ~mirror_direct:value.mirror_direct
+
+    let with_subject_transform value subject_transform =
+      rebuild_with_relations value ~mirror:value.mirror ~sources:value.sources
+        ~subject_transform ~republish:value.republish
+        ~mirror_direct:value.mirror_direct
+
+    let with_republish value republish =
+      rebuild_with_relations value ~mirror:value.mirror ~sources:value.sources
+        ~subject_transform:value.subject_transform ~republish
+        ~mirror_direct:value.mirror_direct
+
+    let with_mirror_direct value mirror_direct =
+      rebuild_with_relations value ~mirror:value.mirror ~sources:value.sources
+        ~subject_transform:value.subject_transform ~republish:value.republish
+        ~mirror_direct
 
     let with_compression value compression =
       rebuild ~compression value ~name:value.name ~subjects:value.subjects
@@ -1179,6 +1477,11 @@ module Stream = struct
     storage : Config.storage;
     replicas : int;
     placement : wire_placement option;
+    mirror : wire_source option;
+    sources : wire_source list;
+    subject_transform : wire_transform option;
+    republish : wire_republish option;
+    mirror_direct : bool;
     compression : Config.compression;
     metadata : string String_map.t option;
     retention : Config.retention;
@@ -1201,6 +1504,35 @@ module Stream = struct
   }
 
   and wire_placement = { cluster : string option; tags : string list option }
+
+  and wire_transform = {
+    source : string option;
+    destination : string;
+    unknown : Jsont.json;
+  }
+
+  and wire_external = {
+    api_prefix : string;
+    deliver_prefix : string option;
+    unknown : Jsont.json;
+  }
+
+  and wire_source = {
+    name : string;
+    opt_start_seq : int64 option;
+    opt_start_time : string option;
+    filter_subject : string option;
+    subject_transforms : wire_transform list;
+    external_ : wire_external option;
+    unknown : Jsont.json;
+  }
+
+  and wire_republish = {
+    source : string option;
+    destination : string;
+    headers_only : bool option;
+    unknown : Jsont.json;
+  }
 
   let storage_codec =
     Jsont.enum [ ("memory", Config.Memory); ("file", Config.File) ]
@@ -1234,6 +1566,80 @@ module Stream = struct
 
   let metadata_codec = Jsont.Object.as_string_map Jsont.string
 
+  let wire_transform_codec : wire_transform Jsont.t =
+    Jsont.Object.map ~kind:"JetStream subject transform" (fun source destination
+        unknown ->
+      ({ source; destination; unknown } : wire_transform))
+    |> Jsont.Object.opt_mem "src" Jsont.string
+         ~enc:(fun (value : wire_transform) -> value.source)
+    |> Jsont.Object.mem "dest" Jsont.string
+         ~enc:(fun (value : wire_transform) -> value.destination)
+    |> Jsont.Object.keep_unknown
+         ~enc:(fun (value : wire_transform) -> value.unknown)
+         Jsont.json_mems
+    |> Jsont.Object.finish
+
+  let wire_external_codec : wire_external Jsont.t =
+    Jsont.Object.map ~kind:"JetStream external stream" (fun api_prefix
+        deliver_prefix unknown ->
+      ({ api_prefix; deliver_prefix; unknown } : wire_external))
+    |> Jsont.Object.mem "api" Jsont.string
+         ~enc:(fun (value : wire_external) -> value.api_prefix)
+    |> Jsont.Object.opt_mem "deliver" Jsont.string ~enc:(fun (value : wire_external) ->
+        value.deliver_prefix)
+    |> Jsont.Object.keep_unknown
+         ~enc:(fun (value : wire_external) -> value.unknown)
+         Jsont.json_mems
+    |> Jsont.Object.finish
+
+  let wire_source_codec : wire_source Jsont.t =
+    Jsont.Object.map ~kind:"JetStream stream source"
+      (fun name opt_start_seq opt_start_time filter_subject subject_transforms
+          external_ unknown ->
+        ({
+          name;
+          opt_start_seq;
+          opt_start_time;
+          filter_subject;
+          subject_transforms = Option.value ~default:[] subject_transforms;
+          external_;
+          unknown;
+        } : wire_source))
+    |> Jsont.Object.mem "name" Jsont.string
+         ~enc:(fun (value : wire_source) -> value.name)
+    |> Jsont.Object.opt_mem "opt_start_seq" Jsont.int64
+         ~enc:(fun (value : wire_source) -> value.opt_start_seq)
+    |> Jsont.Object.opt_mem "opt_start_time" Jsont.string
+         ~enc:(fun (value : wire_source) -> value.opt_start_time)
+    |> Jsont.Object.opt_mem "filter_subject" Jsont.string
+         ~enc:(fun (value : wire_source) -> value.filter_subject)
+    |> Jsont.Object.opt_mem "subject_transforms" (Jsont.list wire_transform_codec)
+         ~enc:(fun (value : wire_source) ->
+           match value.subject_transforms with
+           | [] -> None
+           | values -> Some values)
+    |> Jsont.Object.opt_mem "external" wire_external_codec
+         ~enc:(fun (value : wire_source) -> value.external_)
+    |> Jsont.Object.keep_unknown
+         ~enc:(fun (value : wire_source) -> value.unknown)
+         Jsont.json_mems
+    |> Jsont.Object.finish
+
+  let wire_republish_codec : wire_republish Jsont.t =
+    Jsont.Object.map ~kind:"JetStream republish" (fun source destination
+        headers_only unknown ->
+      ({ source; destination; headers_only; unknown } : wire_republish))
+    |> Jsont.Object.opt_mem "src" Jsont.string
+         ~enc:(fun (value : wire_republish) -> value.source)
+    |> Jsont.Object.mem "dest" Jsont.string
+         ~enc:(fun (value : wire_republish) -> value.destination)
+    |> Jsont.Object.opt_mem "headers_only" Jsont.bool
+         ~enc:(fun (value : wire_republish) -> value.headers_only)
+    |> Jsont.Object.keep_unknown
+         ~enc:(fun (value : wire_republish) -> value.unknown)
+         Jsont.json_mems
+    |> Jsont.Object.finish
+
   let metadata_to_wire metadata =
     let values =
       List.fold_left
@@ -1257,6 +1663,142 @@ module Stream = struct
         })
       placement
 
+  let transform_to_wire value =
+    {
+      source =
+        Option.map Nats.Subject.Filter.to_string
+          (Config.Transform.source value);
+      destination = Config.Transform.destination value;
+      unknown = Config.Transform.unknown value;
+    }
+
+  let external_to_wire value =
+    {
+      api_prefix = Config.External.api_prefix value;
+      deliver_prefix = Config.External.deliver_prefix value;
+      unknown = Config.External.unknown value;
+    }
+
+  let source_to_wire value =
+    let opt_start_seq, opt_start_time =
+      match Config.Source.start value with
+      | None -> (None, None)
+      | Some (Config.Source.Sequence sequence) -> (Some sequence, None)
+      | Some (Config.Source.Time time) ->
+          (None, Some (Ptime.to_rfc3339 ~frac_s:9 ~tz_offset_s:0 time))
+    in
+    {
+      name = Config.Source.name value;
+      opt_start_seq;
+      opt_start_time;
+      filter_subject =
+        Option.map Nats.Subject.Filter.to_string
+          (Config.Source.filter_subject value);
+      subject_transforms =
+        List.map transform_to_wire (Config.Source.subject_transforms value);
+      external_ = Option.map external_to_wire (Config.Source.external_ value);
+      unknown = Config.Source.unknown value;
+    }
+
+  let republish_to_wire value =
+    {
+      source =
+        Option.map Nats.Subject.Filter.to_string
+          (Config.Republish.source value);
+      destination = Config.Republish.destination value;
+      headers_only =
+        if Config.Republish.headers_only value then Some true else None;
+      unknown = Config.Republish.unknown value;
+    }
+
+  let filter_of_wire = function
+    | None | Some "" -> Ok None
+    | Some value -> (
+        match Nats.Subject.Filter.of_string value with
+        | Ok value -> Ok (Some value)
+        | Error error -> Error (Error.Invalid_subject error))
+
+  let transform_of_wire value =
+    let ( let* ) value f =
+      match value with Error error -> Error error | Ok value -> f value
+    in
+    let* source = filter_of_wire value.source in
+    match Config.Transform.v ?source ~destination:value.destination () with
+    | Error error -> Error (Error.Invalid_config error)
+    | Ok transform -> Ok (Config.Transform.with_unknown transform value.unknown)
+
+  let external_of_wire value =
+    match
+      Config.External.v ~api_prefix:value.api_prefix
+        ?deliver_prefix:value.deliver_prefix ()
+    with
+    | Error error -> Error (Error.Invalid_config error)
+    | Ok external_ ->
+        Ok (Config.External.with_unknown external_ value.unknown)
+
+  let source_of_wire value =
+    let ( let* ) value f =
+      match value with Error error -> Error error | Ok value -> f value
+    in
+    let* start =
+      match (value.opt_start_seq, value.opt_start_time) with
+      | Some sequence, Some _ when not (Int64.equal sequence 0L) ->
+          Error (Error.Invalid_config Error.Invalid_source_start)
+      | Some sequence, None when Int64.equal sequence 0L -> Ok None
+      | Some sequence, None when Int64.compare sequence 0L < 0 ->
+          Error
+            (Error.Invalid_config
+               (Error.Invalid_source_start_sequence sequence))
+      | Some sequence, None -> Ok (Some (Config.Source.Sequence sequence))
+      | None, Some "" -> Ok None
+      | None, Some raw -> (
+          match Ptime.of_rfc3339 ~strict:true raw with
+          | Ok (time, _, _) -> Ok (Some (Config.Source.Time time))
+          | Error _ ->
+              Error
+                (Error.Invalid_config (Error.Invalid_source_start_time raw)))
+      | Some _, Some _ ->
+          Error (Error.Invalid_config Error.Invalid_source_start)
+      | None, None -> Ok None
+    in
+    let* filter_subject = filter_of_wire value.filter_subject in
+    let* subject_transforms =
+      List.fold_left
+        (fun result value ->
+          match result with
+          | Error _ -> result
+          | Ok values -> (
+              match transform_of_wire value with
+              | Error error -> Error error
+              | Ok value -> Ok (value :: values)))
+        (Ok []) value.subject_transforms
+    in
+    let subject_transforms = List.rev subject_transforms in
+    let* external_ =
+      match value.external_ with
+      | None -> Ok None
+      | Some value -> external_of_wire value |> Result.map Option.some
+    in
+    match
+      Config.Source.v ~name:value.name ?start ?filter_subject
+        ~subject_transforms ?external_ ()
+    with
+    | Error error -> Error (Error.Invalid_config error)
+    | Ok source -> Ok (Config.Source.with_unknown source value.unknown)
+
+  let republish_of_wire (value : wire_republish) =
+    let ( let* ) value f =
+      match value with Error error -> Error error | Ok value -> f value
+    in
+    let* source = filter_of_wire value.source in
+    match
+      Config.Republish.v ?source ~destination:value.destination
+        ~headers_only:(Option.value ~default:false value.headers_only) ()
+    with
+    | Error error -> Error (Error.Invalid_config error)
+    | Ok republish ->
+        Ok (Config.Republish.with_unknown republish value.unknown)
+
   let wire_config_codec =
     Jsont.Object.map ~kind:"JetStream stream config"
       (fun
@@ -1266,6 +1808,11 @@ module Stream = struct
         storage
         replicas
         placement
+        mirror
+        sources
+        subject_transform
+        republish
+        mirror_direct
         compression
         metadata
         retention
@@ -1293,6 +1840,11 @@ module Stream = struct
           storage;
           replicas = Option.value ~default:1 replicas;
           placement;
+          mirror;
+          sources = Option.value ~default:[] sources;
+          subject_transform;
+          republish;
+          mirror_direct = Option.value ~default:false mirror_direct;
           compression = Option.value ~default:Config.Uncompressed compression;
           metadata;
           retention;
@@ -1325,6 +1877,17 @@ module Stream = struct
         Some value.replicas)
     |> Jsont.Object.opt_mem "placement" wire_placement_codec ~enc:(fun value ->
         value.placement)
+    |> Jsont.Object.opt_mem "mirror" wire_source_codec ~enc:(fun value ->
+        value.mirror)
+    |> Jsont.Object.opt_mem "sources" (Jsont.list wire_source_codec)
+         ~enc:(fun value ->
+           match value.sources with [] -> None | sources -> Some sources)
+    |> Jsont.Object.opt_mem "subject_transform" wire_transform_codec
+         ~enc:(fun value -> value.subject_transform)
+    |> Jsont.Object.opt_mem "republish" wire_republish_codec ~enc:(fun value ->
+        value.republish)
+    |> Jsont.Object.opt_mem "mirror_direct" Jsont.bool ~enc:(fun value ->
+        Some value.mirror_direct)
     |> Jsont.Object.opt_mem "compression" compression_codec ~enc:(fun value ->
         match value.compression with
         | Config.Uncompressed -> None
@@ -1496,6 +2059,12 @@ module Stream = struct
       storage = Config.storage value;
       replicas = Config.replicas value;
       placement = placement_to_wire (Config.placement value);
+      mirror = Option.map source_to_wire (Config.mirror value);
+      sources = List.map source_to_wire (Config.sources value);
+      subject_transform =
+        Option.map transform_to_wire (Config.subject_transform value);
+      republish = Option.map republish_to_wire (Config.republish value);
+      mirror_direct = Config.mirror_direct value;
       compression = Config.compression value;
       metadata = metadata_to_wire (Config.metadata value);
       retention = Config.retention value;
@@ -1530,11 +2099,21 @@ module Stream = struct
       current with
       name = Config.name value;
       subjects =
-        (match subjects with [] -> current.subjects | _ :: _ -> subjects);
+        (match subjects with
+        | _ :: _ -> subjects
+        | [] when Option.is_some (Config.mirror value) -> []
+        | [] when List.length (Config.sources value) > 0 -> []
+        | [] -> current.subjects);
       description = Config.description value;
       storage = Config.storage value;
       replicas = Config.replicas value;
       placement = placement_to_wire (Config.placement value);
+      mirror = Option.map source_to_wire (Config.mirror value);
+      sources = List.map source_to_wire (Config.sources value);
+      subject_transform =
+        Option.map transform_to_wire (Config.subject_transform value);
+      republish = Option.map republish_to_wire (Config.republish value);
+      mirror_direct = Config.mirror_direct value;
       compression = Config.compression value;
       metadata =
         Some
@@ -1568,6 +2147,9 @@ module Stream = struct
     }
 
   let config_of_wire value =
+    let ( let* ) value f =
+      match value with Error error -> Error error | Ok value -> f value
+    in
     let subjects =
       List.fold_left
         (fun result subject ->
@@ -1579,66 +2161,86 @@ module Stream = struct
               | Error error -> Error (Error.Invalid_subject error)))
         (Ok []) value.subjects
     in
-    match subjects with
-    | Error error -> Error error
-    | Ok subjects -> (
-        let subjects = List.rev subjects in
-        let max_msgs =
-          match value.max_msgs with Some -1L -> None | value -> value
-        in
-        let max_bytes =
-          match value.max_bytes with Some -1L -> None | value -> value
-        in
-        let max_msgs_per_subject =
-          match value.max_msgs_per_subject with
-          | Some -1L -> None
-          | value -> value
-        in
-        let max_msg_size =
-          match value.max_msg_size with Some -1L -> None | value -> value
-        in
-        let subject_delete_marker_ttl =
-          match value.subject_delete_marker_ttl with
-          | None | Some 0L -> None
-          | Some nanoseconds -> Some (Mtime.Span.of_uint64_ns nanoseconds)
-        in
-        let max_age =
-          match value.max_age with
-          | None | Some 0L -> None
-          | Some nanoseconds -> Some (Mtime.Span.of_uint64_ns nanoseconds)
-        in
-        let placement =
-          match value.placement with
-          | None -> Ok None
-          | Some placement ->
-              Config.Placement.v ?cluster:placement.cluster ?tags:placement.tags
-                ()
-              |> Result.map Option.some
-        in
-        match placement with
-        | Error error -> Error (Error.Invalid_config error)
-        | Ok placement -> (
-            match
-              Config.v_internal ~allow_empty_subjects:true ~name:value.name
-                ~subjects ?description:value.description ~storage:value.storage
-                ~replicas:value.replicas ?placement
-                ~compression:value.compression
-                ~metadata:(metadata_of_wire value.metadata)
-                ~retention:value.retention ~discard:value.discard ?max_msgs
-                ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size
-                ~allow_msg_ttl:(Option.value ~default:false value.allow_msg_ttl)
-                ~allow_atomic_publish:
-                  (Option.value ~default:false value.allow_atomic_publish)
-                ~allow_msg_schedules:
-                  (Option.value ~default:false value.allow_msg_schedules)
-                ~allow_batch_publish:
-                  (Option.value ~default:false value.allow_batch_publish)
-                ?subject_delete_marker_ttl ~allow_rollup:value.allow_rollup
-                ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
-                ~sealed:value.sealed ()
-            with
-            | Ok config -> Ok config
-            | Error error -> Error (Error.Invalid_config error)))
+    let* subjects = subjects |> Result.map List.rev in
+    let max_msgs =
+      match value.max_msgs with Some -1L -> None | value -> value
+    in
+    let max_bytes =
+      match value.max_bytes with Some -1L -> None | value -> value
+    in
+    let max_msgs_per_subject =
+      match value.max_msgs_per_subject with Some -1L -> None | value -> value
+    in
+    let max_msg_size =
+      match value.max_msg_size with Some -1L -> None | value -> value
+    in
+    let subject_delete_marker_ttl =
+      match value.subject_delete_marker_ttl with
+      | None | Some 0L -> None
+      | Some nanoseconds -> Some (Mtime.Span.of_uint64_ns nanoseconds)
+    in
+    let max_age =
+      match value.max_age with
+      | None | Some 0L -> None
+      | Some nanoseconds -> Some (Mtime.Span.of_uint64_ns nanoseconds)
+    in
+    let* placement =
+      match value.placement with
+      | None -> Ok None
+      | Some placement ->
+          Config.Placement.v ?cluster:placement.cluster ?tags:placement.tags ()
+          |> Result.map Option.some
+          |> Result.map_error (fun error -> Error.Invalid_config error)
+    in
+    let* mirror =
+      match value.mirror with
+      | None -> Ok None
+      | Some mirror -> source_of_wire mirror |> Result.map Option.some
+    in
+    let* sources =
+      List.fold_left
+        (fun result source ->
+          match result with
+          | Error _ -> result
+          | Ok values -> (
+              match source_of_wire source with
+              | Error error -> Error error
+              | Ok source -> Ok (source :: values)))
+        (Ok []) value.sources
+      |> Result.map List.rev
+    in
+    let* subject_transform =
+      match value.subject_transform with
+      | None -> Ok None
+      | Some transform -> transform_of_wire transform |> Result.map Option.some
+    in
+    let* republish =
+      match value.republish with
+      | None -> Ok None
+      | Some republish -> republish_of_wire republish |> Result.map Option.some
+    in
+    match
+      Config.v_internal ~allow_empty_subjects:true ~name:value.name ~subjects
+        ?description:value.description ~storage:value.storage
+        ~replicas:value.replicas ?placement ?mirror ~sources ?subject_transform
+        ?republish ~mirror_direct:value.mirror_direct
+        ~compression:value.compression
+        ~metadata:(metadata_of_wire value.metadata)
+        ~retention:value.retention ~discard:value.discard ?max_msgs
+        ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size
+        ~allow_msg_ttl:(Option.value ~default:false value.allow_msg_ttl)
+        ~allow_atomic_publish:
+          (Option.value ~default:false value.allow_atomic_publish)
+        ~allow_msg_schedules:
+          (Option.value ~default:false value.allow_msg_schedules)
+        ~allow_batch_publish:
+          (Option.value ~default:false value.allow_batch_publish)
+        ?subject_delete_marker_ttl ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+        ~sealed:value.sealed ()
+    with
+    | Ok config -> Ok config
+    | Error error -> Error (Error.Invalid_config error)
 
   let decode_response message =
     match decode response_codec message with
