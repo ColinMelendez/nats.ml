@@ -45,6 +45,10 @@ module Error = struct
     | Invalid_subject of Nats.Subject.error
     | Invalid_config of config
     | Invalid_headers of Nats.Header.error
+    | Invalid_publish_option of { field : string; reason : string }
+    | Publish_stalled
+    | Batch_gap of { expected : int64; actual : int64 }
+    | Batch_flow_error of { sequence : int64; error : api }
     | Message_not_found
     | Stream_not_found
     | Consumer_not_found
@@ -154,6 +158,18 @@ module Error = struct
     | Invalid_headers error ->
         Format.fprintf ppf "invalid JetStream headers: %a" Nats.Header.pp_error
           error
+    | Invalid_publish_option { field; reason } ->
+        Format.fprintf ppf "invalid JetStream publish option %S: %s" field reason
+    | Publish_stalled ->
+        Format.pp_print_string ppf
+          "JetStream asynchronous publishing stalled at its pending limit"
+    | Batch_gap { expected; actual } ->
+        Format.fprintf ppf
+          "JetStream fast publish batch gap: expected sequence %Ld, got %Ld"
+          expected actual
+    | Batch_flow_error { sequence; error } ->
+        Format.fprintf ppf "JetStream fast publish batch failed at sequence %Ld: %a"
+          sequence pp_api error
     | Message_not_found ->
         Format.pp_print_string ppf "JetStream message was not found"
     | Stream_not_found ->
@@ -241,6 +257,7 @@ type config_error = Error.config
 type api_error = Error.api
 type error = Error.t
 type t = { connection : Connection.t; prefix : string }
+type jetstream = t
 
 let v ?(prefix = "$JS.API") connection =
   match Nats.Subject.of_string prefix with
@@ -668,6 +685,9 @@ module Stream = struct
       max_age : Mtime.Span.t option;
       max_msg_size : int64 option;
       allow_msg_ttl : bool;
+      allow_atomic_publish : bool;
+      allow_msg_schedules : bool;
+      allow_batch_publish : bool;
       subject_delete_marker_ttl : Mtime.Span.t option;
       allow_rollup : bool;
       allow_direct : bool;
@@ -719,7 +739,9 @@ module Stream = struct
         ?(storage = File) ?(replicas = 1) ?placement
         ?(compression = Uncompressed) ?(metadata = []) ?(retention = Limits)
         ?(discard = Old) ?max_msgs ?max_msgs_per_subject ?max_bytes ?max_age
-        ?max_msg_size ?(allow_msg_ttl = false) ?subject_delete_marker_ttl
+        ?max_msg_size ?(allow_msg_ttl = false) ?(allow_atomic_publish = false)
+        ?(allow_msg_schedules = false) ?(allow_batch_publish = false)
+        ?subject_delete_marker_ttl
         ?(allow_rollup = false) ?(allow_direct = false) ?(deny_delete = false)
         ?(sealed = false) () =
       let max_age =
@@ -788,6 +810,9 @@ module Stream = struct
                                           max_age;
                                           max_msg_size;
                                           allow_msg_ttl;
+                                          allow_atomic_publish;
+                                          allow_msg_schedules;
+                                          allow_batch_publish;
                                           subject_delete_marker_ttl;
                                           allow_rollup;
                                           allow_direct;
@@ -798,13 +823,15 @@ module Stream = struct
     let v ~name ~subjects ?description ?storage ?replicas ?placement
         ?compression ?metadata ?retention ?discard ?max_msgs
         ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size ?allow_msg_ttl
+        ?allow_atomic_publish ?allow_msg_schedules ?allow_batch_publish
         ?subject_delete_marker_ttl ?allow_rollup ?allow_direct ?deny_delete
         ?sealed () =
       v_internal ~allow_empty_subjects:false ~name ~subjects ?description
         ?storage ?replicas ?placement ?compression ?metadata ?retention ?discard
         ?max_msgs ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size
-        ?allow_msg_ttl ?subject_delete_marker_ttl ?allow_rollup ?allow_direct
-        ?deny_delete ?sealed ()
+        ?allow_msg_ttl ?allow_atomic_publish ?allow_msg_schedules
+        ?allow_batch_publish ?subject_delete_marker_ttl ?allow_rollup
+        ?allow_direct ?deny_delete ?sealed ()
 
     let name value = value.name
     let subjects value = value.subjects
@@ -822,6 +849,9 @@ module Stream = struct
     let max_age value = value.max_age
     let max_msg_size value = value.max_msg_size
     let allow_msg_ttl value = value.allow_msg_ttl
+    let allow_atomic_publish value = value.allow_atomic_publish
+    let allow_msg_schedules value = value.allow_msg_schedules
+    let allow_batch_publish value = value.allow_batch_publish
     let subject_delete_marker_ttl value = value.subject_delete_marker_ttl
     let allow_rollup value = value.allow_rollup
     let allow_direct value = value.allow_direct
@@ -829,7 +859,8 @@ module Stream = struct
     let sealed value = value.sealed
 
     let rebuild ?sealed ?replicas ?placement ?compression ?metadata
-        ?allow_msg_ttl ?subject_delete_marker_ttl value ~name ~subjects ~storage
+        ?allow_msg_ttl ?allow_atomic_publish ?allow_msg_schedules
+        ?allow_batch_publish ?subject_delete_marker_ttl value ~name ~subjects ~storage
         ~retention ~discard ~max_msgs ~max_msgs_per_subject ~max_bytes ~max_age
         ~max_msg_size ~allow_rollup ~allow_direct ~deny_delete =
       let replicas = Option.value ~default:value.replicas replicas in
@@ -838,6 +869,15 @@ module Stream = struct
       let metadata = Option.value ~default:value.metadata metadata in
       let allow_msg_ttl =
         Option.value ~default:value.allow_msg_ttl allow_msg_ttl
+      in
+      let allow_atomic_publish =
+        Option.value ~default:value.allow_atomic_publish allow_atomic_publish
+      in
+      let allow_msg_schedules =
+        Option.value ~default:value.allow_msg_schedules allow_msg_schedules
+      in
+      let allow_batch_publish =
+        Option.value ~default:value.allow_batch_publish allow_batch_publish
       in
       let subject_delete_marker_ttl =
         Option.value ~default:value.subject_delete_marker_ttl
@@ -848,8 +888,9 @@ module Stream = struct
         ~name ~subjects ?description:value.description ~storage ~retention
         ~replicas ?placement ~compression ~metadata ~discard ?max_msgs
         ?max_bytes ?max_msgs_per_subject ?max_age ?max_msg_size ~allow_rollup
-        ~allow_msg_ttl ?subject_delete_marker_ttl ~allow_direct ~deny_delete
-        ~sealed:(Option.value sealed ~default:value.sealed)
+        ~allow_msg_ttl ~allow_atomic_publish ~allow_msg_schedules
+        ~allow_batch_publish ?subject_delete_marker_ttl ~allow_direct
+        ~deny_delete ~sealed:(Option.value sealed ~default:value.sealed)
         ()
 
     let with_name value name =
@@ -872,6 +913,9 @@ module Stream = struct
         ?max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
         ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
         ~allow_msg_ttl:value.allow_msg_ttl
+        ~allow_atomic_publish:value.allow_atomic_publish
+        ~allow_msg_schedules:value.allow_msg_schedules
+        ~allow_batch_publish:value.allow_batch_publish
         ?subject_delete_marker_ttl:value.subject_delete_marker_ttl
         ~sealed:value.sealed ~replicas:value.replicas ?placement:value.placement
         ~compression:value.compression ~metadata:value.metadata ()
@@ -956,6 +1000,36 @@ module Stream = struct
         ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
         ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
 
+    let with_allow_atomic_publish value allow_atomic_publish =
+      rebuild ~allow_atomic_publish value ~name:value.name
+        ~subjects:value.subjects ~storage:value.storage
+        ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+
+    let with_allow_msg_schedules value allow_msg_schedules =
+      rebuild ~allow_msg_schedules value ~name:value.name
+        ~subjects:value.subjects ~storage:value.storage
+        ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+
+    let with_allow_batch_publish value allow_batch_publish =
+      rebuild ~allow_batch_publish value ~name:value.name
+        ~subjects:value.subjects ~storage:value.storage
+        ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+
     let with_subject_delete_marker_ttl value subject_delete_marker_ttl =
       rebuild ~subject_delete_marker_ttl value ~name:value.name
         ~subjects:value.subjects ~storage:value.storage
@@ -1032,6 +1106,9 @@ module Stream = struct
         ?max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
         ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
         ~allow_msg_ttl:value.allow_msg_ttl
+        ~allow_atomic_publish:value.allow_atomic_publish
+        ~allow_msg_schedules:value.allow_msg_schedules
+        ~allow_batch_publish:value.allow_batch_publish
         ?subject_delete_marker_ttl:value.subject_delete_marker_ttl
         ~sealed:value.sealed ()
 
@@ -1112,6 +1189,9 @@ module Stream = struct
     max_age : int64 option;
     max_msg_size : int64 option;
     allow_msg_ttl : bool option;
+    allow_atomic_publish : bool option;
+    allow_msg_schedules : bool option;
+    allow_batch_publish : bool option;
     subject_delete_marker_ttl : int64 option;
     allow_rollup : bool;
     allow_direct : bool;
@@ -1196,6 +1276,9 @@ module Stream = struct
         max_age
         max_msg_size
         allow_msg_ttl
+        allow_atomic_publish
+        allow_msg_schedules
+        allow_batch_publish
         subject_delete_marker_ttl
         allow_rollup
         allow_direct
@@ -1220,6 +1303,9 @@ module Stream = struct
           max_age;
           max_msg_size;
           allow_msg_ttl;
+          allow_atomic_publish;
+          allow_msg_schedules;
+          allow_batch_publish;
           subject_delete_marker_ttl;
           allow_rollup = Option.value ~default:false allow_rollup;
           allow_direct = Option.value ~default:false allow_direct;
@@ -1261,6 +1347,12 @@ module Stream = struct
         value.max_msg_size)
     |> Jsont.Object.opt_mem "allow_msg_ttl" Jsont.bool ~enc:(fun value ->
         value.allow_msg_ttl)
+    |> Jsont.Object.opt_mem "allow_atomic" Jsont.bool ~enc:(fun value ->
+        value.allow_atomic_publish)
+    |> Jsont.Object.opt_mem "allow_msg_schedules" Jsont.bool ~enc:(fun value ->
+        value.allow_msg_schedules)
+    |> Jsont.Object.opt_mem "allow_batched" Jsont.bool ~enc:(fun value ->
+        value.allow_batch_publish)
     |> Jsont.Object.opt_mem "subject_delete_marker_ttl" Jsont.int64
          ~enc:(fun value -> value.subject_delete_marker_ttl)
     |> Jsont.Object.opt_mem "allow_rollup_hdrs" Jsont.bool ~enc:(fun value ->
@@ -1414,6 +1506,12 @@ module Stream = struct
       max_age = Option.map Mtime.Span.to_uint64_ns (Config.max_age value);
       max_msg_size = Config.max_msg_size value;
       allow_msg_ttl = (if Config.allow_msg_ttl value then Some true else None);
+      allow_atomic_publish =
+        (if Config.allow_atomic_publish value then Some true else None);
+      allow_msg_schedules =
+        (if Config.allow_msg_schedules value then Some true else None);
+      allow_batch_publish =
+        (if Config.allow_batch_publish value then Some true else None);
       subject_delete_marker_ttl =
         Option.map Mtime.Span.to_uint64_ns
           (Config.subject_delete_marker_ttl value);
@@ -1455,6 +1553,9 @@ module Stream = struct
       max_msg_size =
         Some (Option.value ~default:(-1L) (Config.max_msg_size value));
       allow_msg_ttl = Some (Config.allow_msg_ttl value);
+      allow_atomic_publish = Some (Config.allow_atomic_publish value);
+      allow_msg_schedules = Some (Config.allow_msg_schedules value);
+      allow_batch_publish = Some (Config.allow_batch_publish value);
       subject_delete_marker_ttl =
         Some
           (Option.value ~default:0L
@@ -1526,6 +1627,12 @@ module Stream = struct
                 ~retention:value.retention ~discard:value.discard ?max_msgs
                 ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size
                 ~allow_msg_ttl:(Option.value ~default:false value.allow_msg_ttl)
+                ~allow_atomic_publish:
+                  (Option.value ~default:false value.allow_atomic_publish)
+                ~allow_msg_schedules:
+                  (Option.value ~default:false value.allow_msg_schedules)
+                ~allow_batch_publish:
+                  (Option.value ~default:false value.allow_batch_publish)
                 ?subject_delete_marker_ttl ~allow_rollup:value.allow_rollup
                 ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
                 ~sealed:value.sealed ()
@@ -6163,17 +6270,168 @@ module Publish_ack = struct
     sequence : int64;
     duplicate : bool;
     domain : string option;
+    batch : string option;
+    count : int64 option;
   }
 
   let stream value = value.stream
   let sequence value = value.sequence
   let duplicate value = value.duplicate
   let domain value = value.domain
+  let batch value = value.batch
+  let count value = value.count
 
   let pp ppf value =
     Format.fprintf ppf
-      "JetStream publish ack(stream=%S, sequence=%Ld, duplicate=%b)"
+      "JetStream publish ack(stream=%S, sequence=%Ld, duplicate=%b, batch=%a, count=%a)"
       value.stream value.sequence value.duplicate
+      (Format.pp_print_option Format.pp_print_string) value.batch
+      (Format.pp_print_option (fun ppf value -> Format.fprintf ppf "%Ld" value))
+      value.count
+end
+
+module Publish_options = struct
+  type schedule = At of Ptime.t | Every of Mtime.Span.t | Cron of string
+  type schedule_ttl = Duration of Mtime.Span.t | Never
+
+  type retry = { wait : Mtime.Span.t; attempts : int option }
+
+  type t = {
+    msg_id : string option;
+    expected_stream : string option;
+    expected_last_msg_id : string option;
+    expected_last_sequence : int64 option;
+    expected_last_subject_sequence : int64 option;
+    expected_last_subject : Nats.Subject.t option;
+    ttl : Mtime.Span.t option;
+    schedule : schedule option;
+    schedule_target : Nats.Subject.t option;
+    schedule_source : Nats.Subject.t option;
+    schedule_ttl : schedule_ttl option;
+    schedule_timezone : string option;
+    retry : retry option;
+    stall_wait : Mtime.Span.t option;
+  }
+
+  let empty =
+    {
+      msg_id = None;
+      expected_stream = None;
+      expected_last_msg_id = None;
+      expected_last_sequence = None;
+      expected_last_subject_sequence = None;
+      expected_last_subject = None;
+      ttl = None;
+      schedule = None;
+      schedule_target = None;
+      schedule_source = None;
+      schedule_ttl = None;
+      schedule_timezone = None;
+      retry = None;
+      stall_wait = None;
+    }
+
+  let invalid field reason =
+    Error (Error.Invalid_publish_option { field; reason })
+
+  let nonempty field value =
+    if String.equal value "" then invalid field "must not be empty" else Ok ()
+
+  let positive_span field value =
+    if Mtime.Span.compare value Mtime.Span.zero > 0 then Ok ()
+    else invalid field "must be positive"
+
+  let nonnegative_sequence field value =
+    if Int64.compare value 0L >= 0 then Ok ()
+    else invalid field "must not be negative"
+
+  let with_msg_id value options =
+    match nonempty "msg_id" value with
+    | Error error -> Error error
+    | Ok () -> Ok { options with msg_id = Some value }
+
+  let with_expected_stream value options =
+    match nonempty "expected_stream" value with
+    | Error error -> Error error
+    | Ok () -> Ok { options with expected_stream = Some value }
+
+  let with_expected_last_msg_id value options =
+    match nonempty "expected_last_msg_id" value with
+    | Error error -> Error error
+    | Ok () -> Ok { options with expected_last_msg_id = Some value }
+
+  let with_expected_last_sequence value options =
+    match nonnegative_sequence "expected_last_sequence" value with
+    | Error error -> Error error
+    | Ok () -> Ok { options with expected_last_sequence = Some value }
+
+  let with_expected_last_subject_sequence value options =
+    match nonnegative_sequence "expected_last_subject_sequence" value with
+    | Error error -> Error error
+    | Ok () ->
+        Ok { options with expected_last_subject_sequence = Some value }
+
+  let with_expected_last_sequence_for_subject ~sequence ~subject options =
+    match nonnegative_sequence "expected_last_subject_sequence" sequence with
+    | Error error -> Error error
+    | Ok () ->
+        Ok
+          {
+            options with
+            expected_last_subject_sequence = Some sequence;
+            expected_last_subject = Some subject;
+          }
+
+  let with_ttl value options =
+    match positive_span "ttl" value with
+    | Error error -> Error error
+    | Ok () -> Ok { options with ttl = Some value }
+
+  let with_schedule value options =
+    let validation =
+      match value with
+      | At _ -> Ok ()
+      | Every span ->
+          if Mtime.Span.compare span Mtime.Span.(1 * s) >= 0 then Ok ()
+          else invalid "schedule" "repeat interval must be at least one second"
+      | Cron expression -> nonempty "schedule" expression
+    in
+    match validation with
+    | Error error -> Error error
+    | Ok () -> Ok { options with schedule = Some value }
+
+  let with_schedule_target value options =
+    Ok { options with schedule_target = Some value }
+
+  let with_schedule_source value options =
+    Ok { options with schedule_source = Some value }
+
+  let with_schedule_ttl value options =
+    match value with
+    | Never -> Ok { options with schedule_ttl = Some Never }
+    | Duration span -> (
+        match positive_span "schedule_ttl" span with
+        | Error error -> Error error
+        | Ok () -> Ok { options with schedule_ttl = Some (Duration span) })
+
+  let with_schedule_timezone value options =
+    match nonempty "schedule_timezone" value with
+    | Error error -> Error error
+    | Ok () -> Ok { options with schedule_timezone = Some value }
+
+  let with_retry ~wait ~attempts options =
+    match positive_span "retry_wait" wait with
+    | Error error -> Error error
+    | Ok () -> (
+        match attempts with
+        | Some value when Int.compare value 0 < 0 ->
+            invalid "retry_attempts" "must not be negative"
+        | _ -> Ok { options with retry = Some { wait; attempts } })
+
+  let with_stall_wait value options =
+    match positive_span "stall_wait" value with
+    | Error error -> Error error
+    | Ok () -> Ok { options with stall_wait = Some value }
 end
 
 type publish_response = {
@@ -6182,12 +6440,14 @@ type publish_response = {
   sequence : int64 option;
   duplicate : bool option;
   domain : string option;
+  batch : string option;
+  count : int64 option;
 }
 
 let publish_response_codec =
   Jsont.Object.map ~kind:"JetStream publish acknowledgement"
-    (fun error stream sequence duplicate domain ->
-      { error; stream; sequence; duplicate; domain })
+    (fun error stream sequence duplicate domain batch count ->
+      { error; stream; sequence; duplicate; domain; batch; count })
   |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
       value.error)
   |> Jsont.Object.opt_mem "stream" Jsont.string ~enc:(fun value -> value.stream)
@@ -6195,45 +6455,816 @@ let publish_response_codec =
   |> Jsont.Object.opt_mem "duplicate" Jsont.bool ~enc:(fun value ->
       value.duplicate)
   |> Jsont.Object.opt_mem "domain" Jsont.string ~enc:(fun value -> value.domain)
+  |> Jsont.Object.opt_mem "batch" Jsont.string ~enc:(fun value -> value.batch)
+  |> Jsont.Object.opt_mem "count" Jsont.int64 ~enc:(fun value -> value.count)
   |> Jsont.Object.skip_unknown |> Jsont.Object.finish
 
-let publish ?timeout ?(headers = Nats.Header.empty) ?msg_id jetstream subject
-    payload =
-  let headers =
-    match msg_id with
-    | None -> Ok headers
-    | Some value when String.equal value "" -> Error Error.Empty_msg_id
-    | Some _ when Nats.Header.mem "Nats-Msg-Id" headers ->
-        Error Error.Msg_id_already_set
-    | Some value -> (
-        match Nats.Header.add ~name:"Nats-Msg-Id" ~value headers with
-        | Ok headers -> Ok headers
-        | Error error -> Error (Error.Invalid_headers error))
+let publish_ack_of_message response =
+  match decode publish_response_codec response with
+  | Error error -> Error error
+  | Ok { error = Some error; _ } -> Error (Error.Api error)
+  | Ok { stream = None; _ } -> Error (Error.Missing_field "stream")
+  | Ok { sequence = None; _ } -> Error (Error.Missing_field "seq")
+  | Ok
+      {
+        stream = Some stream;
+        sequence = Some sequence;
+        duplicate;
+        domain;
+        batch;
+        count;
+        _;
+      } ->
+      Ok
+        {
+          Publish_ack.stream;
+          sequence;
+          duplicate = Option.value ~default:false duplicate;
+          domain;
+          batch;
+          count;
+        }
+
+let span_string span = Format.asprintf "%a" Mtime.Span.pp span
+
+let schedule_string = function
+  | Publish_options.At time -> "@at " ^ Ptime.to_rfc3339 time
+  | Publish_options.Every span -> "@every " ^ span_string span
+  | Publish_options.Cron expression -> expression
+
+let add_publish_header headers ~name ~value =
+  if Nats.Header.mem name headers then
+    Error
+      (Error.Invalid_publish_option
+         { field = name; reason = "header is already present" })
+  else
+    match Nats.Header.add ~name ~value headers with
+    | Ok headers -> Ok headers
+    | Error error -> Error (Error.Invalid_headers error)
+
+let validate_publish_options options =
+  let ( let* ) = Result.bind in
+  let* () =
+    match options.Publish_options.schedule with
+    | None -> Ok ()
+    | Some _ -> (
+        match options.schedule_target with
+        | Some _ -> Ok ()
+        | None ->
+            Error
+              (Error.Invalid_publish_option
+                 {
+                   field = "schedule_target";
+                   reason = "is required when a schedule is set";
+                 }))
   in
-  match headers with
+  match (options.Publish_options.schedule, options.schedule_timezone) with
+  | Some (Publish_options.Cron _), Some _ -> Ok ()
+  | Some _, Some _ ->
+      Error
+        (Error.Invalid_publish_option
+           { field = "schedule_timezone"; reason = "requires a cron schedule" })
+  | None, Some _ ->
+      Error
+        (Error.Invalid_publish_option
+           { field = "schedule_timezone"; reason = "requires a schedule" })
+  | _, None -> Ok ()
+
+let apply_publish_options ?msg_id ?(options = Publish_options.empty) headers =
+  let headers_result =
+    match validate_publish_options options with
+    | Error error -> Error error
+    | Ok () ->
+        (match (msg_id, options.msg_id) with
+        | Some _, Some _ ->
+            Error
+              (Error.Invalid_publish_option
+                 { field = "msg_id"; reason = "specified twice" })
+        | Some value, None when String.equal value "" -> Error Error.Empty_msg_id
+        | Some value, None when Nats.Header.mem "Nats-Msg-Id" headers ->
+            Error Error.Msg_id_already_set
+        | Some value, None ->
+            add_publish_header headers ~name:"Nats-Msg-Id" ~value
+        | None, Some value ->
+            if Nats.Header.mem "Nats-Msg-Id" headers then
+              Error Error.Msg_id_already_set
+            else add_publish_header headers ~name:"Nats-Msg-Id" ~value
+        | None, None -> Ok headers)
+  in
+  let add_option headers name value =
+    match value with
+    | None -> Ok headers
+    | Some value -> add_publish_header headers ~name ~value
+  in
+  match headers_result with
   | Error error -> Error error
   | Ok headers -> (
-      let message = Nats.Message.v ~subject ~headers payload in
-      match request_msg ?timeout jetstream message with
-      | Error error -> Error error
-      | Ok response -> (
-          match decode publish_response_codec response with
-          | Error error -> Error error
-          | Ok { error = Some error; _ } -> Error (Error.Api error)
-          | Ok { stream = None; _ } -> Error (Error.Missing_field "stream")
-          | Ok { sequence = None; _ } -> Error (Error.Missing_field "seq")
-          | Ok
-              {
-                stream = Some stream;
-                sequence = Some sequence;
-                duplicate;
-                domain;
-                _;
-              } ->
-              Ok
+      let ( let* ) = Result.bind in
+      let* headers =
+        add_option headers "Nats-Expected-Stream" options.expected_stream
+      in
+      let* headers = add_option headers "Nats-Expected-Last-Msg-Id"
+          options.expected_last_msg_id
+      in
+      let* headers =
+        add_option headers "Nats-Expected-Last-Sequence"
+          (Option.map Int64.to_string options.expected_last_sequence)
+      in
+      let* headers =
+        add_option headers "Nats-Expected-Last-Subject-Sequence"
+          (Option.map Int64.to_string options.expected_last_subject_sequence)
+      in
+      let* headers =
+        add_option headers "Nats-Expected-Last-Subject-Sequence-Subject"
+          (Option.map Nats.Subject.to_string options.expected_last_subject)
+      in
+      let* headers = add_option headers "Nats-TTL" (Option.map span_string options.ttl) in
+      let* headers =
+        add_option headers "Nats-Schedule" (Option.map schedule_string options.schedule)
+      in
+      let* headers =
+        add_option headers "Nats-Schedule-Target"
+          (Option.map Nats.Subject.to_string options.schedule_target)
+      in
+      let* headers =
+        add_option headers "Nats-Schedule-Source"
+          (Option.map Nats.Subject.to_string options.schedule_source)
+      in
+      let schedule_ttl =
+        Option.map
+          (function
+            | Publish_options.Duration span -> span_string span
+            | Publish_options.Never -> "never")
+          options.schedule_ttl
+      in
+      let* headers = add_option headers "Nats-Schedule-TTL" schedule_ttl in
+      add_option headers "Nats-Schedule-Time-Zone" options.schedule_timezone)
+
+let publish_message ?(headers = Nats.Header.empty) ?msg_id ?options subject
+    payload =
+  match apply_publish_options ?msg_id ?options headers with
+  | Error error -> Error error
+  | Ok headers -> Ok (Nats.Message.v ~subject ~headers payload)
+
+module Publish = struct
+  type future_state = {
+    mutex : Mutex.t;
+    current_request : Connection.Request.t option ref;
+    cancelled : bool ref;
+  }
+
+  type t = {
+    message : Nats.Message.t;
+    promise : (Publish_ack.t, Error.t) result Eio.Promise.t;
+    state : future_state;
+  }
+
+  let await future = Eio.Promise.await future.promise
+
+  let cancel future =
+    Mutex.lock future.state.mutex;
+    if !(future.state.cancelled) then (
+      Mutex.unlock future.state.mutex;
+      Ok ())
+    else (
+      future.state.cancelled := true;
+      let request = !(future.state.current_request) in
+      Mutex.unlock future.state.mutex;
+      match request with
+      | None -> Ok ()
+      | Some request -> (
+          match Connection.Request.cancel request with
+          | Ok () -> Ok ()
+          | Error error -> Error (Error.Connection error)))
+
+  let message future = future.message
+end
+
+let default_publish_retry =
+  { Publish_options.wait = Mtime.Span.(250 * ms); attempts = Some 2 }
+
+module Publisher = struct
+  let ( let* ) = Result.bind
+
+  type state = {
+    mutex : Mutex.t;
+    max_pending : int;
+    mutable pending : int;
+    mutable completion : unit Eio.Promise.t;
+    mutable completion_u : unit Eio.Promise.u;
+    mutable capacity : unit Eio.Promise.t;
+    mutable capacity_u : unit Eio.Promise.u;
+  }
+
+  type t = {
+    sw : Eio.Switch.t;
+    now : unit -> Mtime.t;
+    sleep : float -> unit;
+    sleep_until : Mtime.t -> unit;
+    jetstream : jetstream;
+    stall_wait : Mtime.Span.t;
+    ack_timeout : Mtime.Span.t option;
+    state : state;
+  }
+
+  let choose_result first second =
+    match (first, second) with
+    | (Ok _ as value), _ | _, (Ok _ as value) -> value
+    | first, _ -> first
+
+  let v ~sw ~clock ?(max_pending = 256) ?(stall_wait = Mtime.Span.(200 * ms))
+      ?ack_timeout jetstream =
+    if Int.compare max_pending 1 < 0 then
+      Error
+        (Error.Invalid_publish_option
+           { field = "max_pending"; reason = "must be at least one" })
+    else if Mtime.Span.compare stall_wait Mtime.Span.zero <= 0 then
+      Error
+        (Error.Invalid_publish_option
+           { field = "stall_wait"; reason = "must be positive" })
+    else
+      match ack_timeout with
+      | Some timeout when Mtime.Span.compare timeout Mtime.Span.zero <= 0 ->
+          Error
+            (Error.Invalid_publish_option
+               { field = "ack_timeout"; reason = "must be positive" })
+      | _ ->
+          let completion, completion_u = Eio.Promise.create () in
+          let capacity, capacity_u = Eio.Promise.create () in
+          Ok
+            {
+              sw;
+              now = (fun () -> Eio.Time.Mono.now clock);
+              sleep = (fun seconds -> Eio.Time.Mono.sleep clock seconds);
+              sleep_until = (fun deadline -> Eio.Time.Mono.sleep_until clock deadline);
+              jetstream;
+              stall_wait;
+              ack_timeout;
+              state =
                 {
-                  Publish_ack.stream;
-                  sequence;
-                  duplicate = Option.value ~default:false duplicate;
-                  domain;
-                }))
+                  mutex = Mutex.create ();
+                  max_pending;
+                  pending = 0;
+                  completion;
+                  completion_u;
+                  capacity;
+                  capacity_u;
+                };
+            }
+
+  let pending publisher =
+    Mutex.lock publisher.state.mutex;
+    let pending = publisher.state.pending in
+    Mutex.unlock publisher.state.mutex;
+    pending
+
+  let release publisher =
+    Mutex.lock publisher.state.mutex;
+    publisher.state.pending <- publisher.state.pending - 1;
+    let capacity_u = publisher.state.capacity_u in
+    let capacity, capacity_u' = Eio.Promise.create () in
+    publisher.state.capacity <- capacity;
+    publisher.state.capacity_u <- capacity_u';
+    let completion_u =
+      if Int.equal publisher.state.pending 0 then (
+        let completion_u = publisher.state.completion_u in
+        let completion, completion_u' = Eio.Promise.create () in
+        publisher.state.completion <- completion;
+        publisher.state.completion_u <- completion_u';
+        Some completion_u)
+      else None
+    in
+    Mutex.unlock publisher.state.mutex;
+    Eio.Promise.resolve capacity_u ();
+    Option.iter (fun resolver -> Eio.Promise.resolve resolver ()) completion_u
+
+  let reserve publisher ~stall_wait =
+    let deadline =
+      Mtime.add_span (publisher.now ()) stall_wait
+    in
+    let rec loop () =
+      Mutex.lock publisher.state.mutex;
+      if Int.compare publisher.state.pending publisher.state.max_pending < 0 then (
+        publisher.state.pending <- publisher.state.pending + 1;
+        Mutex.unlock publisher.state.mutex;
+        Ok ())
+      else (
+        let capacity = publisher.state.capacity in
+        Mutex.unlock publisher.state.mutex;
+        match deadline with
+        | None -> Error Error.Publish_stalled
+        | Some deadline when Mtime.compare (publisher.now ()) deadline >= 0
+          -> Error Error.Publish_stalled
+        | Some deadline ->
+            let wait_capacity () =
+              Eio.Promise.await capacity;
+              Ok ()
+            in
+            let wait_timeout () =
+              publisher.sleep_until deadline;
+              Error Error.Publish_stalled
+            in
+            match
+              Eio.Fiber.first ~combine:choose_result wait_capacity wait_timeout
+            with
+            | Ok () -> loop ()
+            | Error error -> Error error)
+    in
+    loop ()
+
+  let retry_policy options =
+    Option.value ~default:default_publish_retry options.Publish_options.retry
+
+  let is_cancelled future =
+    Mutex.lock future.Publish.state.mutex;
+    let cancelled = !(future.Publish.state.cancelled) in
+    Mutex.unlock future.Publish.state.mutex;
+    cancelled
+
+  let set_current_request future request =
+    Mutex.lock future.Publish.state.mutex;
+    future.Publish.state.current_request := request;
+    Mutex.unlock future.Publish.state.mutex
+
+  let wait_retry publisher span =
+    publisher.sleep (Mtime.Span.to_float_ns span /. 1e9)
+
+  let can_retry attempts policy =
+    match policy.Publish_options.attempts with
+    | None -> true
+    | Some max_retries -> Int.compare attempts max_retries < 0
+
+  let rec request_loop publisher future message options attempts =
+    if is_cancelled future then Error Core_error.Closed
+    else
+      let request_result =
+        match publisher.ack_timeout with
+        | None ->
+            Connection.request_async publisher.jetstream.connection message
+        | Some timeout ->
+            Connection.request_async ~timeout publisher.jetstream.connection
+              message
+      in
+      match request_result with
+      | (Error Core_error.No_responders as result) ->
+          let policy = retry_policy options in
+          if can_retry attempts policy then (
+            wait_retry publisher policy.wait;
+            request_loop publisher future message options (attempts + 1))
+          else result
+      | Error error -> Error error
+      | Ok request ->
+          set_current_request future (Some request);
+          let result = Connection.Request.await request in
+          set_current_request future None;
+          match result with
+          | (Error Core_error.No_responders as result) ->
+              let policy = retry_policy options in
+              if can_retry attempts policy then (
+                wait_retry publisher policy.wait;
+                request_loop publisher future message options (attempts + 1))
+              else result
+          | result -> result
+
+  let run publisher future options resolver =
+    let result =
+      match
+        request_loop publisher future future.Publish.message options 0
+      with
+      | Error error -> Error (Error.Connection error)
+      | Ok response -> publish_ack_of_message response
+    in
+    Eio.Promise.resolve resolver result;
+    release publisher
+
+  let run_on_switch_release publisher future resolver =
+    Eio.Cancel.protect (fun () ->
+        Mutex.lock future.Publish.state.mutex;
+        future.Publish.state.cancelled := true;
+        let request = !(future.Publish.state.current_request) in
+        future.Publish.state.current_request := None;
+        Mutex.unlock future.Publish.state.mutex;
+        Option.iter
+          (fun request -> ignore (Connection.Request.cancel request))
+          request;
+        Eio.Promise.resolve resolver
+          (Error (Error.Connection Core_error.Closed));
+        release publisher)
+
+  let publish ?(headers = Nats.Header.empty) ?msg_id ?options publisher subject
+      payload =
+    match publish_message ~headers ?msg_id ?options subject payload with
+    | Error error -> Error error
+    | Ok message ->
+        let options = Option.value ~default:Publish_options.empty options in
+        let stall_wait =
+          Option.value ~default:publisher.stall_wait options.stall_wait
+        in
+        let* () = reserve publisher ~stall_wait in
+        let promise, resolver = Eio.Promise.create () in
+        let future_state =
+          {
+            Publish.mutex = Mutex.create ();
+            current_request = ref None;
+            cancelled = ref false;
+          }
+        in
+        let future = { Publish.message; promise; state = future_state } in
+        (try
+           Eio.Fiber.fork ~sw:publisher.sw (fun () ->
+               try run publisher future options resolver
+               with Eio.Cancel.Cancelled cancellation ->
+                 run_on_switch_release publisher future resolver;
+                 raise cancellation)
+         with Eio.Cancel.Cancelled cancellation ->
+           release publisher;
+           raise cancellation);
+        Ok future
+
+  let await_all ?timeout publisher =
+    let timeout =
+      match timeout with
+      | None -> Ok None
+      | Some timeout when Mtime.Span.compare timeout Mtime.Span.zero <= 0 ->
+          Error
+            (Error.Connection (Core_error.Invalid_timeout "publish completion"))
+      | Some timeout ->
+          Ok
+            (Mtime.add_span (publisher.now ()) timeout)
+    in
+    let* deadline = timeout in
+    let rec loop () =
+      Mutex.lock publisher.state.mutex;
+      if Int.equal publisher.state.pending 0 then (
+        Mutex.unlock publisher.state.mutex;
+        Ok ())
+      else (
+        let completion = publisher.state.completion in
+        Mutex.unlock publisher.state.mutex;
+        let wait_completion () =
+          Eio.Promise.await completion;
+          Ok ()
+        in
+        let result =
+          match deadline with
+          | None -> wait_completion ()
+          | Some deadline ->
+              let wait_timeout () =
+                publisher.sleep_until deadline;
+                Error (Error.Connection Core_error.Timeout)
+              in
+              Eio.Fiber.first ~combine:choose_result wait_completion wait_timeout
+        in
+        match result with Error error -> Error error | Ok () -> loop ())
+    in
+    loop ()
+end
+
+let validate_batch_id id =
+  if String.equal id "" then
+    Error
+      (Error.Invalid_publish_option
+         { field = "batch_id"; reason = "must not be empty" })
+  else if String.length id > 64 then
+    Error
+      (Error.Invalid_publish_option
+         { field = "batch_id"; reason = "must not exceed 64 characters" })
+  else if String.contains id '.' then
+    Error
+      (Error.Invalid_publish_option
+         { field = "batch_id"; reason = "must be a single subject token" })
+  else
+    match Nats.Subject.of_string ("_." ^ id) with
+    | Ok _ -> Ok ()
+    | Error _ ->
+        Error
+          (Error.Invalid_publish_option
+             { field = "batch_id"; reason = "must be a valid subject token" })
+
+let validate_batch_messages messages =
+  match messages with
+  | [] ->
+      Error
+        (Error.Invalid_publish_option
+           { field = "messages"; reason = "must not be empty" })
+  | _ ->
+      let failure = ref None in
+      List.iter
+        (fun message ->
+          match !failure with
+          | Some _ -> ()
+          | None ->
+              if Option.is_some (Nats.Message.reply_to message) then
+                failure :=
+                  Some
+                    (Error.Invalid_publish_option
+                       {
+                         field = "messages";
+                         reason = "must not contain reply subjects";
+                       })
+              else if Nats.Header.mem "Nats-Batch-Id" (Nats.Message.headers message)
+              then
+                failure :=
+                  Some
+                    (Error.Invalid_publish_option
+                       {
+                         field = "Nats-Batch-Id";
+                         reason = "is reserved for batch control";
+                       })
+              else if
+                Nats.Header.mem "Nats-Batch-Sequence"
+                  (Nats.Message.headers message)
+              then
+                failure :=
+                  Some
+                    (Error.Invalid_publish_option
+                       {
+                         field = "Nats-Batch-Sequence";
+                         reason = "is reserved for batch control";
+                       })
+              else if
+                Nats.Header.mem "Nats-Batch-Commit"
+                  (Nats.Message.headers message)
+              then
+                failure :=
+                  Some
+                    (Error.Invalid_publish_option
+                       {
+                         field = "Nats-Batch-Commit";
+                         reason = "is reserved for batch control";
+                       }))
+        messages;
+      match !failure with Some error -> Error error | None -> Ok ()
+
+let batch_message ?reply_to ~id ~sequence ~commit message =
+  let headers = Nats.Message.headers message in
+  let ( let* ) = Result.bind in
+  let* headers =
+    add_publish_header headers ~name:"Nats-Batch-Id" ~value:id
+  in
+  let* headers =
+    add_publish_header headers ~name:"Nats-Batch-Sequence"
+      ~value:(Int64.to_string sequence)
+  in
+  let* headers =
+    match commit with
+    | None -> Ok headers
+    | Some value -> add_publish_header headers ~name:"Nats-Batch-Commit" ~value
+  in
+  Ok
+    (Nats.Message.v ~subject:(Nats.Message.subject message) ?reply_to ~headers
+       (Nats.Message.payload message))
+
+let fast_batch_message ~reply_to message =
+  Nats.Message.v ~subject:(Nats.Message.subject message) ~reply_to
+    ~headers:(Nats.Message.headers message) (Nats.Message.payload message)
+
+let batch_deadline connection timeout =
+  match timeout with
+  | None -> Ok None
+  | Some timeout when Mtime.Span.compare timeout Mtime.Span.zero <= 0 ->
+      Error (Error.Connection (Core_error.Invalid_timeout "batch"))
+  | Some timeout ->
+      let deadline =
+        Option.value
+          ~default:Mtime.max_stamp
+          (Mtime.add_span (Connection.now connection) timeout)
+      in
+      Ok (Some deadline)
+
+let batch_remaining connection deadline =
+  match deadline with
+  | None -> Ok None
+  | Some deadline ->
+      let now = Connection.now connection in
+      if Mtime.compare now deadline >= 0 then
+        Error (Error.Connection Core_error.Timeout)
+      else Ok (Some (Mtime.span now deadline))
+
+module Atomic_batch = struct
+  let ( let* ) = Result.bind
+
+  let publish ?timeout ~id jetstream messages =
+    let* () = validate_batch_id id in
+    let* () = validate_batch_messages messages in
+    let* deadline = batch_deadline jetstream.connection timeout in
+    match List.rev messages with
+    | [] -> assert false
+    | last :: staged_reversed ->
+        let staged = List.rev staged_reversed in
+        let stage_result = ref (Ok ()) in
+        List.iteri
+          (fun index message ->
+            match !stage_result with
+            | Error _ -> ()
+            | Ok () -> (
+                match
+                  batch_message ~id ~sequence:(Int64.of_int (index + 1))
+                    ~commit:None message
+                with
+                | Error error -> stage_result := Error error
+                | Ok message -> (
+                    match
+                      Connection.publish_msg jetstream.connection message
+                    with
+                    | Ok () -> ()
+                    | Error error ->
+                        stage_result := Error (Error.Connection error))))
+          staged;
+        let* () = !stage_result in
+        let sequence = Int64.of_int (List.length messages) in
+        let* message = batch_message ~id ~sequence ~commit:(Some "1") last in
+        let* timeout = batch_remaining jetstream.connection deadline in
+        match
+          Connection.request_msg ?timeout jetstream.connection message
+        with
+        | Error error -> Error (Error.Connection error)
+        | Ok response -> publish_ack_of_message response
+end
+
+module Batch = struct
+  type gap = Fail | Allow
+
+  type flow_response =
+    | Flow_ack
+    | Flow_gap of { expected : int64; actual : int64 }
+    | Publish_ack of Publish_ack.t
+
+  type flow_wire = {
+    kind : string option;
+    sequence : int64 option;
+    messages : int option;
+    expected : int64 option;
+    error : api_error option;
+  }
+
+  let flow_codec =
+    Jsont.Object.map ~kind:"JetStream fast publish flow response"
+      (fun kind sequence messages expected error ->
+        { kind; sequence; messages; expected; error })
+    |> Jsont.Object.opt_mem "type" Jsont.string ~enc:(fun value -> value.kind)
+    |> Jsont.Object.opt_mem "seq" Jsont.int64 ~enc:(fun value -> value.sequence)
+    |> Jsont.Object.opt_mem "msgs" Jsont.int ~enc:(fun value -> value.messages)
+    |> Jsont.Object.opt_mem "last_seq" Jsont.int64 ~enc:(fun value ->
+         value.expected)
+    |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
+         value.error)
+    |> Jsont.Object.skip_unknown |> Jsont.Object.finish
+
+  let flow_string = function Fail -> "fail" | Allow -> "ok"
+
+  let operation ~length index =
+    if Int.equal length 1 then 2
+    else if Int.equal index 0 then 0
+    else if Int.equal index (length - 1) then 2
+    else 1
+
+  let reply_subject ~inbox ~id ~flow ~gap ~sequence ~operation =
+    Nats.Subject.of_string
+      (Format.asprintf "%s.%s.%d.%s.%Ld.%d.$FI" inbox id flow
+         (flow_string gap) sequence operation)
+
+  let decode_flow_response message =
+    match decode flow_codec message with
+    | Error error -> Error error
+    | Ok { kind = Some kind; sequence; messages; expected; error } ->
+        if String.equal kind "ack" then
+          match (sequence, messages) with
+          | Some _, Some _ -> Ok Flow_ack
+          | None, _ -> Error (Error.Missing_field "seq")
+          | _, None -> Error (Error.Missing_field "msgs")
+        else if String.equal kind "gap" then
+          match (expected, sequence) with
+          | Some expected, Some actual -> Ok (Flow_gap { expected; actual })
+          | None, _ -> Error (Error.Missing_field "last_seq")
+          | _, None -> Error (Error.Missing_field "seq")
+        else if String.equal kind "err" then
+          match (sequence, error) with
+          | Some sequence, Some error ->
+              Error (Error.Batch_flow_error { sequence; error })
+          | None, _ -> Error (Error.Missing_field "seq")
+          | _, None -> Error (Error.Missing_field "error")
+        else Error (Error.Invalid_ack_reply (Nats.Subject.to_string (Nats.Message.subject message)))
+    | Ok { kind = None; _ } -> (
+        match publish_ack_of_message message with
+        | Error error -> Error error
+        | Ok ack -> Ok (Publish_ack ack))
+
+  let publish ?timeout ?(flow = 0) ?(gap = Fail) ~id jetstream messages =
+    let ( let* ) = Result.bind in
+    let* () = validate_batch_id id in
+    let* () = validate_batch_messages messages in
+    let* () =
+      if Int.compare flow 0 < 0 || Int.compare flow 65535 > 0 then
+        Error
+          (Error.Invalid_publish_option
+             { field = "flow"; reason = "must be between 0 and 65535" })
+      else Ok ()
+    in
+    let* deadline = batch_deadline jetstream.connection timeout in
+    let connection = jetstream.connection in
+    let inbox = Connection.fresh_inbox connection in
+    let filter =
+      Nats.Subject.Filter.literal (Nats.Subject.to_string inbox ^ ".>")
+    in
+    match Connection.subscribe connection ~replay_on_reconnect:false filter with
+    | Error error -> Error (Error.Connection error)
+    | Ok subscription ->
+        let finish result =
+          Eio.Cancel.protect (fun () ->
+              match Connection.Subscription.unsubscribe subscription with
+              | Ok () -> result
+              | Error error -> (
+                  match result with
+                  | Ok _ -> Error (Error.Connection error)
+                  | Error _ -> result))
+        in
+        let send_result = ref (Ok ()) in
+        let length = List.length messages in
+        List.iteri
+          (fun index message ->
+            match !send_result with
+            | Error _ -> ()
+            | Ok () -> (
+                match
+                  reply_subject ~inbox:(Nats.Subject.to_string inbox) ~id ~flow
+                    ~gap ~sequence:(Int64.of_int (index + 1))
+                    ~operation:(operation ~length index)
+                with
+                | Error error ->
+                    send_result :=
+                      Error
+                        (Error.Invalid_subject error)
+                | Ok reply -> (
+                    let message = fast_batch_message ~reply_to:reply message in
+                    match Connection.publish_msg connection message with
+                    | Ok () -> ()
+                    | Error error ->
+                        send_result := Error (Error.Connection error))))
+          messages;
+        let result =
+          match !send_result with
+          | Error error -> Error error
+          | Ok () ->
+              let rec receive gap_seen =
+                let wait_result =
+                  match deadline with
+                  | None -> Connection.Subscription.next subscription
+                  | Some deadline ->
+                      let now = Connection.now connection in
+                      if Mtime.compare now deadline >= 0 then
+                        Error Core_error.Timeout
+                      else
+                        Connection.Subscription.next_with_timeout
+                          ~timeout:(Mtime.span now deadline) subscription
+                in
+                match wait_result with
+                | Error Core_error.Timeout ->
+                    Error (Error.Connection Core_error.Timeout)
+                | Error error -> Error (Error.Connection error)
+                | Ok { message; status = Some { code; description } } ->
+                    Error (Error.Unexpected_status { code; description })
+                | Ok { message; status = None } -> (
+                    match decode_flow_response message with
+                    | Error error -> Error error
+                    | Ok Flow_ack -> receive gap_seen
+                    | Ok (Flow_gap { expected; actual }) ->
+                        receive (Some (expected, actual))
+                    | Ok (Publish_ack ack) -> (
+                        match (gap, gap_seen) with
+                        | Fail, Some (expected, actual) ->
+                            Error (Error.Batch_gap { expected; actual })
+                        | _ -> Ok ack))
+              in
+              receive None
+        in
+        (try finish result with Eio.Cancel.Cancelled _ as cancellation ->
+          Eio.Cancel.protect (fun () ->
+              ignore (Connection.Subscription.unsubscribe subscription));
+          raise cancellation)
+end
+
+let publish ?timeout ?(headers = Nats.Header.empty) ?msg_id ?options jetstream
+    subject payload =
+  match publish_message ~headers ?msg_id ?options subject payload with
+  | Error error -> Error error
+  | Ok message ->
+      let options = Option.value ~default:Publish_options.empty options in
+      (match options.stall_wait with
+      | Some _ ->
+          Error
+            (Error.Invalid_publish_option
+               {
+                 field = "stall_wait";
+                 reason = "is only valid for asynchronous publishing";
+               })
+      | None ->
+          let retry =
+            Option.value ~default:default_publish_retry options.retry
+          in
+          (match
+           Connection.request_msg_retry ?timeout ~retry_wait:retry.wait
+               ~retry_attempts:retry.attempts jetstream.connection message
+           with
+          | Error error -> Error (Error.Connection error)
+          | Ok response -> publish_ack_of_message response))

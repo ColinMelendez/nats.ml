@@ -231,6 +231,49 @@ let ack_response_wire ~sid =
   in
   operation_wire (Nats.Op.Hmsg { sid; message; status = None })
 
+let publish_ack_wire ~sid ~stream ~sequence =
+  let message =
+    Nats.Message.v ~subject:(Nats.Subject.literal "_INBOX.reply")
+      (Format.asprintf "{\"stream\":%S,\"seq\":%Ld}" stream sequence)
+  in
+  operation_wire (Nats.Op.Hmsg { sid; message; status = None })
+
+let no_responders_wire ~sid =
+  let message =
+    Nats.Message.v ~subject:(Nats.Subject.literal "_INBOX.reply") ""
+  in
+  operation_wire
+    (Nats.Op.Hmsg
+       {
+         sid;
+         message;
+         status = Some { Nats.Op.code = 503; description = "no responders" };
+       })
+
+let publish_batch_ack_wire ~sid ~stream ~sequence ~batch ~count =
+  let message =
+    Nats.Message.v ~subject:(Nats.Subject.literal "_INBOX.reply")
+      (Format.asprintf "{\"stream\":%S,\"seq\":%Ld,\"batch\":%S,\"count\":%d}"
+         stream sequence batch count)
+  in
+  operation_wire (Nats.Op.Hmsg { sid; message; status = None })
+
+let batch_flow_ack_wire ~sid ~sequence ~messages =
+  let message =
+    Nats.Message.v ~subject:(Nats.Subject.literal "_INBOX.reply")
+      (Format.asprintf "{\"type\":\"ack\",\"seq\":%Ld,\"msgs\":%d}"
+         sequence messages)
+  in
+  operation_wire (Nats.Op.Hmsg { sid; message; status = None })
+
+let batch_flow_gap_wire ~sid ~expected ~actual =
+  let message =
+    Nats.Message.v ~subject:(Nats.Subject.literal "_INBOX.reply")
+      (Format.asprintf "{\"type\":\"gap\",\"last_seq\":%Ld,\"seq\":%Ld}"
+         expected actual)
+  in
+  operation_wire (Nats.Op.Hmsg { sid; message; status = None })
+
 let with_connection ?config ~reads f =
   Eio_mock.Backend.run_full @@ fun env ->
   let flow = Eio_mock.Flow.make "jetstream-server" in
@@ -445,6 +488,8 @@ let () =
                  ~deny_delete:true ~replicas:3 ~placement
                  ~compression:Nats_eio.Jetstream.Stream.Config.S2
                  ~allow_msg_ttl:true
+                 ~allow_atomic_publish:true ~allow_msg_schedules:true
+                 ~allow_batch_publish:true
                  ~subject_delete_marker_ttl:Mtime.Span.(2 * s)
                  ~metadata:[ ("owner", "users") ]
                  ())
@@ -465,6 +510,12 @@ let () =
           equal bool true (Nats_eio.Jetstream.Stream.Config.deny_delete config);
           equal bool true
             (Nats_eio.Jetstream.Stream.Config.allow_msg_ttl config);
+          equal bool true
+            (Nats_eio.Jetstream.Stream.Config.allow_atomic_publish config);
+          equal bool true
+            (Nats_eio.Jetstream.Stream.Config.allow_msg_schedules config);
+          equal bool true
+            (Nats_eio.Jetstream.Stream.Config.allow_batch_publish config);
           (match
              Nats_eio.Jetstream.Stream.Config.subject_delete_marker_ttl config
            with
@@ -553,6 +604,27 @@ let () =
           in
           equal bool false
             (Nats_eio.Jetstream.Stream.Config.allow_msg_ttl updated);
+          let updated =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_allow_atomic_publish config
+                 false)
+          in
+          equal bool false
+            (Nats_eio.Jetstream.Stream.Config.allow_atomic_publish updated);
+          let updated =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_allow_msg_schedules config
+                 false)
+          in
+          equal bool false
+            (Nats_eio.Jetstream.Stream.Config.allow_msg_schedules updated);
+          let updated =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_allow_batch_publish config
+                 false)
+          in
+          equal bool false
+            (Nats_eio.Jetstream.Stream.Config.allow_batch_publish updated);
           let updated =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Stream.Config.with_subject_delete_marker_ttl
@@ -895,9 +967,9 @@ let () =
       test "priority consumer create emits policy and timeout" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
-          with_connection_traced
+          with_connection_traced_clock
             ~reads:[ `Return info_wire; `Await response; `Await hold ]
-            (fun ~sw ~trace connection ->
+            (fun ~sw ~trace ~clock connection ->
               let jetstream =
                 expect_jetstream_ok (Nats_eio.Jetstream.v connection)
               in
@@ -4721,5 +4793,448 @@ let () =
               expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Pull.close pull);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve response_u (Error End_of_file);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "asynchronous publishing carries typed options and settles futures"
+        (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced_clock
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw ~trace ~clock connection ->
+              ignore trace;
+              let jetstream = expect_jetstream_ok (Nats_eio.Jetstream.v connection) in
+              let options =
+                match
+                  Nats_eio.Jetstream.Publish_options.with_msg_id "async-id"
+                    Nats_eio.Jetstream.Publish_options.empty
+                with
+                | Error error ->
+                    fail
+                      (Format.asprintf "option construction failed: %a"
+                         Nats_eio.Jetstream.Error.pp error)
+                | Ok options -> options
+              in
+              let options =
+                match
+                  Nats_eio.Jetstream.Publish_options.with_ttl
+                    Mtime.Span.(2 * s) options
+                with
+                | Error error ->
+                    fail
+                      (Format.asprintf "TTL option construction failed: %a"
+                         Nats_eio.Jetstream.Error.pp error)
+                | Ok options -> options
+              in
+              let publisher =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Publisher.v ~sw ~clock ~max_pending:2
+                     jetstream)
+              in
+              let future =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Publisher.publish ~options publisher
+                     (Nats.Subject.literal "orders.created") "async-payload")
+              in
+              (match
+                 Nats.Header.find "Nats-Msg-Id"
+                   (Nats.Message.headers
+                      (Nats_eio.Jetstream.Publish.message future))
+               with
+              | Some "async-id" -> ()
+              | Some value -> fail ("unexpected message id " ^ value)
+              | None -> fail "message id header was not attached");
+              (match
+                 Nats.Header.find "Nats-TTL"
+                   (Nats.Message.headers
+                      (Nats_eio.Jetstream.Publish.message future))
+               with
+              | Some value -> equal string "2s" value
+              | None -> fail "message TTL header was not attached");
+              equal int 1 (Nats_eio.Jetstream.Publisher.pending publisher);
+              yield_n 8;
+              Eio.Promise.resolve response_u
+                (Ok
+                   (publish_ack_wire ~sid:1 ~stream:"ORDERS" ~sequence:7L));
+              let ack =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Publish.await future)
+              in
+              equal string "ORDERS"
+                (Nats_eio.Jetstream.Publish_ack.stream ack);
+              equal int64 7L (Nats_eio.Jetstream.Publish_ack.sequence ack);
+              equal int 0 (Nats_eio.Jetstream.Publisher.pending publisher);
+              expect_jetstream_ok
+                (Nats_eio.Jetstream.Publisher.await_all publisher);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "publish options reject invalid optimistic-concurrency values"
+        (fun () ->
+          match
+            Nats_eio.Jetstream.Publish_options.with_expected_last_sequence
+              (-1L) Nats_eio.Jetstream.Publish_options.empty
+          with
+          | Error
+              (Nats_eio.Jetstream.Error.Invalid_publish_option
+                { field = "expected_last_sequence"; _ }) ->
+              ()
+          | Ok _ -> fail "negative expected sequence was accepted"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected option error: %a"
+                   Nats_eio.Jetstream.Error.pp error));
+      test "synchronous publishing retries no-responders with typed policy"
+        (fun () ->
+          let first, first_u = Eio.Promise.create () in
+          let second, second_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced_clock
+            ~reads:[ `Return info_wire; `Await first; `Await second; `Await hold ]
+            (fun ~sw ~trace ~clock connection ->
+              ignore trace;
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let options =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Publish_options.with_retry
+                     ~wait:Mtime.Span.(1 * ms) ~attempts:(Some 1)
+                     Nats_eio.Jetstream.Publish_options.empty)
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.publish ~options jetstream
+                       (Nats.Subject.literal "orders.created") "payload"));
+              yield_n 8;
+              Eio.Promise.resolve first_u (Ok (no_responders_wire ~sid:1));
+              Eio.Time.Mono.sleep clock 0.005;
+              Eio.Promise.resolve second_u
+                (Ok (publish_ack_wire ~sid:2 ~stream:"ORDERS" ~sequence:9L));
+              let ack = expect_jetstream_ok (Eio.Promise.await result) in
+              equal int64 9L (Nats_eio.Jetstream.Publish_ack.sequence ack);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "synchronous publish timeout covers retry waits" (fun () ->
+          let first, first_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await first; `Await hold ]
+            (fun ~sw ~trace connection ->
+              ignore trace;
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let options =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Publish_options.with_retry
+                     ~wait:Mtime.Span.(10 * ms) ~attempts:(Some 1)
+                     Nats_eio.Jetstream.Publish_options.empty)
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.publish ~timeout:Mtime.Span.(1 * ms)
+                       ~options jetstream
+                       (Nats.Subject.literal "orders.created") "payload"));
+              yield_n 8;
+              Eio.Promise.resolve first_u (Ok (no_responders_wire ~sid:1));
+              (match Eio.Promise.await result with
+              | Error
+                  (Nats_eio.Jetstream.Error.Connection Nats_eio.Error.Timeout) ->
+                  ()
+              | Ok _ -> fail "publish retried after its deadline"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected timeout error: %a"
+                       Nats_eio.Jetstream.Error.pp error));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "synchronous publishing rejects asynchronous stall options" (fun () ->
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection ~reads:[ `Return info_wire; `Await hold ]
+            (fun ~sw connection ->
+              ignore sw;
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let options =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Publish_options.with_stall_wait
+                     Mtime.Span.(1 * ms)
+                     Nats_eio.Jetstream.Publish_options.empty)
+              in
+              (match
+                 Nats_eio.Jetstream.publish ~options jetstream
+                   (Nats.Subject.literal "orders.created") "payload"
+               with
+              | Error
+                  (Nats_eio.Jetstream.Error.Invalid_publish_option
+                    { field = "stall_wait"; _ }) ->
+                  ()
+              | Ok _ -> fail "synchronous publish accepted stall_wait"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected publish error: %a"
+                       Nats_eio.Jetstream.Error.pp error));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "cancelling an asynchronous publish settles and releases it" (fun () ->
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced_clock
+            ~reads:[ `Return info_wire; `Await hold ]
+            (fun ~sw ~trace ~clock connection ->
+              ignore trace;
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let publisher =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Publisher.v ~sw ~clock jetstream)
+              in
+              let future =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Publisher.publish publisher
+                     (Nats.Subject.literal "orders.created") "payload")
+              in
+              yield_n 8;
+              expect_jetstream_ok (Nats_eio.Jetstream.Publish.cancel future);
+              (match Nats_eio.Jetstream.Publish.await future with
+              | Error
+                  (Nats_eio.Jetstream.Error.Connection Nats_eio.Error.Closed) ->
+                  ()
+              | Ok _ -> fail "cancelled publish returned an acknowledgement"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected cancellation error: %a"
+                       Nats_eio.Jetstream.Error.pp error));
+              equal int 0 (Nats_eio.Jetstream.Publisher.pending publisher);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "publish options emit the Go JetStream headers"
+        (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced_clock
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw ~trace ~clock connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let options =
+                let ( let* ) = Result.bind in
+                let* options =
+                  Nats_eio.Jetstream.Publish_options.with_msg_id "message-1"
+                    Nats_eio.Jetstream.Publish_options.empty
+                in
+                let* options =
+                  Nats_eio.Jetstream.Publish_options.with_expected_stream
+                    "ORDERS" options
+                in
+                let* options =
+                  Nats_eio.Jetstream.Publish_options.with_expected_last_msg_id
+                    "message-0" options
+                in
+                let* options =
+                  Nats_eio.Jetstream.Publish_options.with_expected_last_sequence
+                    5L options
+                in
+                let* options =
+                  Nats_eio.Jetstream.Publish_options
+                    .with_expected_last_sequence_for_subject ~sequence:3L
+                    ~subject:(Nats.Subject.literal "orders.created") options
+                in
+                let* options =
+                  Nats_eio.Jetstream.Publish_options.with_ttl
+                    Mtime.Span.(2 * s) options
+                in
+                let* options =
+                  Nats_eio.Jetstream.Publish_options.with_schedule
+                    (Nats_eio.Jetstream.Publish_options.Cron "@daily") options
+                in
+                let* options =
+                  Nats_eio.Jetstream.Publish_options.with_schedule_target
+                    (Nats.Subject.literal "orders.scheduled") options
+                in
+                let* options =
+                  Nats_eio.Jetstream.Publish_options.with_schedule_source
+                    (Nats.Subject.literal "orders.source") options
+                in
+                let* options =
+                  Nats_eio.Jetstream.Publish_options.with_schedule_ttl
+                    Nats_eio.Jetstream.Publish_options.Never options
+                in
+                Nats_eio.Jetstream.Publish_options.with_schedule_timezone "UTC"
+                  options
+              in
+              let options = expect_jetstream_ok options in
+              let publisher =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Publisher.v ~sw ~clock ~max_pending:1
+                     jetstream)
+              in
+              let future =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Publisher.publish ~options publisher
+                     (Nats.Subject.literal "orders.created") "payload")
+              in
+              let headers =
+                Nats.Message.headers (Nats_eio.Jetstream.Publish.message future)
+              in
+              let check_header name expected =
+                match Nats.Header.find name headers with
+                | Some value -> equal string expected value
+                | None -> fail ("missing " ^ name)
+              in
+              check_header "Nats-Msg-Id" "message-1";
+              check_header "Nats-Expected-Stream" "ORDERS";
+              check_header "Nats-Expected-Last-Msg-Id" "message-0";
+              check_header "Nats-Expected-Last-Sequence" "5";
+              check_header "Nats-Expected-Last-Subject-Sequence" "3";
+              check_header "Nats-Expected-Last-Subject-Sequence-Subject"
+                "orders.created";
+              check_header "Nats-TTL" "2s";
+              check_header "Nats-Schedule" "@daily";
+              check_header "Nats-Schedule-Target" "orders.scheduled";
+              check_header "Nats-Schedule-Source" "orders.source";
+              check_header "Nats-Schedule-TTL" "never";
+              check_header "Nats-Schedule-Time-Zone" "UTC";
+              yield_n 8;
+              Eio.Promise.resolve response_u
+                (Ok (publish_ack_wire ~sid:1 ~stream:"ORDERS" ~sequence:8L));
+              ignore (expect_jetstream_ok (Nats_eio.Jetstream.Publish.await future));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "atomic batches stage control headers and preserve batch acknowledgements"
+        (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let messages =
+                [
+                  Nats.Message.v
+                    ~subject:(Nats.Subject.literal "orders.created") "first";
+                  Nats.Message.v
+                    ~subject:(Nats.Subject.literal "orders.updated") "second";
+                ]
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Atomic_batch.publish ~id:"batch-1"
+                       jetstream messages));
+              yield_n 8;
+              let trace = Buffer.contents trace in
+              if not (contains_substring ~needle:"Nats-Batch-Id: batch-1" trace)
+              then fail "atomic batch id was not sent";
+              if not (contains_substring ~needle:"Nats-Batch-Sequence: 1" trace)
+              then fail "atomic batch sequence was not sent";
+              if not (contains_substring ~needle:"Nats-Batch-Sequence: 2" trace)
+              then fail "atomic commit sequence was not sent";
+              if not (contains_substring ~needle:"Nats-Batch-Commit: 1" trace)
+              then fail "atomic commit marker was not sent";
+              Eio.Promise.resolve response_u
+                (Ok
+                   (publish_batch_ack_wire ~sid:1 ~stream:"ORDERS" ~sequence:8L
+                      ~batch:"batch-1" ~count:2));
+              let ack = expect_jetstream_ok (Eio.Promise.await result) in
+              equal string "batch-1"
+                (Option.get (Nats_eio.Jetstream.Publish_ack.batch ack));
+              equal int64 2L
+                (Option.get (Nats_eio.Jetstream.Publish_ack.count ack));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "fast batches report a server sequence gap" (fun () ->
+          let flow, flow_u = Eio.Promise.create () in
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await flow; `Await response; `Await hold ]
+            (fun ~sw ~trace connection ->
+              ignore trace;
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let messages =
+                [
+                  Nats.Message.v ~subject:(Nats.Subject.literal "orders.1") "one";
+                  Nats.Message.v ~subject:(Nats.Subject.literal "orders.2") "two";
+                ]
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Batch.publish ~flow:2 ~id:"gap-1"
+                       jetstream messages));
+              yield_n 8;
+              Eio.Promise.resolve flow_u
+                (Ok (batch_flow_gap_wire ~sid:1 ~expected:1L ~actual:2L));
+              yield_n 8;
+              Eio.Promise.resolve response_u
+                (Ok
+                   (publish_batch_ack_wire ~sid:1 ~stream:"ORDERS" ~sequence:9L
+                      ~batch:"gap-1" ~count:2));
+              (match Eio.Promise.await result with
+              | Error
+                  (Nats_eio.Jetstream.Error.Batch_gap
+                    { expected = 1L; actual = 2L }) ->
+                  ()
+              | Ok _ -> fail "fast batch gap was accepted"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected fast batch error: %a"
+                       Nats_eio.Jetstream.Error.pp error));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "fast batches use the flow reply protocol"
+        (fun () ->
+          let flow, flow_u = Eio.Promise.create () in
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await flow; `Await response; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let messages =
+                [
+                  Nats.Message.v ~subject:(Nats.Subject.literal "orders.1") "one";
+                  Nats.Message.v ~subject:(Nats.Subject.literal "orders.2") "two";
+                ]
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Batch.publish ~flow:2 ~id:"fast-1"
+                       jetstream messages));
+              yield_n 8;
+              let trace = Buffer.contents trace in
+              if
+                not
+                  (contains_substring ~needle:"fast-1.2.fail.1.0.$FI" trace)
+              then fail "fast batch start reply subject was not sent";
+              if
+                not
+                  (contains_substring ~needle:"fast-1.2.fail.2.2.$FI" trace)
+              then fail "fast batch commit reply subject was not sent";
+              Eio.Promise.resolve flow_u
+                (Ok (batch_flow_ack_wire ~sid:1 ~sequence:0L ~messages:2));
+              yield_n 8;
+              Eio.Promise.resolve response_u
+                (Ok
+                   (publish_batch_ack_wire ~sid:1 ~stream:"ORDERS" ~sequence:9L
+                      ~batch:"fast-1" ~count:2));
+              let ack = expect_jetstream_ok (Eio.Promise.await result) in
+              equal string "ORDERS"
+                (Nats_eio.Jetstream.Publish_ack.stream ack);
+              equal int64 9L (Nats_eio.Jetstream.Publish_ack.sequence ack);
+              equal int64 2L
+                (Option.get (Nats_eio.Jetstream.Publish_ack.count ack));
+              expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
     ]

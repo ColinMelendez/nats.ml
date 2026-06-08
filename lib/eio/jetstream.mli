@@ -47,6 +47,10 @@ module Error : sig
     | Invalid_subject of Nats.Subject.error
     | Invalid_config of config
     | Invalid_headers of Nats.Header.error
+    | Invalid_publish_option of { field : string; reason : string }
+    | Publish_stalled
+    | Batch_gap of { expected : int64; actual : int64 }
+    | Batch_flow_error of { sequence : int64; error : api }
     | Message_not_found
     | Stream_not_found
     | Consumer_not_found
@@ -83,6 +87,8 @@ module Error : sig
 end
 
 type t
+
+type jetstream = t
 
 val v : ?prefix:string -> Connection.t -> (t, Error.t) result
 (** [v connection] creates a JetStream capability using the default [$JS.API]
@@ -188,6 +194,9 @@ module Stream : sig
       ?max_age:Mtime.Span.t ->
       ?max_msg_size:int64 ->
       ?allow_msg_ttl:bool ->
+      ?allow_atomic_publish:bool ->
+      ?allow_msg_schedules:bool ->
+      ?allow_batch_publish:bool ->
       ?subject_delete_marker_ttl:Mtime.Span.t ->
       ?allow_rollup:bool ->
       ?allow_direct:bool ->
@@ -216,6 +225,9 @@ module Stream : sig
     val max_age : t -> Mtime.Span.t option
     val max_msg_size : t -> int64 option
     val allow_msg_ttl : t -> bool
+    val allow_atomic_publish : t -> bool
+    val allow_msg_schedules : t -> bool
+    val allow_batch_publish : t -> bool
     val subject_delete_marker_ttl : t -> Mtime.Span.t option
     val allow_rollup : t -> bool
 
@@ -289,6 +301,18 @@ module Stream : sig
     val with_allow_msg_ttl : t -> bool -> (t, error) result
     (** [with_allow_msg_ttl config value] replaces whether message-level TTL
         headers are accepted by the stream. *)
+
+    val with_allow_atomic_publish : t -> bool -> (t, error) result
+    (** [with_allow_atomic_publish config value] replaces whether atomic batch
+        publishing is accepted by the stream. *)
+
+    val with_allow_msg_schedules : t -> bool -> (t, error) result
+    (** [with_allow_msg_schedules config value] replaces whether scheduled
+        messages are accepted by the stream. *)
+
+    val with_allow_batch_publish : t -> bool -> (t, error) result
+    (** [with_allow_batch_publish config value] replaces whether fast batch
+        publishing is accepted by the stream. *)
 
     val with_subject_delete_marker_ttl :
       t -> Mtime.Span.t option -> (t, error) result
@@ -1024,13 +1048,143 @@ module Publish_ack : sig
   val sequence : t -> int64
   val duplicate : t -> bool
   val domain : t -> string option
+  val batch : t -> string option
+  val count : t -> int64 option
   val pp : Format.formatter -> t -> unit
+end
+
+module Publish_options : sig
+  (** Immutable publish headers and retry controls. Options are validated when
+      constructed and applied only if the corresponding header is absent from
+      the caller's message. *)
+
+  type schedule = At of Ptime.t | Every of Mtime.Span.t | Cron of string
+  (** Scheduled delivery. [Every] requires an interval of at least one second;
+      [Cron] is passed to the server unchanged. *)
+
+  type schedule_ttl = Duration of Mtime.Span.t | Never
+
+  type t
+
+  val empty : t
+
+  val with_msg_id : string -> t -> (t, Error.t) result
+  val with_expected_stream : string -> t -> (t, Error.t) result
+  val with_expected_last_msg_id : string -> t -> (t, Error.t) result
+  val with_expected_last_sequence : int64 -> t -> (t, Error.t) result
+  val with_expected_last_subject_sequence : int64 -> t -> (t, Error.t) result
+
+  val with_expected_last_sequence_for_subject :
+    sequence:int64 -> subject:Nats.Subject.t -> t -> (t, Error.t) result
+
+  val with_ttl : Mtime.Span.t -> t -> (t, Error.t) result
+  val with_schedule : schedule -> t -> (t, Error.t) result
+  val with_schedule_target : Nats.Subject.t -> t -> (t, Error.t) result
+  (** The target is required when [schedule] is set. *)
+
+  val with_schedule_source : Nats.Subject.t -> t -> (t, Error.t) result
+  val with_schedule_ttl : schedule_ttl -> t -> (t, Error.t) result
+  val with_schedule_timezone : string -> t -> (t, Error.t) result
+  (** A time zone is valid only with a [Cron] schedule. *)
+
+  val with_retry :
+    wait:Mtime.Span.t -> attempts:int option -> t -> (t, Error.t) result
+  (** [attempts] counts retries after the initial request. [None] retries until
+      a non-[No_responders] result or cancellation. *)
+
+  val with_stall_wait : Mtime.Span.t -> t -> (t, Error.t) result
+  (** The stall limit applies to {!Publisher.publish}; synchronous [publish]
+      rejects this option. *)
+end
+
+module Publish : sig
+  type t
+
+  val await : t -> (Publish_ack.t, Error.t) result
+  (** [await publish] waits for the publish acknowledgement. *)
+
+  val cancel : t -> (unit, Error.t) result
+  (** [cancel publish] cancels the outstanding request, if any. *)
+
+  val message : t -> Nats.Message.t
+  (** [message publish] is the immutable message submitted for publishing. *)
+end
+
+module Publisher : sig
+  type t
+
+  val v :
+    sw:Eio.Switch.t ->
+    clock:_ Eio.Time.Mono.t ->
+    ?max_pending:int ->
+    ?stall_wait:Mtime.Span.t ->
+    ?ack_timeout:Mtime.Span.t ->
+    jetstream ->
+    (t, Error.t) result
+  (** [v ~sw ~clock ?max_pending ?stall_wait ?ack_timeout jetstream] creates a
+      switch-owned asynchronous publisher. A bounded publisher waits up to
+      [stall_wait] for a pending slot; the default bound is 256 and the
+      default stall wait is 200 ms. [ack_timeout] defaults to the connection's
+      request timeout. *)
+
+  val publish :
+    ?headers:Nats.Header.t ->
+    ?msg_id:string ->
+    ?options:Publish_options.t ->
+    t ->
+    Nats.Subject.t ->
+    string ->
+    (Publish.t, Error.t) result
+  (** [publish publisher subject payload] submits a publish without waiting for
+      its acknowledgement. Only [No_responders] failures are retried, using
+      the retry policy in [options]. *)
+
+  val pending : t -> int
+  (** [pending publisher] is the number of submitted publishes not yet
+      settled. *)
+
+  val await_all : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
+  (** [await_all ?timeout publisher] waits until all submitted publishes have
+      settled. *)
+end
+
+module Atomic_batch : sig
+  val publish :
+    ?timeout:Mtime.Span.t ->
+    id:string ->
+    jetstream ->
+    Nats.Message.t list ->
+    (Publish_ack.t, Error.t) result
+  (** [publish ?timeout ~id jetstream messages] stages and commits [messages]
+      as one server-side atomic batch. The server either makes the complete
+      batch visible or discards it. Messages must not carry reply subjects or
+      batch-control headers. *)
+end
+
+module Batch : sig
+  type gap = Fail | Allow
+
+  val publish :
+    ?timeout:Mtime.Span.t ->
+    ?flow:int ->
+    ?gap:gap ->
+    id:string ->
+    jetstream ->
+    Nats.Message.t list ->
+    (Publish_ack.t, Error.t) result
+  (** [publish ?timeout ?flow ?gap ~id jetstream messages] publishes a fast
+      batch using the server flow-control reply protocol. [flow] is the
+      requested acknowledgement interval; zero asks the server for its
+      default. [gap] controls whether the server rejects sequence gaps. The
+      returned acknowledgement includes the server batch and count when they
+      are present. *)
 end
 
 val publish :
   ?timeout:Mtime.Span.t ->
   ?headers:Nats.Header.t ->
   ?msg_id:string ->
+  ?options:Publish_options.t ->
   t ->
   Nats.Subject.t ->
   string ->
