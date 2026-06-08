@@ -149,6 +149,9 @@ func verifyJetStreamAdmin(jetStream js.JetStream, config options) error {
 	if metadata.Sequence.Stream != 7 {
 		return fmt.Errorf("reset delivered stream sequence %d, expected 7", metadata.Sequence.Stream)
 	}
+	if string(message.Data()) != "admin-message-7" {
+		return fmt.Errorf("reset delivered payload %q, expected %q", string(message.Data()), "admin-message-7")
+	}
 	if err := message.Ack(); err != nil {
 		return fmt.Errorf("ack after reset: %w", err)
 	}
