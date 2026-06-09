@@ -5,6 +5,7 @@ type t =
   | Auth of Nats.Auth.error
   | Invalid_endpoints
   | Invalid_capacity of { name : string; value : int }
+  | Invalid_pending_limit of { name : string; value : int }
   | Command_queue_full of { capacity : int }
   | Invalid_chunk_size of int
   | Invalid_inbox_prefix of Nats.Subject.error
@@ -38,6 +39,8 @@ let pp ppf = function
       Format.pp_print_string ppf "at least one endpoint is required"
   | Invalid_capacity { name; value } ->
       Format.fprintf ppf "invalid %s capacity %d" name value
+  | Invalid_pending_limit { name; value } ->
+      Format.fprintf ppf "invalid %s pending limit %d" name value
   | Command_queue_full { capacity } ->
       Format.fprintf ppf "command queue is full (capacity %d)" capacity
   | Invalid_chunk_size size ->

@@ -27,6 +27,10 @@ let auth_required_info_wire =
   ^ "\"no_responders\":true,\"auth_required\":true,\"connect_urls\":[]}"
   ^ "\r\n"
 
+let delivery_wire ~sid ~subject payload =
+  Format.asprintf "MSG %s %d %d\r\n%s\r\n" subject sid
+    (String.length payload) payload
+
 let expect_ok = function
   | Ok value -> value
   | Error error -> fail (Format.asprintf "%a" Nats_eio.Error.pp error)
@@ -897,6 +901,55 @@ let () =
                   fail
                     (Format.asprintf "expected slow consumer, got %a"
                        Nats_eio.Error.pp error)));
+      test "subscription pending byte limits count queued payloads" (fun () ->
+          let messages, messages_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let config =
+            expect_ok (Nats_eio.Connection.Config.v ~subscription_capacity:8 ())
+          in
+          with_connection ~config
+            ~reads:[ `Return info_wire; `Await messages; `Await hold ]
+            (fun ~sw connection ->
+              Eio.Switch.check sw;
+              (match
+                 Nats_eio.Connection.subscribe connection ~pending_bytes:0 filter
+               with
+              | Error
+                  (Nats_eio.Error.Invalid_pending_limit
+                     { name = "bytes"; value = 0 }) ->
+                  ()
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected pending-limit error: %a"
+                       Nats_eio.Error.pp error)
+              | Ok _ -> fail "zero pending byte limit was accepted");
+              let subscription =
+                expect_ok
+                  (Nats_eio.Connection.subscribe connection
+                     ~pending_messages:(-1) ~pending_bytes:2 filter)
+              in
+              Eio.Promise.resolve messages_u
+                (Ok
+                   (delivery_wire ~sid:1 ~subject:"orders.created" "aa"
+                   ^ delivery_wire ~sid:1 ~subject:"orders.created" "b"));
+              let first =
+                expect_ok (Nats_eio.Subscription.next subscription)
+              in
+              equal string "aa" (Nats.Message.payload first.message);
+              (match Nats_eio.Subscription.next subscription with
+              | Error
+                  (Nats_eio.Error.Slow_consumer
+                     (Nats_eio.Error.Subscription { sid = 1 })) ->
+                  expect_ok (Nats_eio.Connection.close connection);
+                  Eio.Promise.resolve hold_u (Error End_of_file)
+              | Ok delivery ->
+                  fail
+                    (Format.asprintf "expected slow-consumer error, got %S"
+                       (Nats.Message.payload delivery.message))
+              | Error error ->
+                  fail
+                    (Format.asprintf "expected slow consumer, got %a"
+                       Nats_eio.Error.pp error))));
       test "a full event stream reports a slow consumer" (fun () ->
           let extra_info, extra_info_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in

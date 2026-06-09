@@ -151,6 +151,8 @@ val subscribe :
   t ->
   ?queue_group:Nats.Queue_group.t ->
   ?replay_on_reconnect:bool ->
+  ?pending_messages:int ->
+  ?pending_bytes:int ->
   Nats.Subject.Filter.t ->
   (Subscription.t, Error.t) result
 (** [subscribe ~replay_on_reconnect:false filter] creates an ephemeral
@@ -158,7 +160,10 @@ val subscribe :
     [Disconnected] rather than restored after a transport loss. The default is
     [true], preserving ordinary subscription replay. A blocked subscription read
     and an in-flight drain receive [Disconnected]; already queued deliveries
-    remain available before the terminal marker. *)
+    remain available before the terminal marker. [pending_messages] and
+    [pending_bytes] optionally constrain queued deliveries; each value must be
+    positive or [-1], where [-1] disables that endpoint-specific limit. A
+    connection's own bounded queue capacity remains in force. *)
 
 module Request : sig
   type t

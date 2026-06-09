@@ -236,6 +236,10 @@ module Subscription = struct
     sid : int;
     queue : item Eio.Stream.t;
     capacity : int;
+    pending_messages_limit : int option;
+    pending_bytes_limit : int64 option;
+    mutable pending_messages : int;
+    mutable pending_bytes : int64;
     mutable terminal : Error.t option;
     mutable done_seen : bool;
     mutable active : bool;
@@ -259,15 +263,25 @@ module Subscription = struct
     wait : Mtime.Span.t -> (unit, Error.t) result;
   }
 
-  let create ~sid ~capacity ~unsubscribe_request ~auto_unsubscribe_request
-      ~replay_on_reconnect ~drain_request ~cancel_drain_request ~wait =
+  let create ~sid ~capacity ~pending_messages ~pending_bytes
+      ~unsubscribe_request ~auto_unsubscribe_request ~replay_on_reconnect
+      ~drain_request ~cancel_drain_request ~wait =
     let recovery_signal, recovery_signal_u = Eio.Promise.create () in
+    let capacity =
+      match pending_messages with
+      | None -> capacity
+      | Some limit -> Int.min capacity limit
+    in
     {
       sid;
       queue =
         Eio.Stream.create
           (if capacity >= max_int - 2 then max_int else capacity + 2);
       capacity;
+      pending_messages_limit = pending_messages;
+      pending_bytes_limit = Option.map Int64.of_int pending_bytes;
+      pending_messages = 0;
+      pending_bytes = 0L;
       terminal = None;
       done_seen = false;
       active = true;
@@ -330,12 +344,36 @@ module Subscription = struct
         set_recovery t (Attached (next_generation generation))
     | Attached _ -> ()
 
+  let delivery_bytes (delivery : delivery) =
+    Int64.of_int (String.length (Nats.Message.payload delivery.message))
+
+  let pending_message_limit_reached t =
+    match t.pending_messages_limit with
+    | Some limit -> Int.compare t.pending_messages limit >= 0
+    | None -> false
+
+  let pending_bytes_limit_reached t delivery =
+    match t.pending_bytes_limit with
+    | None -> false
+    | Some limit ->
+        Int64.compare t.pending_bytes
+          (Int64.sub limit (delivery_bytes delivery))
+        > 0
+
   let push t (delivery : delivery) =
     if (not t.active) || Option.is_some t.terminal then false
+    else if pending_message_limit_reached t then false
+    else if pending_bytes_limit_reached t delivery then false
     else if Eio.Stream.length t.queue >= t.capacity then false
     else (
       Eio.Stream.add t.queue (Message delivery);
+      t.pending_messages <- t.pending_messages + 1;
+      t.pending_bytes <- Int64.add t.pending_bytes (delivery_bytes delivery);
       true)
+
+  let consume_delivery t delivery =
+    t.pending_messages <- t.pending_messages - 1;
+    t.pending_bytes <- Int64.sub t.pending_bytes (delivery_bytes delivery)
 
   let complete_drain_waiter waiter result =
     if not waiter.completed then (
@@ -406,7 +444,9 @@ module Subscription = struct
     if t.done_seen then terminal_error t
     else
       match Eio.Stream.take t.queue with
-      | Message delivery -> Ok delivery
+      | Message delivery ->
+          consume_delivery t delivery;
+          Ok delivery
       | Recovery ->
           t.recovery_queued <- false;
           next t
@@ -419,7 +459,9 @@ module Subscription = struct
     else
       match Eio.Stream.take_nonblocking t.queue with
       | None -> None
-      | Some (Message delivery) -> Some (Ok delivery)
+      | Some (Message delivery) ->
+          consume_delivery t delivery;
+          Some (Ok delivery)
       | Some Recovery ->
           t.recovery_queued <- false;
           next_nonblocking t
@@ -431,7 +473,9 @@ module Subscription = struct
     if t.done_seen then terminal_error t
     else
       match Eio.Stream.take t.queue with
-      | Message delivery -> Ok (Delivery delivery)
+      | Message delivery ->
+          consume_delivery t delivery;
+          Ok (Delivery delivery)
       | Recovery ->
           t.recovery_queued <- false;
           Ok Recovery
@@ -444,7 +488,9 @@ module Subscription = struct
     else
       match Eio.Stream.take_nonblocking t.queue with
       | None -> None
-      | Some (Message delivery) -> Some (Ok (Delivery delivery))
+      | Some (Message delivery) ->
+          consume_delivery t delivery;
+          Some (Ok (Delivery delivery))
       | Some Recovery ->
           t.recovery_queued <- false;
           Some (Ok Recovery)
@@ -577,6 +623,8 @@ and command =
       subject : Nats.Subject.Filter.t;
       queue_group : Nats.Queue_group.t option;
       replay_on_reconnect : bool;
+      pending_messages : int option;
+      pending_bytes : int option;
       resolver : (Subscription.t, Error.t) result Eio.Promise.u;
     }
   | Auto_unsubscribe of {
@@ -929,6 +977,7 @@ let finish t error =
     | Error.Slow_consumer kind ->
         Event_stream.push_terminal t.events (Event.Slow_consumer kind)
     | Error.Invalid_endpoints | Error.Invalid_capacity _
+    | Error.Invalid_pending_limit _
     | Error.Command_queue_full _ | Error.Invalid_chunk_size _
     | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
     | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
@@ -1507,7 +1556,15 @@ let apply_outgoing t command =
           | Ok () ->
               resolve_unit resolver (Ok ());
               Ok ()))
-  | Subscribe { subject; queue_group; replay_on_reconnect; resolver } -> (
+  | Subscribe
+      {
+        subject;
+        queue_group;
+        replay_on_reconnect;
+        pending_messages;
+        pending_bytes;
+        resolver;
+      } -> (
       match
         Nats.Client.outgoing t.state
           (Nats.Client.Subscribe { subject; queue_group })
@@ -1550,7 +1607,8 @@ let apply_outgoing t command =
               in
               let subscription =
                 Subscription.create ~sid
-                  ~capacity:t.config.subscription_capacity ~unsubscribe_request
+                  ~capacity:t.config.subscription_capacity ~pending_messages
+                  ~pending_bytes ~unsubscribe_request
                   ~replay_on_reconnect
                   ~auto_unsubscribe_request:(fun ~max_messages ->
                     if t.closed then Error Error.Closed
@@ -2035,6 +2093,7 @@ let may_recover t =
 let recoverable_transport_error = function
   | Error.Disconnected | Error.Io _ -> true
   | Error.Invalid_endpoints | Error.Invalid_capacity _
+  | Error.Invalid_pending_limit _
   | Error.Command_queue_full _ | Error.Invalid_chunk_size _
   | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
   | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
@@ -2048,6 +2107,7 @@ let reconnectable_attempt_error = function
     ->
       true
   | Error.Invalid_endpoints | Error.Invalid_capacity _
+  | Error.Invalid_pending_limit _
   | Error.Command_queue_full _ | Error.Invalid_chunk_size _
   | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
   | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
@@ -2367,6 +2427,7 @@ let initial_connect_retryable = function
   | Error.Tls_required | Error.Tls_unexpected_input | Error.Auth _ ->
       true
   | Error.Invalid_endpoints | Error.Invalid_capacity _
+  | Error.Invalid_pending_limit _
   | Error.Command_queue_full _ | Error.Invalid_chunk_size _
   | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
   | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
@@ -2435,10 +2496,30 @@ let publish_msg t message =
 let publish t ?reply_to ?(headers = Nats.Header.empty) subject payload =
   publish_msg t (Nats.Message.v ~subject ?reply_to ~headers payload)
 
-let subscribe t ?queue_group ?(replay_on_reconnect = true) subject =
+let validate_pending_limit name = function
+  | None -> Ok None
+  | Some value when Int.equal value (-1) -> Ok None
+  | Some value when Int.compare value 0 > 0 -> Ok (Some value)
+  | Some value -> Error (Error.Invalid_pending_limit { name; value })
+
+let subscribe t ?queue_group ?(replay_on_reconnect = true) ?pending_messages
+    ?pending_bytes subject =
+  let ( let* ) result f =
+    match result with Ok value -> f value | Error _ as error -> error
+  in
+  let* pending_messages = validate_pending_limit "messages" pending_messages in
+  let* pending_bytes = validate_pending_limit "bytes" pending_bytes in
   let promise, resolver = Eio.Promise.create () in
   send t
-    (Subscribe { subject; queue_group; replay_on_reconnect; resolver })
+    (Subscribe
+       {
+         subject;
+         queue_group;
+         replay_on_reconnect;
+         pending_messages;
+         pending_bytes;
+         resolver;
+       })
     promise
 
 let validate_timeout name timeout =

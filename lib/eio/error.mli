@@ -7,6 +7,7 @@ type t =
   | Auth of Nats.Auth.error
   | Invalid_endpoints
   | Invalid_capacity of { name : string; value : int }
+  | Invalid_pending_limit of { name : string; value : int }
   | Command_queue_full of { capacity : int }
   | Invalid_chunk_size of int
   | Invalid_inbox_prefix of Nats.Subject.error
