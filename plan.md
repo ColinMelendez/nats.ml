@@ -711,6 +711,13 @@ request/reply and subscription primitives.
   incomplete page. Consumer updates use the named
   `CONSUMER.CREATE` endpoint with an explicit update action and retain durable
   identity when the new configuration omits it.
+- Completed locally: add typed stream mirrors, source lists, source filters,
+  sequence/time start points, subject transforms, cross-account external
+  prefixes, republish rules, and mirror-direct reads. Mirror/source and
+  source-filter/transform conflicts are rejected during construction. Nested
+  source configuration preserves unknown JSON members through the
+  INFO/read-modify-write path, and local tests cover the wire shapes and
+  constructor invariants.
 - Completed locally: model JetStream priority-group consumer policies and one
   validated group name, including the pull-only and explicit-ack invariants;
   encode policy, groups, and pinned-client timeouts through consumer create and

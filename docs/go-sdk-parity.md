@@ -74,19 +74,22 @@ The Go `jetstream.StreamConfig` can also express:
 
 - maximum consumers and discard-new-per-subject;
 - no-ack streams and duplicate windows;
-- mirrors, sources, source filters/transforms, and newer placement metadata/options;
-- deny-purge, initial sequence, subject transforms, republish, and mirror-direct
-  reads;
+- newer placement metadata/options;
+- deny-purge and initial sequence;
 - stream-level consumer limits;
 - per-message TTL/counter support, scheduled messages, atomic/batched publish
   feature flags, and newer persistence settings.
 
-The OCaml codec preserves unknown fields when reading and read-modify-write
-updates preserve fields outside the modeled projection. That prevents data loss,
-but it does not make the fields configurable. Ordinary and secure stream message
-deletion are now implemented and covered against the Go peer; the remaining
-management gaps are the manager-level and newer configuration capabilities
-listed above.
+The OCaml projection now also configures mirrors, sources, source filters and
+subject transforms, input subject transforms, republish rules, cross-account
+external prefixes, and mirror-direct reads. Source start points are typed as a
+sequence or RFC3339 time, and constructors reject mirror/source combinations
+that the server rejects. Unknown members are retained at the outer config and
+the nested source, external, transform, and republish levels during
+read-modify-write updates. Ordinary and secure stream message deletion are now
+implemented and covered against the Go peer; the remaining management gaps are
+the newer configuration capabilities and manager-level operations listed
+above.
 
 The Go SDK also exposes manager-level create/update/upsert operations, stream
 and stream-name listers, account information, and consumer reset operations.
@@ -177,8 +180,9 @@ added as unstructured mutable hooks.
 
 ## Prioritized follow-up
 
-1. **Stream configuration expansion.** Add mirrors/sources and their transforms
-   before the newer server-only configuration fields.
+1. **Stream configuration expansion.** Add maximum-consumer/discard policy,
+   no-ack, duplicate-window, deny-purge, initial-sequence, and consumer-limit
+   fields before the newer server-only configuration fields.
 2. **Transport and service breadth.** Add WebSocket as a separate adapter and
    service reset/stopped/pending-limit behavior after the protocol gaps above.
 
