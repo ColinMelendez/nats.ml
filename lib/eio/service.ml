@@ -259,6 +259,50 @@ let duplicate_metadata metadata =
     metadata;
   !duplicate
 
+module Stats = struct
+  type endpoint = {
+    name : string;
+    subject : Nats.Subject.Filter.t;
+    queue : Nats.Queue_group.t option;
+    metadata : (string * string) list option;
+    data : Jsont.json option;
+    num_requests : int64;
+    num_errors : int64;
+    last_error : string;
+    processing_time : int64;
+    average_processing_time : int64;
+  }
+
+  type t = {
+    name : string;
+    id : string;
+    version : string;
+    metadata : (string * string) list;
+    started : string;
+    endpoints : endpoint list;
+  }
+
+  let name value = value.name
+  let id value = value.id
+  let version value = value.version
+  let metadata value = value.metadata
+  let started value = value.started
+  let endpoints value = value.endpoints
+  let endpoint_name (value : endpoint) = value.name
+  let endpoint_subject (value : endpoint) = value.subject
+  let endpoint_queue (value : endpoint) = value.queue
+  let endpoint_metadata (value : endpoint) = value.metadata
+  let data (value : endpoint) = value.data
+  let num_requests (value : endpoint) = value.num_requests
+  let num_errors (value : endpoint) = value.num_errors
+  let last_error (value : endpoint) = value.last_error
+  let processing_time (value : endpoint) = value.processing_time
+  let average_processing_time (value : endpoint) = value.average_processing_time
+
+  let with_data data value = { value with data }
+  let with_endpoints endpoints value = { value with endpoints }
+end
+
 module Config = struct
   type queue_policy = Default | Queue of Nats.Queue_group.t | Disabled
 
@@ -268,9 +312,13 @@ module Config = struct
     description : string option;
     metadata : (string * string) list;
     queue : queue_policy;
+    stats_handler : (Stats.endpoint -> Jsont.json option) option;
+    error_handler : (Error.t -> unit) option;
+    done_handler : (unit -> unit) option;
   }
 
-  let v ~name ~version ?description ?(metadata = []) ?(queue = Default) () =
+  let v ~name ~version ?description ?(metadata = []) ?(queue = Default)
+      ?stats_handler ?error_handler ?done_handler () =
     match validate_identifier name with
     | Error error -> Error (Error.Invalid_config (config_name_error error))
     | Ok () -> (
@@ -280,13 +328,27 @@ module Config = struct
           match duplicate_metadata metadata with
           | Some name ->
               Error (Error.Invalid_config (Error.Duplicate_metadata name))
-          | None -> Ok { name; version; description; metadata; queue })
+          | None ->
+              Ok
+                {
+                  name;
+                  version;
+                  description;
+                  metadata;
+                  queue;
+                  stats_handler;
+                  error_handler;
+                  done_handler;
+                })
 
   let name value = value.name
   let version value = value.version
   let description value = value.description
   let metadata value = value.metadata
   let queue value = value.queue
+  let stats_handler value = value.stats_handler
+  let error_handler value = value.error_handler
+  let done_handler value = value.done_handler
 end
 
 module Request = struct
@@ -514,47 +576,15 @@ module Info = struct
   let endpoint_metadata (value : endpoint) = value.metadata
 end
 
-module Stats = struct
-  type endpoint = {
-    name : string;
-    subject : Nats.Subject.Filter.t;
-    queue : Nats.Queue_group.t option;
-    metadata : (string * string) list option;
-    num_requests : int64;
-    num_errors : int64;
-    last_error : string;
-    processing_time : int64;
-    average_processing_time : int64;
-  }
-
-  type t = {
-    name : string;
-    id : string;
-    version : string;
-    metadata : (string * string) list;
-    started : string;
-    endpoints : endpoint list;
-  }
-
-  let name value = value.name
-  let id value = value.id
-  let version value = value.version
-  let metadata value = value.metadata
-  let started value = value.started
-  let endpoints value = value.endpoints
-  let endpoint_name (value : endpoint) = value.name
-  let endpoint_subject (value : endpoint) = value.subject
-  let endpoint_queue (value : endpoint) = value.queue
-  let endpoint_metadata (value : endpoint) = value.metadata
-  let num_requests (value : endpoint) = value.num_requests
-  let num_errors (value : endpoint) = value.num_errors
-  let last_error (value : endpoint) = value.last_error
-  let processing_time (value : endpoint) = value.processing_time
-  let average_processing_time (value : endpoint) = value.average_processing_time
-end
-
 type service_state = Open | Stopping | Stopped | Failed of Error.t
 type control_kind = Ping | Info | Stats
+
+type callback_event =
+  | Error_event of Error.t
+  | Done_event of unit Eio.Promise.u
+  | Failure_event
+
+type callback_dispatch = { events : callback_event Eio.Stream.t }
 
 type owned_subscription = {
   subscription : Connection.Subscription.t;
@@ -579,6 +609,7 @@ type service = {
   mutable pending_endpoint_names : string list;
   mutable stop_promise : (unit, Error.t) result Eio.Promise.t option;
   mutable hook : Eio.Switch.hook option;
+  callbacks : callback_dispatch option;
 }
 
 and endpoint_instance = {
@@ -668,6 +699,7 @@ let stats_endpoint (endpoint : endpoint_instance) : Stats.endpoint =
     subject = endpoint.subject;
     queue = endpoint.queue;
     metadata = endpoint.metadata;
+    data = None;
     num_requests = endpoint.num_requests;
     num_errors = endpoint.num_errors;
     last_error = endpoint.last_error;
@@ -697,11 +729,23 @@ let stats_without_lock (service : service) =
     endpoints = List.rev_map stats_endpoint service.endpoints;
   }
 
+let stats_with_handler (service : service) (value : Stats.t) =
+  match Config.stats_handler service.config with
+  | None -> value
+  | Some handler ->
+      Stats.with_endpoints
+        (List.map
+           (fun endpoint ->
+             Stats.with_data (handler endpoint) endpoint)
+           (Stats.endpoints value))
+        value
+
 let info service =
   Eio.Mutex.use_ro service.mutex (fun () -> info_without_lock service)
 
 let stats service =
-  Eio.Mutex.use_ro service.mutex (fun () -> stats_without_lock service)
+  let value = Eio.Mutex.use_ro service.mutex (fun () -> stats_without_lock service) in
+  stats_with_handler service value
 
 type wire_identity = {
   type_ : string;
@@ -775,6 +819,7 @@ type wire_endpoint_stats = {
   last_error : string;
   processing_time : int64;
   average_processing_time : int64;
+  data : Jsont.json option;
 }
 
 let wire_endpoint_stats_codec =
@@ -789,6 +834,7 @@ let wire_endpoint_stats_codec =
       last_error
       processing_time
       average_processing_time
+      data
     ->
       {
         name;
@@ -800,6 +846,7 @@ let wire_endpoint_stats_codec =
         last_error;
         processing_time;
         average_processing_time;
+        data;
       })
   |> Jsont.Object.mem "name" Jsont.string ~enc:(fun value -> value.name)
   |> Jsont.Object.mem "subject" Jsont.string ~enc:(fun value -> value.subject)
@@ -817,6 +864,7 @@ let wire_endpoint_stats_codec =
       value.processing_time)
   |> Jsont.Object.mem "average_processing_time" Jsont.int64 ~enc:(fun value ->
       value.average_processing_time)
+  |> Jsont.Object.opt_mem "data" Jsont.json ~enc:(fun value -> value.data)
   |> Jsont.Object.finish
 
 type wire_stats = {
@@ -930,6 +978,7 @@ let discovery_stats_endpoint (wire : wire_endpoint_stats) =
                   last_error = wire.last_error;
                   processing_time = wire.processing_time;
                   average_processing_time = wire.average_processing_time;
+                  data = wire.data;
                 }))
 
 let discovery_info_of_wire (wire : wire_info) =
@@ -1177,6 +1226,7 @@ let wire_endpoint_stats_of_stats (endpoint : Stats.endpoint) =
     last_error = Stats.last_error endpoint;
     processing_time = Stats.processing_time endpoint;
     average_processing_time = Stats.average_processing_time endpoint;
+    data = Stats.data endpoint;
   }
 
 let control_payload (service : service) = function
@@ -1225,6 +1275,32 @@ let all_workers (service : service) =
       (fun (endpoint : endpoint_instance) -> endpoint.worker)
       service.endpoints
 
+let callback_loop (service : service) (dispatch : callback_dispatch) =
+  let running = ref true in
+  while !running do
+    match Eio.Stream.take dispatch.events with
+    | Error_event error ->
+        Option.iter
+          (fun handler -> handler error)
+          (Config.error_handler service.config)
+    | Done_event resolver ->
+        Fun.protect
+          (fun () ->
+            Option.iter
+              (fun handler -> handler ())
+              (Config.done_handler service.config))
+          ~finally:(fun () -> Eio.Promise.resolve resolver ());
+        running := false
+    | Failure_event -> running := false
+  done
+
+let enqueue_failure_callbacks service error =
+  match service.callbacks with
+  | None -> ()
+  | Some dispatch ->
+      Eio.Stream.add dispatch.events (Error_event error);
+      Eio.Stream.add dispatch.events Failure_event
+
 let fail_service (service : service) error =
   let subscriptions =
     Eio.Mutex.use_rw ~protect:true service.mutex (fun () ->
@@ -1237,7 +1313,10 @@ let fail_service (service : service) error =
   List.iter
     (fun subscription ->
       ignore (Connection.Subscription.unsubscribe subscription))
-    subscriptions
+    subscriptions;
+  match subscriptions with
+  | [] -> ()
+  | _ -> enqueue_failure_callbacks service error
 
 let record_endpoint (endpoint : endpoint_instance) ~handler_error request
     started =
@@ -1610,6 +1689,12 @@ let run_stop service ~timeout ~resolver ~subscriptions ~done_promises =
   in
   Eio.Mutex.use_rw ~protect:true service.mutex (fun () ->
       service.state <- Stopped);
+  (match service.callbacks with
+  | None -> ()
+  | Some dispatch ->
+      let done_promise, done_resolver = Eio.Promise.create () in
+      Eio.Stream.add dispatch.events (Done_event done_resolver);
+      Eio.Promise.await done_promise);
   Eio.Promise.resolve resolver result;
   result
 
@@ -1631,6 +1716,14 @@ let v ~sw ~clock ?random connection config =
   | Error error -> Error error
   | Ok controls ->
       let service =
+        let callbacks =
+          match
+            (Config.error_handler config, Config.done_handler config)
+          with
+          | None, None -> None
+          | Some _, _ | _, Some _ ->
+              Some { events = Eio.Stream.create max_int }
+        in
         {
           sw;
           connection;
@@ -1646,8 +1739,13 @@ let v ~sw ~clock ?random connection config =
           pending_endpoint_names = [];
           stop_promise = None;
           hook = None;
+          callbacks;
         }
       in
+      Option.iter
+        (fun dispatch ->
+          Eio.Fiber.fork ~sw (fun () -> callback_loop service dispatch))
+        service.callbacks;
       List.iter
         (fun control ->
           Eio.Fiber.fork ~sw (fun () -> monitor_loop service control))

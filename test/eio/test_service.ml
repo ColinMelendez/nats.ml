@@ -354,7 +354,7 @@ let () =
             {|{"type":"io.nats.micro.v1.info_response","name":"orders","id":"a","version":"1.2.3","description":"orders","metadata":{"team":"infra"},"endpoints":[{"name":"created","subject":"orders.created","queue_group":"q","metadata":null}]}|}
           in
           let stats_payload =
-            {|{"type":"io.nats.micro.v1.stats_response","name":"orders","id":"a","version":"1.2.3","metadata":{"team":"infra"},"started":"2026-08-12T00:00:00.000000000Z","endpoints":[{"name":"created","subject":"orders.created","queue_group":"q","metadata":null,"num_requests":4,"num_errors":1,"last_error":"bad request","processing_time":120,"average_processing_time":30}]}|}
+            {|{"type":"io.nats.micro.v1.stats_response","name":"orders","id":"a","version":"1.2.3","metadata":{"team":"infra"},"started":"2026-08-12T00:00:00.000000000Z","endpoints":[{"name":"created","subject":"orders.created","queue_group":"q","metadata":null,"num_requests":4,"num_errors":1,"last_error":"bad request","processing_time":120,"average_processing_time":30,"data":"ready"}]}|}
           in
           with_connection_traced
             ~reads:
@@ -431,6 +431,13 @@ let () =
               equal int64 4L
                 (Nats_eio.Service.Stats.num_requests
                    (List.hd (Nats_eio.Service.Stats.endpoints stats)));
+              (match
+                 Nats_eio.Service.Stats.data
+                   (List.hd (Nats_eio.Service.Stats.endpoints stats))
+               with
+              | Some (Jsont.String (value, _)) -> equal string "ready" value
+              | Some _ -> fail "discovered custom stats data had the wrong type"
+              | None -> fail "discovered custom stats data was omitted");
               (match
                  Nats_eio.Service.Discovery.ping
                    ~target:(Nats_eio.Service.Discovery.Named "") connection
@@ -781,11 +788,142 @@ let () =
                   fail (Format.asprintf "%a" Nats_eio.Service.Error.pp error)
               | Ok _ -> fail "nested group was added after service stop");
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "service callbacks expose stats data and stop ownership" (fun () ->
+          let stats_request, stats_request_u = Eio.Promise.create () in
+          let pong1, pong1_u = Eio.Promise.create () in
+          let pong2, pong2_u = Eio.Promise.create () in
+          let pong3, pong3_u = Eio.Promise.create () in
+          let pong4, pong4_u = Eio.Promise.create () in
+          let pong5, pong5_u = Eio.Promise.create () in
+          let pong6, pong6_u = Eio.Promise.create () in
+          let pong7, pong7_u = Eio.Promise.create () in
+          let pong8, pong8_u = Eio.Promise.create () in
+          let pong9, pong9_u = Eio.Promise.create () in
+          let pong10, pong10_u = Eio.Promise.create () in
+          let pong11, pong11_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await stats_request;
+                `Await pong1;
+                `Await pong2;
+                `Await pong3;
+                `Await pong4;
+                `Await pong5;
+                `Await pong6;
+                `Await pong7;
+                `Await pong8;
+                `Await pong9;
+                `Await pong10;
+                `Await pong11;
+                `Await hold;
+              ]
+            (fun ~sw ~clock ~trace connection ->
+              let stats_calls = ref 0 in
+              let error_calls = ref 0 in
+              let done_calls = ref 0 in
+              let config =
+                expect_config
+                  (Nats_eio.Service.Config.v ~name:"orders" ~version:"1.2.3"
+                     ~stats_handler:(fun endpoint ->
+                       incr stats_calls;
+                       if
+                         String.equal
+                           (Nats_eio.Service.Stats.endpoint_name endpoint)
+                           "created"
+                       then Some (Jsont.Json.string "ready")
+                       else None)
+                     ~error_handler:(fun _ -> incr error_calls)
+                     ~done_handler:(fun () -> incr done_calls) ())
+              in
+              let service =
+                expect_service (Nats_eio.Service.v ~sw ~clock connection config)
+              in
+              let pongs =
+                [
+                  pong1_u;
+                  pong2_u;
+                  pong3_u;
+                  pong4_u;
+                  pong5_u;
+                  pong6_u;
+                  pong7_u;
+                  pong8_u;
+                  pong9_u;
+                  pong10_u;
+                  pong11_u;
+                ]
+              in
+              Eio.Fiber.fork ~sw (fun () ->
+                  List.iteri
+                    (fun index resolver ->
+                      wait_for_trace_yields ~trace ~needle:"wrote \"PING\\r\\n\""
+                        ~expected:(index + 1);
+                      Eio.Promise.resolve resolver (Ok "PONG\r\n"))
+                    pongs);
+              let created =
+                expect_endpoint
+                  (Nats_eio.Service.Endpoint.v ~name:"created" (fun request ->
+                       ignore (Nats_eio.Service.Request.payload request);
+                       Ok ()))
+              in
+              let status =
+                expect_endpoint
+                  (Nats_eio.Service.Endpoint.v ~name:"status" (fun request ->
+                       ignore (Nats_eio.Service.Request.payload request);
+                       Ok ()))
+              in
+              expect_ok (Nats_eio.Service.add_endpoint service created);
+              expect_ok (Nats_eio.Service.add_endpoint service status);
+              Eio.Promise.resolve stats_request_u
+                (Ok
+                   (request_wire ~sid:7 ~subject:"$SRV.STATS"
+                      ~reply:"_INBOX.stats" ""));
+              yield_n 8;
+              if
+                not
+                  (contains
+                     ~needle:(escaped_json_field "data" "\\\"ready\\\"")
+                     (Buffer.contents trace))
+              then fail "stats response omitted custom endpoint data";
+              let stats = Nats_eio.Service.stats service in
+              equal int 4 !stats_calls;
+              let find_endpoint name =
+                match
+                  List.find_opt
+                    (fun endpoint ->
+                      String.equal
+                        (Nats_eio.Service.Stats.endpoint_name endpoint)
+                        name)
+                    (Nats_eio.Service.Stats.endpoints stats)
+                with
+                | Some endpoint -> endpoint
+                | None -> fail ("stats endpoint " ^ name ^ " was missing")
+              in
+              (match
+                 Nats_eio.Service.Stats.data (find_endpoint "created")
+               with
+              | Some (Jsont.String (value, _)) -> equal string "ready" value
+              | Some _ -> fail "stats callback returned the wrong JSON value"
+              | None -> fail "stats callback data was omitted");
+              (match Nats_eio.Service.Stats.data (find_endpoint "status") with
+              | None -> ()
+              | Some _ -> fail "stats callback data leaked to another endpoint");
+              expect_ok (Nats_eio.Service.stop service);
+              expect_ok (Nats_eio.Service.stop service);
+              equal int 1 !done_calls;
+              equal int 0 !error_calls;
+              equal bool true (Nats_eio.Service.stopped service);
+              expect_connection_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "endpoint pending limits terminate slow consumers" (fun () ->
           let first, first_u = Eio.Promise.create () in
           let second, second_u = Eio.Promise.create () in
           let third, third_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
+          let failure_callback, failure_callback_u = Eio.Promise.create () in
           with_connection_traced
             ~reads:
               [
@@ -796,9 +934,13 @@ let () =
                 `Await hold;
               ]
             (fun ~sw ~clock ~trace connection ->
+              let done_calls = ref 0 in
               let config =
                 expect_config
                   (Nats_eio.Service.Config.v ~name:"orders" ~version:"1.2.3"
+                     ~error_handler:(fun error ->
+                       Eio.Promise.resolve failure_callback_u error)
+                     ~done_handler:(fun () -> incr done_calls)
                      ())
               in
               let service =
@@ -869,6 +1011,17 @@ let () =
                        "unexpected endpoint failure after pending overflow: %a\n%s"
                        Nats_eio.Service.Error.pp error (Buffer.contents trace))
               | None -> fail "endpoint pending overflow did not fail service");
+              (match Eio.Promise.await failure_callback with
+              | Nats_eio.Service.Error.Connection
+                  (Nats_eio.Error.Slow_consumer
+                     (Nats_eio.Error.Subscription _)) ->
+                  ()
+              | error ->
+                  fail
+                    (Format.asprintf
+                       "error callback received an unexpected failure: %a"
+                       Nats_eio.Service.Error.pp error));
+              equal int 0 !done_calls;
               equal bool false (Nats_eio.Service.stopped service);
               expect_connection_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));

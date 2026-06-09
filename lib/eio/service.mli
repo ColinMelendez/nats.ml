@@ -56,6 +56,65 @@ module Error : sig
   (** [pp ppf error] formats a service error for diagnostics. *)
 end
 
+module Stats : sig
+  type endpoint
+  (** A monitoring snapshot of service endpoint processing statistics. *)
+
+  type t
+
+  val name : t -> string
+  (** [name stats] is the service name. *)
+
+  val id : t -> string
+  (** [id stats] is the service instance id. *)
+
+  val version : t -> string
+  (** [version stats] is the service version. *)
+
+  val metadata : t -> (string * string) list
+  (** [metadata stats] is the service metadata. *)
+
+  val started : t -> string
+  (** [started stats] is the RFC3339 UTC service start timestamp. *)
+
+  val endpoints : t -> endpoint list
+  (** [endpoints stats] is the endpoint statistics snapshot in registration
+      order. *)
+
+  val endpoint_name : endpoint -> string
+  (** [endpoint_name endpoint] is the endpoint name. *)
+
+  val endpoint_subject : endpoint -> Nats.Subject.Filter.t
+  (** [endpoint_subject endpoint] is the full endpoint filter. *)
+
+  val endpoint_queue : endpoint -> Nats.Queue_group.t option
+  (** [endpoint_queue endpoint] is the effective queue group, if any. *)
+
+  val endpoint_metadata : endpoint -> (string * string) list option
+  (** [endpoint_metadata endpoint] is the endpoint metadata. *)
+
+  val data : endpoint -> Jsont.json option
+  (** [data endpoint] is custom endpoint data, if supplied by the service
+      statistics handler. *)
+
+  val num_requests : endpoint -> int64
+  (** [num_requests endpoint] is the number of delivered requests. *)
+
+  val num_errors : endpoint -> int64
+  (** [num_errors endpoint] is the number of handler or response failures. *)
+
+  val last_error : endpoint -> string
+  (** [last_error endpoint] is the latest diagnostic, or [""]. *)
+
+  val processing_time : endpoint -> int64
+  (** [processing_time endpoint] is cumulative processing time in nanoseconds.
+  *)
+
+  val average_processing_time : endpoint -> int64
+  (** [average_processing_time endpoint] is the average processing time in
+      nanoseconds, or [0]. *)
+end
+
 module Config : sig
   (** Queue selection for service endpoints. [Default] inherits the enclosing
       service or group policy; [Disabled] omits the queue group. *)
@@ -70,12 +129,21 @@ module Config : sig
     ?description:string ->
     ?metadata:(string * string) list ->
     ?queue:queue_policy ->
+    ?stats_handler:(Stats.endpoint -> Jsont.json option) ->
+    ?error_handler:(Error.t -> unit) ->
+    ?done_handler:(unit -> unit) ->
     unit ->
     (t, Error.t) result
   (** [v ~name ~version ?description ?metadata ?queue ()] validates a service
       identity. Names use letters, digits, [-], and [_]. Versions use the
       semantic-version grammar accepted by NATS Services. Metadata keys must be
-      unique. The default queue policy is [Default]. *)
+      unique. The default queue policy is [Default]. [stats_handler] supplies
+      optional per-endpoint JSON data for statistics snapshots. [error_handler]
+      runs once when an owned service subscription fails. [done_handler] runs
+      once after the service reaches [Stopped]. Statistics callbacks run after
+      the service snapshot leaves its mutex; lifecycle callbacks run on a
+      service-owned dispatcher. Callback exceptions are not converted into
+      service errors. The default queue policy is [Default]. *)
 
   val name : t -> string
   (** [name config] is the service name. *)
@@ -91,6 +159,19 @@ module Config : sig
 
   val queue : t -> queue_policy
   (** [queue config] is the service's default endpoint queue policy. *)
+
+  val stats_handler : t -> (Stats.endpoint -> Jsont.json option) option
+  (** [stats_handler config] is the optional custom statistics callback. It is
+      called once per endpoint for each statistics snapshot. *)
+
+  val error_handler : t -> (Error.t -> unit) option
+  (** [error_handler config] is the optional service failure callback. It is
+      called once when an owned service subscription transitions the service
+      from [Open] to [Failed]. *)
+
+  val done_handler : t -> (unit -> unit) option
+  (** [done_handler config] is the optional service completion callback. It is
+      called once after the service reaches [Stopped]. *)
 end
 
 module Request : sig
@@ -234,61 +315,6 @@ module Info : sig
   (** [endpoint_metadata endpoint] is the endpoint metadata. *)
 end
 
-module Stats : sig
-  type endpoint
-  (** A monitoring snapshot of service endpoint processing statistics. *)
-
-  type t
-
-  val name : t -> string
-  (** [name stats] is the service name. *)
-
-  val id : t -> string
-  (** [id stats] is the service instance id. *)
-
-  val version : t -> string
-  (** [version stats] is the service version. *)
-
-  val metadata : t -> (string * string) list
-  (** [metadata stats] is the service metadata. *)
-
-  val started : t -> string
-  (** [started stats] is the RFC3339 UTC service start timestamp. *)
-
-  val endpoints : t -> endpoint list
-  (** [endpoints stats] is the endpoint statistics snapshot in registration
-      order. *)
-
-  val endpoint_name : endpoint -> string
-  (** [endpoint_name endpoint] is the endpoint name. *)
-
-  val endpoint_subject : endpoint -> Nats.Subject.Filter.t
-  (** [endpoint_subject endpoint] is the full endpoint filter. *)
-
-  val endpoint_queue : endpoint -> Nats.Queue_group.t option
-  (** [endpoint_queue endpoint] is the effective queue group, if any. *)
-
-  val endpoint_metadata : endpoint -> (string * string) list option
-  (** [endpoint_metadata endpoint] is the endpoint metadata. *)
-
-  val num_requests : endpoint -> int64
-  (** [num_requests endpoint] is the number of delivered requests. *)
-
-  val num_errors : endpoint -> int64
-  (** [num_errors endpoint] is the number of handler or response failures. *)
-
-  val last_error : endpoint -> string
-  (** [last_error endpoint] is the latest diagnostic, or [""]. *)
-
-  val processing_time : endpoint -> int64
-  (** [processing_time endpoint] is cumulative processing time in nanoseconds.
-  *)
-
-  val average_processing_time : endpoint -> int64
-  (** [average_processing_time endpoint] is the average processing time in
-      nanoseconds, or [0]. *)
-end
-
 module Discovery : sig
   (** Resource-free fan-out queries over the NATS Services monitoring subjects.
       A query collects replies until its timeout; timeout is normal completion
@@ -378,7 +404,9 @@ val info : t -> Info.t
 (** [info service] returns a consistent endpoint declaration snapshot. *)
 
 val stats : t -> Stats.t
-(** [stats service] returns a consistent processing statistics snapshot. *)
+(** [stats service] returns a consistent processing statistics snapshot and
+    invokes the configured statistics callback once per endpoint. The callback
+    runs after the snapshot leaves the service mutex. *)
 
 val reset : t -> unit
 (** [reset service] clears all endpoint counters and errors and starts a new
@@ -393,4 +421,5 @@ val stopped : t -> bool
 val stop : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
 (** [stop service] drains only subscriptions owned by [service], waits for
     endpoint and monitoring workers already in progress, and leaves the parent
-    connection usable. It is idempotent after a successful stop. *)
+    connection usable. The configured completion callback is delivered before
+    the stop result is resolved. It is idempotent after a successful stop. *)
