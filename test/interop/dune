@@ -16,7 +16,7 @@
 
 (executable
  (name interop_service_acceptance)
- (modules interop_service_acceptance)
+ (modules interop_auth interop_service_acceptance)
  (libraries
   nats
   nats-eio
@@ -26,6 +26,8 @@
   x509
   domain-name
   mirage-crypto-rng.unix
+  mirage-crypto-ec
+  base64
   ptime))
 
 (executable

@@ -26,7 +26,7 @@ the capabilities marked as covered.
 | JetStream consumption | Pull, push, ordered, heartbeats, flow control, priority, consumer reset | Some ordered/ack fields and Go's continuous batching controls |
 | Key-Value | CRUD, CAS, history, finite keys, watches, per-key/marker TTL, purge-delete cleanup, resumable/multi-filter watches, listers | Bucket manager/listers |
 | Object Store | Streaming CRUD, links, metadata, watches, list, seal, and Go interop | Bucket manager/listers and file helpers |
-| Services | Registration, groups, requests, errors, discovery, stats, reset, stopped state, pending limits, custom lifecycle/stat callbacks | Broader cross-SDK/version acceptance |
+| Services | Registration, groups, requests, errors, discovery, stats, reset, stopped state, pending limits, custom lifecycle/stat callbacks, bidirectional Go interop across the pinned server matrix | Cross-SDK reconnect/failure injection and future server/SDK versions |
 
 ## Core and transport
 
@@ -178,12 +178,19 @@ snapshots, while error and done callbacks are serialized by a service-owned Eio
 dispatcher outside the service mutex. This matches the Go capability without
 turning callbacks into a global mutable registry.
 
+The dedicated Service interop runner checks custom endpoint statistics data in
+both directions against the pinned Go `micro` peer. Its matrix repeats the
+wire contract across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` under
+anonymous, token, username/password, NKey, JWT, mTLS, and their supported TLS
+variants. Lifecycle callback execution remains a local API contract because
+callbacks are not encoded on the NATS service wire.
+
 ## Prioritized follow-up
 
-1. **Cross-SDK/version acceptance.** Exercise callback and custom-statistics
-   behavior against the pinned official Go peer, then expand the version and
-   failure matrix; alternative transports such as WebSocket remain intentionally
-   out of scope for now.
+1. **Cross-SDK failure and reconnect acceptance.** Exercise Service recovery,
+   subscription failure, and parent-connection failure against the official Go
+   peer; future server/SDK versions and alternative transports such as
+   WebSocket remain separate concerns.
 
 This ordering keeps the narrow protocol waist intact, gives each addition a
 behavioral test target, and avoids claiming parity merely because unknown JSON

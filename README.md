@@ -43,6 +43,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-interop-auth-matrix.sh
 ./scripts/runtest-interop-auth-negative-matrix.sh
 ./scripts/runtest-interop-service.sh
+./scripts/runtest-interop-service-matrix.sh
 ./scripts/runtest-interop-jetstream.sh
 ./scripts/runtest-interop-jetstream-matrix.sh
 ./scripts/runtest-interop-key-value.sh
@@ -242,10 +243,15 @@ are supplied to both SDKs.
 The Service interop runner starts the official Go `nats.go` `micro` peer beside
 the OCaml client and checks bidirectional endpoint requests, response headers,
 service-error headers, named INFO/STATS discovery, queue and metadata
-declarations, exact endpoint counters, and a request/reply completion barrier.
-It supports anonymous, token, username/password, and server-required TLS modes
-against the pinned `nats:2.10.22` image. The wider server-version, NKey/JWT,
-mTLS, reconnect, and feature-family cross-SDK matrices remain separate work.
+declarations, exact endpoint counters, custom endpoint statistics data in both
+directions, and a request/reply completion barrier. It supports anonymous,
+token, username/password, NKey, JWT, mTLS, and server-required TLS modes
+against the pinned `nats:2.10.22` image. The Service matrix runner repeats
+that exchange across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` in all
+eleven plaintext/TLS authentication modes (33 cases by default); set
+`NATS_SERVER_IMAGES` or `NATS_INTEROP_SERVICE_MATRIX_MODES` to select a
+bounded subset. Cross-SDK reconnect and failure-injection coverage remains
+separate work.
 
 The first JetStream layer is available through `Nats_eio.Jetstream`: typed
 stream and consumer configuration and management, including consumer metadata,

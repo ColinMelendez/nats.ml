@@ -981,9 +981,16 @@ subscriptions, queue groups, and request/reply.
   snapshots; error and done callbacks run in FIFO order on a service-owned Eio
   dispatcher, outside the service mutex, with normal stop waiting for done
   delivery.
-- Remaining: broader cross-SDK/version acceptance, including reconnect,
-  NKey/JWT, mTLS, and feature-family matrix coverage. The baseline official-Go
-  Service wire contract is covered by the dedicated Service interop runner.
+- Completed: the dedicated official-Go Service interop runner now checks
+  bidirectional custom endpoint statistics data, and its matrix repeats the
+  contract across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` under
+  anonymous, token, username/password, NKey, JWT, mTLS, and their supported
+  TLS variants. The shared authentication helper is used by the Service
+  acceptance executable, so the advanced matrix modes exercise the OCaml
+  client as well as the Go peer.
+- Remaining: cross-SDK Service reconnect and failure-injection coverage and
+  broader feature-family matrices. The callbacks themselves remain local API
+  behavior because they are not represented on the NATS service wire.
 
 ### Acceptance tests and gate G6
 
@@ -1000,9 +1007,11 @@ monitoring recovery after active-server loss. The dedicated Service interop
 runner now cross-checks the OCaml implementation against the official Go
 `nats.go` `micro` SDK for bidirectional endpoint requests, service-error
 headers, named INFO/STATS discovery, queue and metadata declarations, exact
-counters, and a request/reply completion barrier under anonymous, token,
-username/password, and server-required TLS modes. Run the remaining
-cross-SDK/version and failure-matrix tests against a real server before G6.
+counters, custom endpoint statistics data in both directions, and a request/
+reply completion barrier. The Service matrix repeats this exchange across the
+three pinned server releases and eleven anonymous/token/username-password/
+NKey/JWT/mTLS plaintext/TLS modes. Run the remaining cross-SDK Service
+reconnect and failure-matrix tests against a real server before G6.
 Services may start after G2 and do not block JetStream,
 KV, or Object Store. Stabilize only after confirming that all service behavior
 composes with the Core connection ownership model.
