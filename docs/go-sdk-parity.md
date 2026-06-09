@@ -18,7 +18,7 @@ the capabilities marked as covered.
 
 | Area | Current position | Material gaps |
 | --- | --- | --- |
-| Core NATS | Covered for the Eio model | WebSocket transport and some Go-specific diagnostics/options |
+| Core NATS | Covered for the Eio model | Some Go-specific diagnostics/options; alternative transports are intentionally out of scope |
 | Authentication and TLS | Covered | Dynamic callback and transport-option breadth is narrower |
 | Reconnect, discovery, drain | Covered | Go-style callback hooks and connection statistics are not mirrored |
 | JetStream management | Account info, stream/consumer lookup, upsert, names, reset, detailed lists | Newer stream fields and system-level administration |
@@ -26,7 +26,7 @@ the capabilities marked as covered.
 | JetStream consumption | Pull, push, ordered, heartbeats, flow control, priority, consumer reset | Some ordered/ack fields and Go's continuous batching controls |
 | Key-Value | CRUD, CAS, history, finite keys, watches, per-key/marker TTL, purge-delete cleanup, resumable/multi-filter watches, listers | Bucket manager/listers |
 | Object Store | Streaming CRUD, links, metadata, watches, list, seal, and Go interop | Bucket manager/listers and file helpers |
-| Services | Registration, groups, requests, errors, discovery, stats | Reset/stopped state, pending limits, custom lifecycle/stat callbacks |
+| Services | Registration, groups, requests, errors, discovery, stats, reset, stopped state, pending limits | Custom lifecycle/stat callbacks |
 
 ## Core and transport
 
@@ -46,15 +46,13 @@ natural Go concurrency forms. The OCaml surface uses `Subscription.next`,
 `iter`, and Eio switches instead; this is an intentional runtime adaptation,
 not a missing capability.
 
-The remaining transport/diagnostic gaps are:
-
-- No WebSocket transport adapter. This is a real capability gap for browser or
-  proxy deployments, but it should remain a transport package rather than enter
-  the protocol core.
-- No direct equivalent of Go's custom dialer, in-process server, WebSocket HTTP
-  headers, proxy path, ping/stale-connection tuning, or connection statistics and
-  server-introspection methods. Most are adapter-specific or observability
-  conveniences and are lower priority than protocol features.
+The remaining transport/diagnostic gaps are deliberately narrow. Alternative
+transports, including WebSocket, are out of scope for the current Eio-only SDK;
+the protocol core remains transport-neutral so a future transport can be added
+without changing these semantics. Go-specific custom dialers, in-process
+servers, proxy headers, ping/stale-connection tuning, connection statistics,
+and server-introspection methods are also not mirrored yet; most are adapter-
+specific or observability conveniences.
 
 ## JetStream management and publishing
 
@@ -172,16 +170,17 @@ not block the data-plane feature set.
 
 The OCaml service module covers typed identity/configuration, endpoint and group
 composition, queue and metadata declarations, successful and error replies,
-monitoring discovery, statistics, and service-local stopping. Go additionally
-offers `Reset`, `Stopped`, endpoint pending message/byte limits, and custom
-statistics, error, and done callbacks. The first two are small state-surface
-extensions; the callbacks need an explicit Eio ownership policy and should not be
-added as unstructured mutable hooks.
+monitoring discovery, statistics, service-local stopping, statistics reset,
+stopped-state inspection, and endpoint pending message/byte limits. Go also
+offers custom statistics, error, and done callbacks. Those callbacks need an
+explicit Eio ownership policy and should not be added as unstructured mutable
+hooks.
 
 ## Prioritized follow-up
 
-1. **Transport and service breadth.** Add WebSocket as a separate adapter and
-   service reset/stopped/pending-limit behavior after the protocol gaps above.
+1. **Service callbacks.** Decide whether custom statistics, error, and done
+   callbacks fit the Eio ownership model; alternative transports such as
+   WebSocket remain intentionally out of scope for now.
 
 This ordering keeps the narrow protocol waist intact, gives each addition a
 behavioral test target, and avoids claiming parity merely because unknown JSON

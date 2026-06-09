@@ -103,9 +103,10 @@ opt-in single-server runner now exercises these behaviors against a live
 JetStream bucket as well.
 Services now provide typed endpoint/group values, queue-backed workers,
 request/service-error replies, `$SRV.*` monitoring and fan-out discovery,
-statistics, replayable subscriptions, and service-local draining. Object Store
-now has a first Eio slice with validated bucket management, direct metadata
-reads, incremental Bytesrw transfers, digest/size/chunk verification,
+statistics, statistics reset, stopped-state inspection, endpoint pending
+message/byte limits, replayable subscriptions, and service-local draining.
+Object Store now has a first Eio slice with validated bucket management, direct
+metadata reads, incremental Bytesrw transfers, digest/size/chunk verification,
 deletion, replacement cleanup, bucket policy projection and updates, and
 structured timeout and cleanup errors. The opt-in single-server runner now
 exercises single-service monitoring, endpoint/group requests, service errors,
@@ -967,6 +968,11 @@ subscriptions, queue groups, and request/reply.
 - Completed locally: preserve monitoring and endpoint subscriptions across
   reconnect, collect per-endpoint request/error/timing statistics, and keep
   individual handler or response failures from taking down the service.
+- Completed locally: expose Go-compatible service statistics reset and stopped
+  state inspection, and carry validated endpoint pending message/byte limits
+  through the generic subscription queue. Limit violations terminate the
+  affected subscription as structured slow-consumer failures rather than
+  blocking the connection owner.
 - Completed locally: query `$SRV.PING`, `$SRV.INFO`, and `$SRV.STATS` for all
   services, named services, or individual instances through bounded fan-out
   collection windows with typed JSON response decoding.
@@ -978,8 +984,9 @@ subscriptions, queue groups, and request/reply.
 
 Local mock-transport tests cover configuration, monitoring wire payloads,
 fan-out discovery, malformed response rejection, queue policy,
-request/service-error replies, statistics, reconnect replay, service-local
-drain, and parent-connection isolation. The opt-in server runner now covers one
+request/service-error replies, statistics and reset, stopped-state transitions,
+pending-limit backpressure, reconnect replay, service-local drain, and
+parent-connection isolation. The opt-in server runner now covers one
 live service's monitoring, endpoint/group requests, service errors, failure
 isolation, statistics, and drain behavior, plus two-instance queue-group
 routing. The two-server reconnect runner also checks Service endpoint and
@@ -1002,7 +1009,8 @@ needs them:
 - typed payload codec helpers and documentation examples;
 - adapter-level probes, metrics, and tracing hooks;
 - a dedicated credential/NKey/JWT package if in-repo auth becomes too large;
-- WebSocket transport;
+- alternative transports such as WebSocket (currently out of scope; revisit
+  only if a concrete requirement justifies a separate adapter);
 - a second runtime adapter such as Lwt or Mirage.
 
 Every integration must bridge the existing waists. It must not add a parallel

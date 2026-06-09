@@ -14,6 +14,8 @@ module Error : sig
     | Empty_name
     | Invalid_name_character of { position : int; character : char }
     | Duplicate_metadata of string
+    | Invalid_pending_limits
+    | Invalid_pending_limit of { field : string; value : int }
 
   type selector =
     | Empty_name
@@ -128,6 +130,21 @@ module Endpoint : sig
   type t
   (** A named service endpoint and its request handler. *)
 
+  module Pending_limits : sig
+    type t
+
+    val v : messages:int -> bytes:int -> (t, Error.t) result
+    (** [v ~messages ~bytes] validates queued message and payload-byte limits.
+        Each limit is positive or [-1], where [-1] disables that endpoint
+        limit. Both limits cannot be zero. *)
+
+    val messages : t -> int
+    (** [messages limits] is the queued message limit, or [-1]. *)
+
+    val bytes : t -> int
+    (** [bytes limits] is the queued payload-byte limit, or [-1]. *)
+  end
+
   type handler = Request.t -> (unit, Error.t) result
   (** A handler runs once per incoming delivery. Returning [Error e] records an
       endpoint failure and keeps the service worker alive. Exceptions are also
@@ -138,10 +155,13 @@ module Endpoint : sig
     ?subject:Nats.Subject.Filter.t ->
     ?metadata:(string * string) list ->
     ?queue:Config.queue_policy ->
+    ?pending_limits:Pending_limits.t ->
     handler ->
     (t, Error.t) result
-  (** [v ~name ?subject ?metadata ?queue handler] validates an endpoint.
-      [subject] defaults to the endpoint name; [queue] defaults to [Default]. *)
+  (** [v ~name ?subject ?metadata ?queue ?pending_limits handler] validates an
+      endpoint. [subject] defaults to the endpoint name; [queue] defaults to
+      [Default]. [pending_limits] constrains queued deliveries for this
+      endpoint. *)
 
   val name : t -> string
   (** [name endpoint] is the endpoint name. *)
@@ -154,6 +174,9 @@ module Endpoint : sig
 
   val queue : t -> Config.queue_policy
   (** [queue endpoint] is the endpoint's queue policy. *)
+
+  val pending_limits : t -> Pending_limits.t option
+  (** [pending_limits endpoint] is the endpoint's optional queue policy. *)
 end
 
 module Group : sig
@@ -356,6 +379,16 @@ val info : t -> Info.t
 
 val stats : t -> Stats.t
 (** [stats service] returns a consistent processing statistics snapshot. *)
+
+val reset : t -> unit
+(** [reset service] clears all endpoint counters and errors and starts a new
+    statistics interval. It does not change endpoint registrations or service
+    lifecycle state. *)
+
+val stopped : t -> bool
+(** [stopped service] is [true] once the service has completed its stop
+    transition. It is [false] while the service is open, stopping, or failed
+    before that transition. *)
 
 val stop : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
 (** [stop service] drains only subscriptions owned by [service], waits for

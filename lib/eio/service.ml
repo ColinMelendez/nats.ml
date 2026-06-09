@@ -11,6 +11,8 @@ module Error = struct
     | Empty_name
     | Invalid_name_character of { position : int; character : char }
     | Duplicate_metadata of string
+    | Invalid_pending_limits
+    | Invalid_pending_limit of { field : string; value : int }
 
   type selector =
     | Empty_name
@@ -57,6 +59,11 @@ module Error = struct
           position
     | Duplicate_metadata name ->
         Format.fprintf ppf "metadata repeats key %S" name
+    | Invalid_pending_limits ->
+        Format.pp_print_string ppf
+          "message and byte pending limits cannot both be zero"
+    | Invalid_pending_limit { field; value } ->
+        Format.fprintf ppf "invalid %s pending limit %d" field value
 
   let pp_selector ppf (error : selector) =
     match error with
@@ -400,17 +407,42 @@ module Request = struct
 end
 
 module Endpoint = struct
+  module Pending_limits = struct
+    type t = { messages : int; bytes : int }
+
+    let valid value = Int.compare value 0 > 0 || Int.equal value (-1)
+
+    let v ~messages ~bytes =
+      if Int.equal messages 0 && Int.equal bytes 0 then
+        Error (Error.Invalid_endpoint Error.Invalid_pending_limits)
+      else if not (valid messages) then
+        Error
+          (Error.Invalid_endpoint
+             (Error.Invalid_pending_limit
+                { field = "messages"; value = messages }))
+      else if not (valid bytes) then
+        Error
+          (Error.Invalid_endpoint
+             (Error.Invalid_pending_limit { field = "bytes"; value = bytes }))
+      else Ok { messages; bytes }
+
+    let messages value = value.messages
+    let bytes value = value.bytes
+  end
+
   type t = {
     name : string;
     subject : Nats.Subject.Filter.t;
     metadata : (string * string) list option;
     queue : Config.queue_policy;
+    pending_limits : Pending_limits.t option;
     handler : Request.t -> (unit, Error.t) result;
   }
 
   type handler = Request.t -> (unit, Error.t) result
 
-  let v ~name ?subject ?metadata ?(queue = Config.Default) handler =
+  let v ~name ?subject ?metadata ?(queue = Config.Default) ?pending_limits
+      handler =
     match validate_identifier name with
     | Error error -> Error (Error.Invalid_endpoint (endpoint_name_error error))
     | Ok () -> (
@@ -429,6 +461,7 @@ module Endpoint = struct
                         subject;
                     metadata = Some metadata;
                     queue;
+                    pending_limits;
                     handler;
                   })
         | None ->
@@ -441,6 +474,7 @@ module Endpoint = struct
                     subject;
                 metadata = None;
                 queue;
+                pending_limits;
                 handler;
               })
 
@@ -448,6 +482,7 @@ module Endpoint = struct
   let subject (value : t) = value.subject
   let metadata value = value.metadata
   let queue value = value.queue
+  let pending_limits value = value.pending_limits
 end
 
 module Info = struct
@@ -535,7 +570,8 @@ type service = {
   config : Config.t;
   name : string;
   id : string;
-  started : string;
+  mutable started : string;
+  wall_now : unit -> float;
   mutex : Eio.Mutex.t;
   mutable state : service_state;
   controls : control list;
@@ -1318,6 +1354,7 @@ let add_endpoint_to service ~prefix ~parent_queue (endpoint : Endpoint.t) =
   | Error error -> Error (Error.Invalid_group_subject error)
   | Ok subject -> (
       let queue = effective_endpoint_queue parent_queue endpoint in
+      let pending_limits = Endpoint.pending_limits endpoint in
       let reservation =
         Eio.Mutex.use_rw ~protect:true service.mutex (fun () ->
             match service.state with
@@ -1341,7 +1378,11 @@ let add_endpoint_to service ~prefix ~parent_queue (endpoint : Endpoint.t) =
       | Error error -> Error error
       | Ok () -> (
           match
-            Connection.subscribe service.connection ?queue_group:queue subject
+            Connection.subscribe service.connection ?queue_group:queue
+              ?pending_messages:
+                (Option.map Endpoint.Pending_limits.messages pending_limits)
+              ?pending_bytes:(Option.map Endpoint.Pending_limits.bytes pending_limits)
+              subject
           with
           | Error error ->
               Eio.Mutex.use_rw ~protect:true service.mutex (fun () ->
@@ -1446,6 +1487,23 @@ let rfc3339 timestamp =
   Format.sprintf "%04d-%02d-%02dT%02d:%02d:%02d.%09LdZ"
     (time.Unix.tm_year + 1900) (time.Unix.tm_mon + 1) time.Unix.tm_mday
     time.Unix.tm_hour time.Unix.tm_min time.Unix.tm_sec nanos
+
+let reset service =
+  Eio.Mutex.use_rw ~protect:true service.mutex (fun () ->
+      service.started <- rfc3339 (service.wall_now ());
+      List.iter
+        (fun (endpoint : endpoint_instance) ->
+          endpoint.num_requests <- 0L;
+          endpoint.num_errors <- 0L;
+          endpoint.last_error <- "";
+          endpoint.processing_time <- 0L)
+        service.endpoints)
+
+let stopped service =
+  Eio.Mutex.use_ro service.mutex (fun () ->
+      match service.state with
+      | Stopped -> true
+      | Open | Stopping | Failed _ -> false)
 
 let control_subject kind suffix =
   let verb =
@@ -1567,7 +1625,8 @@ let stop ?timeout service =
 let v ~sw ~clock ?random connection config =
   let random = Option.value ~default:(Random.State.make_self_init ()) random in
   let id = fresh_id random in
-  let started = rfc3339 (Eio.Time.now clock) in
+  let wall_now () = Eio.Time.now clock in
+  let started = rfc3339 (wall_now ()) in
   match subscribe_controls connection (Config.name config) id with
   | Error error -> Error error
   | Ok controls ->
@@ -1579,6 +1638,7 @@ let v ~sw ~clock ?random connection config =
           name = Config.name config;
           id;
           started;
+          wall_now;
           mutex = Eio.Mutex.create ();
           state = Open;
           controls;

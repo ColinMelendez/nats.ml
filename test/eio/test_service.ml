@@ -282,9 +282,43 @@ let () =
             | Error error ->
                 fail (Format.asprintf "%a" Nats.Subject.pp_error error)
           in
+          let pending_limits =
+            expect_ok
+              (Nats_eio.Service.Endpoint.Pending_limits.v ~messages:4 ~bytes:128)
+          in
+          equal int 4
+            (Nats_eio.Service.Endpoint.Pending_limits.messages pending_limits);
+          equal int 128
+            (Nats_eio.Service.Endpoint.Pending_limits.bytes pending_limits);
+          (match
+             Nats_eio.Service.Endpoint.Pending_limits.v ~messages:0 ~bytes:0
+           with
+          | Error
+              (Nats_eio.Service.Error.Invalid_endpoint
+                 Nats_eio.Service.Error.Invalid_pending_limits) ->
+              ()
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected pending-limit error: %a"
+                   Nats_eio.Service.Error.pp error)
+          | Ok _ -> fail "zero pending limits were accepted");
+          (match
+             Nats_eio.Service.Endpoint.Pending_limits.v ~messages:(-2) ~bytes:1
+           with
+          | Error
+              (Nats_eio.Service.Error.Invalid_endpoint
+                 (Nats_eio.Service.Error.Invalid_pending_limit
+                    { field = "messages"; value = -2 })) ->
+              ()
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected pending-limit error: %a"
+                   Nats_eio.Service.Error.pp error)
+          | Ok _ -> fail "negative pending limit was accepted");
           let endpoint =
             expect_endpoint
               (Nats_eio.Service.Endpoint.v ~name:"created" ~subject ~metadata:[]
+                 ~pending_limits
                  (fun request ->
                    ignore (Nats_eio.Service.Request.payload request);
                    Ok ()))
@@ -296,7 +330,15 @@ let () =
           equal
             (option (list (pair string string)))
             (Some [])
-            (Nats_eio.Service.Endpoint.metadata endpoint));
+            (Nats_eio.Service.Endpoint.metadata endpoint);
+          equal
+            (option (pair int int))
+            (Some (4, 128))
+            (Option.map
+               (fun limits ->
+                 ( Nats_eio.Service.Endpoint.Pending_limits.messages limits,
+                   Nats_eio.Service.Endpoint.Pending_limits.bytes limits ))
+               (Nats_eio.Service.Endpoint.pending_limits endpoint)));
       test "discovery collects monitoring replies by target" (fun () ->
           let ping_read, ping_read_u = Eio.Promise.create () in
           let info_read, info_read_u = Eio.Promise.create () in
@@ -712,8 +754,24 @@ let () =
               let service_stats = Nats_eio.Service.stats service in
               equal int 30
                 (String.length (Nats_eio.Service.Stats.started service_stats));
+              equal bool false (Nats_eio.Service.stopped service);
+              Nats_eio.Service.reset service;
+              let reset_stats = Nats_eio.Service.stats service in
+              equal int 30
+                (String.length (Nats_eio.Service.Stats.started reset_stats));
+              (match Nats_eio.Service.Stats.endpoints reset_stats with
+              | endpoint :: _ ->
+                  equal int64 0L
+                    (Nats_eio.Service.Stats.num_requests endpoint);
+                  equal int64 0L
+                    (Nats_eio.Service.Stats.num_errors endpoint);
+                  equal string "" (Nats_eio.Service.Stats.last_error endpoint);
+                  equal int64 0L
+                    (Nats_eio.Service.Stats.processing_time endpoint)
+              | [] -> fail "reset removed service endpoints");
               expect_connection_ok (Nats_eio.Connection.close connection);
               expect_ok (Nats_eio.Service.stop service);
+              equal bool true (Nats_eio.Service.stopped service);
               expect_ok (Nats_eio.Service.stop service);
               (match
                  Nats_eio.Service.Group.add_group group ~name:"after-stop"
@@ -722,6 +780,97 @@ let () =
               | Error error ->
                   fail (Format.asprintf "%a" Nats_eio.Service.Error.pp error)
               | Ok _ -> fail "nested group was added after service stop");
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "endpoint pending limits terminate slow consumers" (fun () ->
+          let first, first_u = Eio.Promise.create () in
+          let second, second_u = Eio.Promise.create () in
+          let third, third_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await first;
+                `Await second;
+                `Await third;
+                `Await hold;
+              ]
+            (fun ~sw ~clock ~trace connection ->
+              let config =
+                expect_config
+                  (Nats_eio.Service.Config.v ~name:"orders" ~version:"1.2.3"
+                     ())
+              in
+              let service =
+                expect_service (Nats_eio.Service.v ~sw ~clock connection config)
+              in
+              let limits =
+                expect_ok
+                  (Nats_eio.Service.Endpoint.Pending_limits.v ~messages:1
+                     ~bytes:(-1))
+              in
+              let first_started, first_started_u = Eio.Promise.create () in
+              let second_handled, second_handled_u = Eio.Promise.create () in
+              let release_first, release_first_u = Eio.Promise.create () in
+              let calls = ref 0 in
+              let endpoint =
+                expect_endpoint
+                  (Nats_eio.Service.Endpoint.v ~name:"limited"
+                     ~pending_limits:limits (fun request ->
+                       ignore
+                         (Nats_eio.Service.Request.payload request);
+                       incr calls;
+                       if Int.equal !calls 1 then (
+                         Eio.Promise.resolve first_started_u ();
+                         Eio.Promise.await release_first;
+                         Ok ())
+                       else (
+                         Eio.Promise.resolve second_handled_u ();
+                         Ok ())))
+              in
+              expect_ok (Nats_eio.Service.add_endpoint service endpoint);
+              Eio.Promise.resolve first_u
+                (Ok
+                   (request_wire ~sid:10 ~subject:"limited"
+                      ~reply:"_INBOX.first" "one"));
+              Eio.Promise.await first_started;
+              Eio.Promise.resolve second_u
+                (Ok
+                   (request_wire ~sid:10 ~subject:"limited"
+                      ~reply:"_INBOX.second" "two"));
+              Eio.Promise.resolve third_u
+                (Ok
+                   (request_wire ~sid:10 ~subject:"limited"
+                      ~reply:"_INBOX.third" "three"));
+              yield_n 4;
+              Eio.Promise.resolve release_first_u ();
+              Eio.Promise.await second_handled;
+              let failure = ref None in
+              for attempt = 0 to 32 do
+                match !failure with
+                | Some _ -> ()
+                | None -> (
+                    match
+                      Nats_eio.Service.add_group service
+                        ~name:("probe" ^ string_of_int attempt)
+                    with
+                    | Ok _ -> Eio.Fiber.yield ()
+                    | Error error -> failure := Some error)
+              done;
+              (match !failure with
+              | Some
+                  (Nats_eio.Service.Error.Connection
+                     (Nats_eio.Error.Slow_consumer
+                        (Nats_eio.Error.Subscription _))) ->
+                  ()
+              | Some error ->
+                  fail
+                    (Format.asprintf
+                       "unexpected endpoint failure after pending overflow: %a\n%s"
+                       Nats_eio.Service.Error.pp error (Buffer.contents trace))
+              | None -> fail "endpoint pending overflow did not fail service");
+              equal bool false (Nats_eio.Service.stopped service);
+              expect_connection_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "replayable service subscriptions survive reconnect" (fun () ->
           let disconnect, disconnect_u = Eio.Promise.create () in
