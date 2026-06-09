@@ -70,15 +70,15 @@ by the current Core request/reply and subscription primitives.
 
 ### Partial or missing stream capabilities
 
-The Go `jetstream.StreamConfig` can also express:
+The OCaml projection now also covers maximum consumers, discard-new-per-subject,
+no-ack streams, duplicate windows, deny-purge, initial sequence, and stream-level
+consumer limits. Their constructors validate the server's local invariants, and
+the stream wire tests cover create, response decoding, update preservation, and
+boundary failures.
 
-- maximum consumers and discard-new-per-subject;
-- no-ack streams and duplicate windows;
-- newer placement metadata/options;
-- deny-purge and initial sequence;
-- stream-level consumer limits;
-- per-message TTL/counter support, scheduled messages, atomic/batched publish
-  feature flags, and newer persistence settings.
+The remaining Go `jetstream.StreamConfig` gaps are newer placement
+metadata/options, per-message TTL/counter support, scheduled messages, atomic or
+batched publish feature flags, and newer persistence settings.
 
 The OCaml projection now also configures mirrors, sources, source filters and
 subject transforms, input subject transforms, republish rules, cross-account
@@ -180,10 +180,7 @@ added as unstructured mutable hooks.
 
 ## Prioritized follow-up
 
-1. **Stream configuration expansion.** Add maximum-consumer/discard policy,
-   no-ack, duplicate-window, deny-purge, initial-sequence, and consumer-limit
-   fields before the newer server-only configuration fields.
-2. **Transport and service breadth.** Add WebSocket as a separate adapter and
+1. **Transport and service breadth.** Add WebSocket as a separate adapter and
    service reset/stopped/pending-limit behavior after the protocol gaps above.
 
 This ordering keeps the narrow protocol waist intact, gives each addition a

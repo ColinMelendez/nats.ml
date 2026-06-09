@@ -7,6 +7,8 @@ module Error : sig
     | Empty_subjects
     | Invalid_limit of { field : string; value : int64 }
     | Invalid_max_age
+    | Invalid_duplicate_window
+    | Invalid_first_sequence of int64
     | Invalid_subject_delete_marker_ttl
     | Invalid_replicas of int
     | Empty_placement
@@ -14,6 +16,9 @@ module Error : sig
     | Empty_placement_tag
     | Mirror_and_sources
     | Mirror_and_subjects
+    | Mirror_and_first_sequence
+    | Invalid_discard_new_per_subject
+    | Deny_purge_and_rollup
     | Source_filter_and_transforms
     | Invalid_source_start
     | Invalid_source_start_sequence of int64
@@ -187,6 +192,24 @@ module Stream : sig
       val tags : t -> string list
     end
 
+    module Consumer_limits : sig
+      type t
+      type error = Error.config
+
+      val v :
+        ?inactive_threshold:Mtime.Span.t ->
+        ?max_ack_pending:int ->
+        unit ->
+        (t, error) result
+      (** [v ?inactive_threshold ?max_ack_pending ()] limits the defaults that
+          consumers inherit from this stream. A zero duration or zero pending
+          count means that the stream leaves that consumer setting unspecified;
+          [-1] keeps the server's unlimited pending-ack value. *)
+
+      val inactive_threshold : t -> Mtime.Span.t option
+      val max_ack_pending : t -> int option
+    end
+
     module Transform : sig
       type t
       (** A subject mapping used by a stream, source, or republish rule. *)
@@ -294,6 +317,10 @@ module Stream : sig
       ?max_bytes:int64 ->
       ?max_age:Mtime.Span.t ->
       ?max_msg_size:int64 ->
+      ?max_consumers:int ->
+      ?discard_new_per_subject:bool ->
+      ?no_ack:bool ->
+      ?duplicate_window:Mtime.Span.t ->
       ?allow_msg_ttl:bool ->
       ?allow_atomic_publish:bool ->
       ?allow_msg_schedules:bool ->
@@ -302,6 +329,9 @@ module Stream : sig
       ?allow_rollup:bool ->
       ?allow_direct:bool ->
       ?deny_delete:bool ->
+      ?deny_purge:bool ->
+      ?first_sequence:int64 ->
+      ?consumer_limits:Consumer_limits.t ->
       ?sealed:bool ->
       unit ->
       (t, error) result
@@ -336,6 +366,10 @@ module Stream : sig
     val max_bytes : t -> int64 option
     val max_age : t -> Mtime.Span.t option
     val max_msg_size : t -> int64 option
+    val max_consumers : t -> int option
+    val discard_new_per_subject : t -> bool
+    val no_ack : t -> bool
+    val duplicate_window : t -> Mtime.Span.t option
     val allow_msg_ttl : t -> bool
     val allow_atomic_publish : t -> bool
     val allow_msg_schedules : t -> bool
@@ -350,6 +384,16 @@ module Stream : sig
     val deny_delete : t -> bool
     (** [deny_delete config] is [true] when stream-level message deletion is
         rejected. *)
+
+    val deny_purge : t -> bool
+    (** [deny_purge config] is [true] when purging the stream is rejected. *)
+
+    val first_sequence : t -> int64 option
+    (** [first_sequence config] is the first sequence retained when the stream
+        is initialized, if explicitly configured. *)
+
+    val consumer_limits : t -> Consumer_limits.t option
+    (** [consumer_limits config] contains stream-level consumer defaults. *)
 
     val sealed : t -> bool
     (** [sealed config] is [true] when the stream rejects further writes. *)
@@ -426,6 +470,23 @@ module Stream : sig
     (** [with_max_msg_size config value] validates and replaces the per-message
         size limit. [None] means unlimited. *)
 
+    val with_max_consumers : t -> int option -> (t, error) result
+    (** [with_max_consumers config value] replaces the stream consumer limit.
+        [None] means unlimited. *)
+
+    val with_discard_new_per_subject : t -> bool -> (t, error) result
+    (** [with_discard_new_per_subject config value] replaces per-subject
+        rejection when the stream uses [New] discard policy. *)
+
+    val with_no_ack : t -> bool -> (t, error) result
+    (** [with_no_ack config value] replaces whether the stream disables message
+        acknowledgements. *)
+
+    val with_duplicate_window :
+      t -> Mtime.Span.t option -> (t, error) result
+    (** [with_duplicate_window config value] replaces the duplicate detection
+        window. [None] requests the server default. *)
+
     val with_allow_msg_ttl : t -> bool -> (t, error) result
     (** [with_allow_msg_ttl config value] replaces whether message-level TTL
         headers are accepted by the stream. *)
@@ -458,6 +519,19 @@ module Stream : sig
     val with_deny_delete : t -> bool -> (t, error) result
     (** [with_deny_delete config value] replaces whether deleting the stream's
         messages through the stream API is rejected. *)
+
+    val with_deny_purge : t -> bool -> (t, error) result
+    (** [with_deny_purge config value] replaces whether purging the stream is
+        rejected. *)
+
+    val with_first_sequence : t -> int64 option -> (t, error) result
+    (** [with_first_sequence config value] replaces the initial retained
+        sequence. [None] leaves the server default. *)
+
+    val with_consumer_limits :
+      t -> Consumer_limits.t option -> (t, error) result
+    (** [with_consumer_limits config value] replaces stream-level consumer
+        defaults. *)
 
     val with_sealed : t -> bool -> (t, error) result
     (** [with_sealed config value] replaces the stream sealed flag. *)

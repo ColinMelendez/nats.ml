@@ -650,6 +650,195 @@ let () =
               fail
                 (Format.asprintf "unexpected replica error: %a"
                    Nats_eio.Jetstream.Error.pp_config error));
+      test "stream policy controls match the server configuration model" (fun () ->
+          let subject = Nats.Subject.Filter.literal "orders.>" in
+          let duplicate_window = Mtime.Span.of_uint64_ns 2_000_000_000L in
+          let inactive_threshold = Mtime.Span.of_uint64_ns 30_000_000_000L in
+          let consumer_limits =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.Consumer_limits.v
+                 ~inactive_threshold ~max_ack_pending:1000 ())
+          in
+          let config =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.v ~name:"ORDERS"
+                 ~subjects:[ subject ] ~discard:Nats_eio.Jetstream.Stream.Config.New
+                 ~max_msgs_per_subject:10L ~max_consumers:12
+                 ~discard_new_per_subject:true ~no_ack:true ~duplicate_window
+                 ~deny_purge:true ~first_sequence:3L
+                 ~consumer_limits ())
+          in
+          equal (option int) (Some 12)
+            (Nats_eio.Jetstream.Stream.Config.max_consumers config);
+          equal bool true
+            (Nats_eio.Jetstream.Stream.Config.discard_new_per_subject config);
+          equal bool true (Nats_eio.Jetstream.Stream.Config.no_ack config);
+          (match
+             Nats_eio.Jetstream.Stream.Config.duplicate_window config
+           with
+          | Some value -> equal bool true (Mtime.Span.equal value duplicate_window)
+          | None -> fail "stream config lost duplicate window");
+          equal bool true (Nats_eio.Jetstream.Stream.Config.deny_purge config);
+          equal (option int64) (Some 3L)
+            (Nats_eio.Jetstream.Stream.Config.first_sequence config);
+          (match
+             Nats_eio.Jetstream.Stream.Config.consumer_limits config
+           with
+          | None -> fail "stream config lost consumer limits"
+          | Some value ->
+              (match
+                 Nats_eio.Jetstream.Stream.Config.Consumer_limits.inactive_threshold
+                   value
+               with
+              | Some span -> equal bool true (Mtime.Span.equal span inactive_threshold)
+              | None -> fail "stream config lost inactive threshold");
+              equal (option int) (Some 1000)
+                (Nats_eio.Jetstream.Stream.Config.Consumer_limits.max_ack_pending
+                   value));
+          let cleared =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_max_consumers config None)
+          in
+          equal (option int) None
+            (Nats_eio.Jetstream.Stream.Config.max_consumers cleared);
+          let cleared =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_duplicate_window cleared
+                 None)
+          in
+          (match
+             Nats_eio.Jetstream.Stream.Config.duplicate_window cleared
+           with
+          | None -> ()
+          | Some _ -> fail "stream updater retained duplicate window");
+          let cleared =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_first_sequence cleared None)
+          in
+          equal (option int64) None
+            (Nats_eio.Jetstream.Stream.Config.first_sequence cleared);
+          let cleared =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_consumer_limits cleared None)
+          in
+          (match
+             Nats_eio.Jetstream.Stream.Config.consumer_limits cleared
+           with
+          | None -> ()
+          | Some _ -> fail "stream updater retained consumer limits");
+          (match
+             Nats_eio.Jetstream.Stream.Config.v ~name:"invalid"
+               ~subjects:[ subject ]
+               ~duplicate_window:(Mtime.Span.of_uint64_ns 50_000_000L) ()
+           with
+          | Error Nats_eio.Jetstream.Error.Invalid_duplicate_window -> ()
+          | Ok _ -> fail "stream accepted a duplicate window below 100ms"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected duplicate-window error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
+          (match
+             Nats_eio.Jetstream.Stream.Config.v ~name:"invalid"
+               ~subjects:[ subject ] ~discard_new_per_subject:true ()
+           with
+          | Error Nats_eio.Jetstream.Error.Invalid_discard_new_per_subject -> ()
+          | Ok _ -> fail "stream accepted discard-new-per-subject without a limit"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected discard policy error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
+          (match
+            Nats_eio.Jetstream.Stream.Config.v ~name:"invalid"
+              ~subjects:[ subject ] ~allow_rollup:true ~deny_purge:true ()
+          with
+          | Error Nats_eio.Jetstream.Error.Deny_purge_and_rollup -> ()
+          | Ok _ -> fail "stream accepted deny-purge with rollup headers"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected purge policy error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
+          List.iter
+            (fun max_consumers ->
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Stream.Config.v ~name:"ORDERS"
+                     ~subjects:[ subject ] ~max_consumers ())
+              in
+              equal (option int) None
+                (Nats_eio.Jetstream.Stream.Config.max_consumers config))
+            [ -1; 0 ];
+          ignore (expect_jetstream_config_ok
+            (Nats_eio.Jetstream.Stream.Config.v ~name:"ORDERS"
+               ~subjects:[ subject ]
+               ~duplicate_window:(Mtime.Span.of_uint64_ns 100_000_000L) ()));
+          (match
+             Nats_eio.Jetstream.Stream.Config.v ~name:"invalid"
+               ~subjects:[ subject ]
+               ~max_age:(Mtime.Span.of_uint64_ns 50_000_000L)
+               ~duplicate_window:(Mtime.Span.of_uint64_ns 100_000_000L) ()
+           with
+          | Error Nats_eio.Jetstream.Error.Invalid_duplicate_window -> ()
+          | Ok _ -> fail "stream accepted a duplicate window above max age"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected duplicate age error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
+          let mirror_source =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.Source.v ~name:"ORDERS" ())
+          in
+          (match
+             Nats_eio.Jetstream.Stream.Config.v ~name:"invalid"
+               ~subjects:[] ~mirror:mirror_source ~first_sequence:3L ()
+           with
+          | Error Nats_eio.Jetstream.Error.Mirror_and_first_sequence -> ()
+          | Ok _ -> fail "mirror accepted an initial sequence"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected mirror sequence error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
+          (match
+             Nats_eio.Jetstream.Stream.Config.Consumer_limits.v
+               ~max_ack_pending:(-2) ()
+           with
+          | Error
+              (Nats_eio.Jetstream.Error.Invalid_consumer_limit
+                { field = "max_ack_pending"; value = -2L }) ->
+              ()
+          | Ok _ -> fail "consumer limits accepted pending-ack value -2"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected consumer limit error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error)));
+      test "stream wire rejects negative duplicate windows" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Stream.info stream));
+              yield_n 5;
+              Eio.Promise.resolve response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"config":{"name":"ORDERS","storage":"memory","retention":"limits","discard":"old","duplicate_window":-1},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}));
+              expect_jetstream_error (Eio.Promise.await result) (function
+                | Nats_eio.Jetstream.Error.Invalid_config
+                    Nats_eio.Jetstream.Error.Invalid_duplicate_window ->
+                    true
+                | _ -> false);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream source configuration is typed and composable" (fun () ->
           let filter = Nats.Subject.Filter.literal "orders.*" in
           let transform =
@@ -761,7 +950,7 @@ let () =
           | None -> fail "stream config lost republish");
       test "stream source fields use the JetStream wire contract" (fun () ->
           let info_payload =
-            {|{"config":{"name":"ARCHIVE","subjects":[],"storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":-1,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":false,"allow_direct":false,"mirror_direct":true,"sources":[{"name":"ORDERS","opt_start_time":"2026-08-16T12:00:00.000000000Z","subject_transforms":[{"src":"orders.*","dest":"archive.{{wildcard(1)}}","transform_extra":true}],"external":{"api":"$JS.eu.API","deliver":"$JS.eu.DELIVER","external_extra":"kept"},"source_extra":"kept"}],"republish":{"src":"orders.>","dest":"archive.>","headers_only":true,"republish_extra":true}},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}
+            {|{"config":{"name":"ARCHIVE","subjects":[],"storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":-1,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"max_consumers":12,"no_ack":true,"duplicate_window":2000000000,"first_seq":3,"consumer_limits":{"inactive_threshold":1000000000,"max_ack_pending":100,"limits_extra":"kept"},"allow_rollup_hdrs":false,"allow_direct":false,"mirror_direct":true,"sources":[{"name":"ORDERS","opt_start_time":"2026-08-16T12:00:00.000000000Z","subject_transforms":[{"src":"orders.*","dest":"archive.{{wildcard(1)}}","transform_extra":true}],"external":{"api":"$JS.eu.API","deliver":"$JS.eu.DELIVER","external_extra":"kept"},"source_extra":"kept"}],"republish":{"src":"orders.>","dest":"archive.>","headers_only":true,"republish_extra":true}},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}
           in
           let make_response ~sid =
             Ok (consumer_info_wire_with_sid ~sid info_payload)
@@ -874,6 +1063,27 @@ let () =
                 expect_jetstream_ok (Eio.Promise.await info_result)
               in
               let config = Nats_eio.Jetstream.Stream.Info.config info in
+              equal (option int) (Some 12)
+                (Nats_eio.Jetstream.Stream.Config.max_consumers config);
+              equal bool true (Nats_eio.Jetstream.Stream.Config.no_ack config);
+              equal (option int64) (Some 3L)
+                (Nats_eio.Jetstream.Stream.Config.first_sequence config);
+              (match
+                 Nats_eio.Jetstream.Stream.Config.duplicate_window config
+               with
+              | Some value ->
+                  equal bool true
+                    (Mtime.Span.equal value
+                       (Mtime.Span.of_uint64_ns 2_000_000_000L))
+              | None -> fail "stream response lost duplicate window");
+              (match
+                 Nats_eio.Jetstream.Stream.Config.consumer_limits config
+               with
+              | Some limits ->
+                  equal (option int) (Some 100)
+                    (Nats_eio.Jetstream.Stream.Config.Consumer_limits.max_ack_pending
+                       limits)
+              | None -> fail "stream response lost consumer limits");
               let source =
                 match Nats_eio.Jetstream.Stream.Config.sources config with
                 | [ source ] -> source
@@ -920,6 +1130,11 @@ let () =
                 not
                   (contains_substring ~needle:"republish_extra\\\":true" trace)
               then fail "stream update discarded the republish unknown field";
+              if
+                not
+                  (contains_substring
+                     ~needle:"limits_extra\\\":\\\"kept\\\"" trace)
+              then fail "stream update discarded nested consumer-limit fields";
               Eio.Promise.resolve update_response_u (make_response ~sid:4);
               ignore (expect_jetstream_ok (Eio.Promise.await update_result));
               expect_ok (Nats_eio.Connection.close connection);
@@ -1972,11 +2187,22 @@ let () =
               let jetstream =
                 expect_jetstream_ok (Nats_eio.Jetstream.v connection)
               in
+              let consumer_limits =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Stream.Config.Consumer_limits.v
+                     ~inactive_threshold:(Mtime.Span.of_uint64_ns 1_000_000_000L)
+                     ~max_ack_pending:100 ())
+              in
               let config =
                 expect_jetstream_config_ok
                   (Nats_eio.Jetstream.Stream.Config.v ~name:"KV_users"
                      ~subjects:[ Nats.Subject.Filter.literal "$KV.users.>" ]
-                     ~description:"user values" ~max_msgs_per_subject:5L
+                     ~description:"user values"
+                     ~discard:Nats_eio.Jetstream.Stream.Config.New
+                     ~max_msgs_per_subject:5L ~max_consumers:12
+                     ~discard_new_per_subject:true ~no_ack:true
+                     ~duplicate_window:(Mtime.Span.of_uint64_ns 2_000_000_000L)
+                     ~first_sequence:3L ~consumer_limits
                      ~allow_rollup:true ~allow_direct:true ~deny_delete:true
                      ~replicas:3
                      ~compression:Nats_eio.Jetstream.Stream.Config.S2
@@ -2008,6 +2234,29 @@ let () =
               then fail "stream create omitted the direct-read flag";
               if not (contains_substring ~needle:"deny_delete\\\":true" trace)
               then fail "stream create omitted the deny-delete flag";
+              if not (contains_substring ~needle:"deny_purge\\\":false" trace)
+              then fail "stream create omitted the deny-purge false value";
+              if not (contains_substring ~needle:"max_consumers\\\":12" trace)
+              then fail "stream create omitted the max-consumers limit";
+              if
+                not
+                  (contains_substring
+                     ~needle:"discard_new_per_subject\\\":true" trace)
+              then fail "stream create omitted the per-subject discard flag";
+              if not (contains_substring ~needle:"no_ack\\\":true" trace)
+              then fail "stream create omitted the no-ack flag";
+              if
+                not
+                  (contains_substring
+                     ~needle:"duplicate_window\\\":2000000000" trace)
+              then fail "stream create omitted the duplicate window";
+              if not (contains_substring ~needle:"first_seq\\\":3" trace)
+              then fail "stream create omitted the first sequence";
+              if
+                not
+                  (contains_substring
+                     ~needle:"consumer_limits\\\":{" trace)
+              then fail "stream create omitted consumer limits";
               if not (contains_substring ~needle:"num_replicas\\\":3" trace)
               then fail "stream create omitted the replica count";
               if not (contains_substring ~needle:"compression\\\":\\\"s2" trace)
@@ -2101,6 +2350,8 @@ let () =
               if not (contains_substring ~needle:"allow_direct\\\":true" trace)
               then
                 fail "stream update did not emit the changed direct-read flag";
+              if not (contains_substring ~needle:"no_ack\\\":false" trace)
+              then fail "stream update omitted the no-ack false value";
               if count_substring ~needle:"num_replicas\\\":2" trace < 1 then
                 fail "stream update did not replace the replica count";
               if count_substring ~needle:"sealed\\\":true" trace < 2 then

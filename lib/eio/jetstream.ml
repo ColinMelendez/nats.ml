@@ -8,6 +8,8 @@ module Error = struct
     | Empty_subjects
     | Invalid_limit of { field : string; value : int64 }
     | Invalid_max_age
+    | Invalid_duplicate_window
+    | Invalid_first_sequence of int64
     | Invalid_subject_delete_marker_ttl
     | Invalid_replicas of int
     | Empty_placement
@@ -15,6 +17,9 @@ module Error = struct
     | Empty_placement_tag
     | Mirror_and_sources
     | Mirror_and_subjects
+    | Mirror_and_first_sequence
+    | Invalid_discard_new_per_subject
+    | Deny_purge_and_rollup
     | Source_filter_and_transforms
     | Invalid_source_start
     | Invalid_source_start_sequence of int64
@@ -99,6 +104,12 @@ module Error = struct
         Format.fprintf ppf "invalid %s limit %Ld" field value
     | Invalid_max_age ->
         Format.pp_print_string ppf "stream max age must not be negative"
+    | Invalid_duplicate_window ->
+        Format.pp_print_string ppf
+          "stream duplicate window must be at least 100ms and no greater than max age"
+    | Invalid_first_sequence value ->
+        Format.fprintf ppf "stream first sequence must not be negative, got %Ld"
+          value
     | Invalid_subject_delete_marker_ttl ->
         Format.pp_print_string ppf
           "stream subject delete marker TTL must be positive"
@@ -118,6 +129,15 @@ module Error = struct
     | Mirror_and_subjects ->
         Format.pp_print_string ppf
           "a mirror stream cannot also capture configured subjects"
+    | Mirror_and_first_sequence ->
+        Format.pp_print_string ppf
+          "a mirror stream cannot configure an initial sequence"
+    | Invalid_discard_new_per_subject ->
+        Format.pp_print_string ppf
+          "discard-new-per-subject requires discard-new and a positive per-subject message limit"
+    | Deny_purge_and_rollup ->
+        Format.pp_print_string ppf
+          "a stream cannot allow rollup headers while purge is denied"
     | Source_filter_and_transforms ->
         Format.pp_print_string ppf
           "a stream source cannot combine a filter with subject transforms"
@@ -900,6 +920,49 @@ module Stream = struct
       let with_unknown value unknown = { value with unknown }
     end
 
+    let normalize_span = function
+      | Some value when Int.equal (Mtime.Span.compare value Mtime.Span.zero) 0
+        ->
+          None
+      | value -> value
+
+    module Consumer_limits = struct
+      type t = {
+        inactive_threshold : Mtime.Span.t option;
+        max_ack_pending : int option;
+        unknown : Jsont.json;
+      }
+
+      type error = config_error
+
+      let v ?inactive_threshold ?max_ack_pending () =
+        let inactive_threshold = normalize_span inactive_threshold in
+        let max_ack_pending =
+          match max_ack_pending with Some 0 -> None | value -> value
+        in
+        match inactive_threshold with
+        | Some value when Mtime.Span.compare value Mtime.Span.zero < 0 ->
+            Error (Error.Invalid_consumer_span { field = "inactive_threshold" })
+        | _ -> (
+            match max_ack_pending with
+            | Some value when value < -1 ->
+                Error
+                  (Error.Invalid_consumer_limit
+                     { field = "max_ack_pending"; value = Int64.of_int value })
+            | _ ->
+                Ok
+                  {
+                    inactive_threshold;
+                    max_ack_pending;
+                    unknown = Jsont.Json.object' [];
+                  })
+
+      let inactive_threshold value = value.inactive_threshold
+      let max_ack_pending value = value.max_ack_pending
+      let unknown value = value.unknown
+      let with_unknown value unknown = { value with unknown }
+    end
+
     type t = {
       name : string;
       subjects : Nats.Subject.Filter.t list;
@@ -921,6 +984,10 @@ module Stream = struct
       max_bytes : int64 option;
       max_age : Mtime.Span.t option;
       max_msg_size : int64 option;
+      max_consumers : int option;
+      discard_new_per_subject : bool;
+      no_ack : bool;
+      duplicate_window : Mtime.Span.t option;
       allow_msg_ttl : bool;
       allow_atomic_publish : bool;
       allow_msg_schedules : bool;
@@ -929,6 +996,9 @@ module Stream = struct
       allow_rollup : bool;
       allow_direct : bool;
       deny_delete : bool;
+      deny_purge : bool;
+      first_sequence : int64 option;
+      consumer_limits : Consumer_limits.t option;
       sealed : bool;
     }
 
@@ -943,23 +1013,19 @@ module Stream = struct
       if value < 1 || value > 5 then Error (Error.Invalid_replicas value)
       else Ok ()
 
-    let normalize_span = function
-      | Some value when Int.equal (Mtime.Span.compare value Mtime.Span.zero) 0
-        ->
-          None
-      | value -> value
-
     let v_internal ~allow_empty_subjects ~name ~subjects ?description
         ?(storage = File) ?(replicas = 1) ?placement
         ?mirror ?(sources = []) ?subject_transform ?republish
         ?(mirror_direct = false)
         ?(compression = Uncompressed) ?(metadata = []) ?(retention = Limits)
         ?(discard = Old) ?max_msgs ?max_msgs_per_subject ?max_bytes ?max_age
-        ?max_msg_size ?(allow_msg_ttl = false) ?(allow_atomic_publish = false)
-        ?(allow_msg_schedules = false) ?(allow_batch_publish = false)
-        ?subject_delete_marker_ttl
+        ?max_msg_size ?max_consumers ?(discard_new_per_subject = false)
+        ?(no_ack = false) ?duplicate_window ?(allow_msg_ttl = false)
+        ?(allow_atomic_publish = false) ?(allow_msg_schedules = false)
+        ?(allow_batch_publish = false) ?subject_delete_marker_ttl
         ?(allow_rollup = false) ?(allow_direct = false) ?(deny_delete = false)
-        ?(sealed = false) () =
+        ?(deny_purge = false) ?first_sequence ?consumer_limits ?(sealed = false)
+        () =
       let max_age =
         match max_age with
         | Some value when Int.equal (Mtime.Span.compare value Mtime.Span.zero) 0
@@ -970,99 +1036,154 @@ module Stream = struct
       let subject_delete_marker_ttl =
         normalize_span subject_delete_marker_ttl
       in
+      let duplicate_window = normalize_span duplicate_window in
+      let max_consumers =
+        match max_consumers with
+        | Some (-1 | 0) -> None
+        | value -> value
+      in
+      let first_sequence =
+        match first_sequence with Some 0L -> None | value -> value
+      in
       let allow_empty_subjects =
         allow_empty_subjects || Option.is_some mirror
         || List.length sources > 0
       in
-      match validate_name name with
-      | Error error -> Error error
-      | Ok () when Option.is_some mirror && List.length sources > 0 ->
-          Error Error.Mirror_and_sources
-      | Ok () when Option.is_some mirror && List.length subjects > 0 ->
-          Error Error.Mirror_and_subjects
-      | Ok ()
-        when Int.equal (List.length subjects) 0 && not allow_empty_subjects ->
+      let ( let* ) value f =
+        match value with Error error -> Error error | Ok value -> f value
+      in
+      let* () = validate_name name in
+      let* () =
+        match (mirror, sources) with
+        | Some _, _ :: _ -> Error Error.Mirror_and_sources
+        | _ -> Ok ()
+      in
+      let* () =
+        match (mirror, subjects) with
+        | Some _, _ :: _ -> Error Error.Mirror_and_subjects
+        | _ -> Ok ()
+      in
+      let* () =
+        if Int.equal (List.length subjects) 0 && not allow_empty_subjects then
           Error Error.Empty_subjects
-      | Ok () -> (
-          match validate_replicas replicas with
-          | Error error -> Error error
-          | Ok () -> (
-              match validate_limit "max_msgs" max_msgs with
-              | Error error -> Error error
-              | Ok () -> (
-                  match validate_limit "max_bytes" max_bytes with
-                  | Error error -> Error error
-                  | Ok () -> (
-                      match
-                        validate_limit "max_msgs_per_subject"
-                          max_msgs_per_subject
-                      with
-                      | Error error -> Error error
-                      | Ok () -> (
-                          match validate_limit "max_msg_size" max_msg_size with
-                          | Error error -> Error error
-                          | Ok () -> (
-                              match max_age with
-                              | Some value
-                                when Mtime.Span.compare value Mtime.Span.zero
-                                     < 0 ->
-                                  Error Error.Invalid_max_age
-                              | _ -> (
-                                  match subject_delete_marker_ttl with
-                                  | Some value
-                                    when Mtime.Span.compare value
-                                           Mtime.Span.zero
-                                         <= 0 ->
-                                      Error
-                                        Error.Invalid_subject_delete_marker_ttl
-                                  | _ ->
-                                      Ok
-                                        {
-                                          name;
-                                          subjects;
-                                          description;
-                                          storage;
-                                          replicas;
-                                          placement;
-                                          mirror;
-                                          sources;
-                                          subject_transform;
-                                          republish;
-                                          mirror_direct;
-                                          compression;
-                                          metadata;
-                                          retention;
-                                          discard;
-                                          max_msgs;
-                                          max_msgs_per_subject;
-                                          max_bytes;
-                                          max_age;
-                                          max_msg_size;
-                                          allow_msg_ttl;
-                                          allow_atomic_publish;
-                                          allow_msg_schedules;
-                                          allow_batch_publish;
-                                          subject_delete_marker_ttl;
-                                          allow_rollup;
-                                          allow_direct;
-                                          deny_delete;
-                                          sealed;
-                                        })))))))
+        else Ok ()
+      in
+      let* () = validate_replicas replicas in
+      let* () = validate_limit "max_msgs" max_msgs in
+      let* () = validate_limit "max_bytes" max_bytes in
+      let* () = validate_limit "max_msgs_per_subject" max_msgs_per_subject in
+      let* () = validate_limit "max_msg_size" max_msg_size in
+      let* () =
+        match max_consumers with
+        | None -> Ok ()
+        | Some value when value >= -1 -> Ok ()
+        | Some value ->
+            Error
+              (Error.Invalid_limit
+                 { field = "max_consumers"; value = Int64.of_int value })
+      in
+      let* () =
+        match max_age with
+        | Some value when Mtime.Span.compare value Mtime.Span.zero < 0 ->
+            Error Error.Invalid_max_age
+        | _ -> Ok ()
+      in
+      let* () =
+        match (duplicate_window, max_age) with
+        | None, _ -> Ok ()
+        | Some value, _
+          when Mtime.Span.compare value Mtime.Span.zero < 0
+               || Mtime.Span.compare value
+                    (Mtime.Span.of_uint64_ns 100_000_000L)
+                  < 0 ->
+            Error Error.Invalid_duplicate_window
+        | Some value, Some max_age
+          when Mtime.Span.compare value max_age > 0 ->
+            Error Error.Invalid_duplicate_window
+        | Some _, _ -> Ok ()
+      in
+      let* () =
+        match subject_delete_marker_ttl with
+        | Some value when Mtime.Span.compare value Mtime.Span.zero <= 0 ->
+            Error Error.Invalid_subject_delete_marker_ttl
+        | _ -> Ok ()
+      in
+      let* () =
+        if discard_new_per_subject then
+          match (discard, max_msgs_per_subject) with
+          | New, Some value when Int64.compare value 0L > 0 -> Ok ()
+          | _ -> Error Error.Invalid_discard_new_per_subject
+        else Ok ()
+      in
+      let* () =
+        if deny_purge && allow_rollup then Error Error.Deny_purge_and_rollup
+        else Ok ()
+      in
+      let* () =
+        match first_sequence with
+        | Some value when Int64.compare value 0L < 0 ->
+            Error (Error.Invalid_first_sequence value)
+        | Some value when Option.is_some mirror && not (Int64.equal value 0L) ->
+            Error Error.Mirror_and_first_sequence
+        | _ -> Ok ()
+      in
+      Ok
+        {
+          name;
+          subjects;
+          description;
+          storage;
+          replicas;
+          placement;
+          mirror;
+          sources;
+          subject_transform;
+          republish;
+          mirror_direct;
+          compression;
+          metadata;
+          retention;
+          discard;
+          max_msgs;
+          max_msgs_per_subject;
+          max_bytes;
+          max_age;
+          max_msg_size;
+          max_consumers;
+          discard_new_per_subject;
+          no_ack;
+          duplicate_window;
+          allow_msg_ttl;
+          allow_atomic_publish;
+          allow_msg_schedules;
+          allow_batch_publish;
+          subject_delete_marker_ttl;
+          allow_rollup;
+          allow_direct;
+          deny_delete;
+          deny_purge;
+          first_sequence;
+          consumer_limits;
+          sealed;
+        }
 
     let v ~name ~subjects ?description ?storage ?replicas ?placement ?mirror
         ?sources ?subject_transform ?republish ?mirror_direct ?compression
         ?metadata ?retention ?discard ?max_msgs
-        ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size ?allow_msg_ttl
+        ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size ?max_consumers
+        ?discard_new_per_subject ?no_ack ?duplicate_window ?allow_msg_ttl
         ?allow_atomic_publish ?allow_msg_schedules ?allow_batch_publish
         ?subject_delete_marker_ttl ?allow_rollup ?allow_direct ?deny_delete
-        ?sealed () =
+        ?deny_purge ?first_sequence ?consumer_limits ?sealed () =
       v_internal ~allow_empty_subjects:false ~name ~subjects ?description
         ?storage ?replicas ?placement ?mirror ?sources ?subject_transform
         ?republish ?mirror_direct ?compression ?metadata ?retention ?discard
         ?max_msgs ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size
+        ?max_consumers ?discard_new_per_subject ?no_ack ?duplicate_window
         ?allow_msg_ttl ?allow_atomic_publish ?allow_msg_schedules
         ?allow_batch_publish ?subject_delete_marker_ttl ?allow_rollup
-        ?allow_direct ?deny_delete ?sealed ()
+        ?allow_direct ?deny_delete ?deny_purge ?first_sequence ?consumer_limits
+        ?sealed ()
 
     let name value = value.name
     let subjects value = value.subjects
@@ -1084,6 +1205,10 @@ module Stream = struct
     let max_bytes value = value.max_bytes
     let max_age value = value.max_age
     let max_msg_size value = value.max_msg_size
+    let max_consumers value = value.max_consumers
+    let discard_new_per_subject value = value.discard_new_per_subject
+    let no_ack value = value.no_ack
+    let duplicate_window value = value.duplicate_window
     let allow_msg_ttl value = value.allow_msg_ttl
     let allow_atomic_publish value = value.allow_atomic_publish
     let allow_msg_schedules value = value.allow_msg_schedules
@@ -1092,12 +1217,17 @@ module Stream = struct
     let allow_rollup value = value.allow_rollup
     let allow_direct value = value.allow_direct
     let deny_delete value = value.deny_delete
+    let deny_purge value = value.deny_purge
+    let first_sequence value = value.first_sequence
+    let consumer_limits value = value.consumer_limits
     let sealed value = value.sealed
 
     let rebuild ?sealed ?replicas ?placement ?mirror ?sources ?subject_transform
         ?republish ?mirror_direct ?compression ?metadata
         ?allow_msg_ttl ?allow_atomic_publish ?allow_msg_schedules
-        ?allow_batch_publish ?subject_delete_marker_ttl value ~name ~subjects ~storage
+        ?allow_batch_publish ?subject_delete_marker_ttl ?max_consumers
+        ?discard_new_per_subject ?no_ack ?duplicate_window ?deny_purge
+        ?first_sequence ?consumer_limits value ~name ~subjects ~storage
         ~retention ~discard ~max_msgs ~max_msgs_per_subject ~max_bytes ~max_age
         ~max_msg_size ~allow_rollup ~allow_direct ~deny_delete =
       let replicas = Option.value ~default:value.replicas replicas in
@@ -1129,15 +1259,33 @@ module Stream = struct
         Option.value ~default:value.subject_delete_marker_ttl
           subject_delete_marker_ttl
       in
+      let max_consumers = Option.value ~default:value.max_consumers max_consumers in
+      let discard_new_per_subject =
+        Option.value ~default:value.discard_new_per_subject
+          discard_new_per_subject
+      in
+      let no_ack = Option.value ~default:value.no_ack no_ack in
+      let duplicate_window =
+        Option.value ~default:value.duplicate_window duplicate_window
+      in
+      let deny_purge = Option.value ~default:value.deny_purge deny_purge in
+      let first_sequence =
+        Option.value ~default:value.first_sequence first_sequence
+      in
+      let consumer_limits =
+        Option.value ~default:value.consumer_limits consumer_limits
+      in
       v_internal
         ~allow_empty_subjects:(Int.equal (List.length value.subjects) 0)
         ~name ~subjects ?description:value.description ~storage ~retention
         ~replicas ?placement ?mirror ~sources ?subject_transform ?republish
         ~mirror_direct ~compression ~metadata ~discard ?max_msgs
-        ?max_bytes ?max_msgs_per_subject ?max_age ?max_msg_size ~allow_rollup
+        ?max_bytes ?max_msgs_per_subject ?max_age ?max_msg_size ?max_consumers
+        ~discard_new_per_subject ~no_ack ?duplicate_window ~allow_rollup
         ~allow_msg_ttl ~allow_atomic_publish ~allow_msg_schedules
         ~allow_batch_publish ?subject_delete_marker_ttl ~allow_direct
-        ~deny_delete ~sealed:(Option.value sealed ~default:value.sealed)
+        ~deny_delete ~deny_purge ?first_sequence ?consumer_limits
+        ~sealed:(Option.value sealed ~default:value.sealed)
         ()
 
     let with_name value name =
@@ -1157,14 +1305,19 @@ module Stream = struct
         ?max_msgs:value.max_msgs
         ?max_msgs_per_subject:value.max_msgs_per_subject
         ?max_bytes:value.max_bytes ?max_age:value.max_age
-        ?max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ?max_msg_size:value.max_msg_size ?max_consumers:value.max_consumers
+        ~discard_new_per_subject:value.discard_new_per_subject
+        ~no_ack:value.no_ack ?duplicate_window:value.duplicate_window
+        ~allow_rollup:value.allow_rollup
         ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
         ~allow_msg_ttl:value.allow_msg_ttl
         ~allow_atomic_publish:value.allow_atomic_publish
         ~allow_msg_schedules:value.allow_msg_schedules
         ~allow_batch_publish:value.allow_batch_publish
         ?subject_delete_marker_ttl:value.subject_delete_marker_ttl
-        ~sealed:value.sealed ~replicas:value.replicas ?placement:value.placement
+        ~deny_purge:value.deny_purge ?first_sequence:value.first_sequence
+        ?consumer_limits:value.consumer_limits ~sealed:value.sealed
+        ~replicas:value.replicas ?placement:value.placement
         ?mirror:value.mirror ~sources:value.sources
         ?subject_transform:value.subject_transform ?republish:value.republish
         ~mirror_direct:value.mirror_direct ~compression:value.compression
@@ -1240,6 +1393,43 @@ module Stream = struct
         ~max_bytes:value.max_bytes ~max_age:value.max_age ~max_msg_size
         ~allow_rollup:value.allow_rollup ~allow_direct:value.allow_direct
         ~deny_delete:value.deny_delete
+
+    let with_max_consumers value max_consumers =
+      rebuild ~max_consumers value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+
+    let with_discard_new_per_subject value discard_new_per_subject =
+      rebuild ~discard_new_per_subject value ~name:value.name
+        ~subjects:value.subjects ~storage:value.storage
+        ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+
+    let with_no_ack value no_ack =
+      rebuild ~no_ack value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+
+    let with_duplicate_window value duplicate_window =
+      rebuild ~duplicate_window value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
 
     let with_allow_msg_ttl value allow_msg_ttl =
       rebuild ~allow_msg_ttl value ~name:value.name ~subjects:value.subjects
@@ -1325,6 +1515,33 @@ module Stream = struct
         ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
         ~allow_direct:value.allow_direct ~deny_delete
 
+    let with_deny_purge value deny_purge =
+      rebuild ~deny_purge value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+
+    let with_first_sequence value first_sequence =
+      rebuild ~first_sequence value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+
+    let with_consumer_limits value consumer_limits =
+      rebuild ~consumer_limits value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+
     let with_sealed value sealed =
       rebuild ~sealed value ~name:value.name ~subjects:value.subjects
         ~storage:value.storage ~retention:value.retention ~discard:value.discard
@@ -1353,14 +1570,19 @@ module Stream = struct
         ?max_msgs:value.max_msgs
         ?max_msgs_per_subject:value.max_msgs_per_subject
         ?max_bytes:value.max_bytes ?max_age:value.max_age
-        ?max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ?max_msg_size:value.max_msg_size ?max_consumers:value.max_consumers
+        ~discard_new_per_subject:value.discard_new_per_subject
+        ~no_ack:value.no_ack ?duplicate_window:value.duplicate_window
+        ~allow_rollup:value.allow_rollup
         ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
         ~allow_msg_ttl:value.allow_msg_ttl
         ~allow_atomic_publish:value.allow_atomic_publish
         ~allow_msg_schedules:value.allow_msg_schedules
         ~allow_batch_publish:value.allow_batch_publish
         ?subject_delete_marker_ttl:value.subject_delete_marker_ttl
-        ~sealed:value.sealed ?mirror:value.mirror ~sources:value.sources
+        ~deny_purge:value.deny_purge ?first_sequence:value.first_sequence
+        ?consumer_limits:value.consumer_limits ~sealed:value.sealed
+        ?mirror:value.mirror ~sources:value.sources
         ?subject_transform:value.subject_transform ?republish:value.republish
         ~mirror_direct:value.mirror_direct ()
 
@@ -1376,14 +1598,18 @@ module Stream = struct
         ?max_msgs:value.max_msgs
         ?max_msgs_per_subject:value.max_msgs_per_subject
         ?max_bytes:value.max_bytes ?max_age:value.max_age
-        ?max_msg_size:value.max_msg_size
+        ?max_msg_size:value.max_msg_size ?max_consumers:value.max_consumers
+        ~discard_new_per_subject:value.discard_new_per_subject
+        ~no_ack:value.no_ack ?duplicate_window:value.duplicate_window
         ~allow_msg_ttl:value.allow_msg_ttl
         ~allow_atomic_publish:value.allow_atomic_publish
         ~allow_msg_schedules:value.allow_msg_schedules
         ~allow_batch_publish:value.allow_batch_publish
         ?subject_delete_marker_ttl:value.subject_delete_marker_ttl
         ~allow_rollup:value.allow_rollup ~allow_direct:value.allow_direct
-        ~deny_delete:value.deny_delete ~sealed:value.sealed ()
+        ~deny_delete:value.deny_delete ~deny_purge:value.deny_purge
+        ?first_sequence:value.first_sequence
+        ?consumer_limits:value.consumer_limits ~sealed:value.sealed ()
 
     let with_mirror value mirror =
       rebuild_with_relations value ~mirror ~sources:value.sources
@@ -1491,6 +1717,10 @@ module Stream = struct
     max_bytes : int64 option;
     max_age : int64 option;
     max_msg_size : int64 option;
+    max_consumers : int option;
+    discard_new_per_subject : bool;
+    no_ack : bool;
+    duplicate_window : int64 option;
     allow_msg_ttl : bool option;
     allow_atomic_publish : bool option;
     allow_msg_schedules : bool option;
@@ -1499,7 +1729,16 @@ module Stream = struct
     allow_rollup : bool;
     allow_direct : bool;
     deny_delete : bool;
+    deny_purge : bool;
+    first_sequence : int64 option;
+    consumer_limits : wire_consumer_limits option;
     sealed : bool;
+    unknown : Jsont.json;
+  }
+
+  and wire_consumer_limits = {
+    inactive_threshold : int64 option;
+    max_ack_pending : int option;
     unknown : Jsont.json;
   }
 
@@ -1640,6 +1879,19 @@ module Stream = struct
          Jsont.json_mems
     |> Jsont.Object.finish
 
+  let wire_consumer_limits_codec : wire_consumer_limits Jsont.t =
+    Jsont.Object.map ~kind:"JetStream stream consumer limits"
+      (fun inactive_threshold max_ack_pending unknown ->
+        ({ inactive_threshold; max_ack_pending; unknown } : wire_consumer_limits))
+    |> Jsont.Object.opt_mem "inactive_threshold" Jsont.int64
+         ~enc:(fun (value : wire_consumer_limits) -> value.inactive_threshold)
+    |> Jsont.Object.opt_mem "max_ack_pending" Jsont.int
+         ~enc:(fun (value : wire_consumer_limits) -> value.max_ack_pending)
+    |> Jsont.Object.keep_unknown
+         ~enc:(fun (value : wire_consumer_limits) -> value.unknown)
+         Jsont.json_mems
+    |> Jsont.Object.finish
+
   let metadata_to_wire metadata =
     let values =
       List.fold_left
@@ -1709,6 +1961,15 @@ module Stream = struct
       headers_only =
         if Config.Republish.headers_only value then Some true else None;
       unknown = Config.Republish.unknown value;
+    }
+
+  let consumer_limits_to_wire value =
+    {
+      inactive_threshold =
+        Option.map Mtime.Span.to_uint64_ns
+          (Config.Consumer_limits.inactive_threshold value);
+      max_ack_pending = Config.Consumer_limits.max_ack_pending value;
+      unknown = Config.Consumer_limits.unknown value;
     }
 
   let filter_of_wire = function
@@ -1799,6 +2060,31 @@ module Stream = struct
     | Ok republish ->
         Ok (Config.Republish.with_unknown republish value.unknown)
 
+  let consumer_limits_of_wire value =
+    let inactive_threshold =
+      match value.inactive_threshold with
+      | None | Some 0L -> Ok None
+      | Some nanoseconds when Int64.compare nanoseconds 0L < 0 ->
+          Error
+            (Error.Invalid_config
+               (Error.Invalid_consumer_span { field = "inactive_threshold" }))
+      | Some nanoseconds ->
+          Ok (Some (Mtime.Span.of_uint64_ns nanoseconds))
+    in
+    let ( let* ) value f =
+      match value with Error error -> Error error | Ok value -> f value
+    in
+    let* inactive_threshold = inactive_threshold in
+    let max_ack_pending =
+      match value.max_ack_pending with Some 0 -> None | value -> value
+    in
+    match
+      Config.Consumer_limits.v ?inactive_threshold ?max_ack_pending ()
+    with
+    | Error error -> Error (Error.Invalid_config error)
+    | Ok limits ->
+        Ok (Config.Consumer_limits.with_unknown limits value.unknown)
+
   let wire_config_codec =
     Jsont.Object.map ~kind:"JetStream stream config"
       (fun
@@ -1822,6 +2108,10 @@ module Stream = struct
         max_bytes
         max_age
         max_msg_size
+        max_consumers
+        discard_new_per_subject
+        no_ack
+        duplicate_window
         allow_msg_ttl
         allow_atomic_publish
         allow_msg_schedules
@@ -1830,6 +2120,9 @@ module Stream = struct
         allow_rollup
         allow_direct
         deny_delete
+        deny_purge
+        first_sequence
+        consumer_limits
         sealed
         unknown
       ->
@@ -1854,6 +2147,11 @@ module Stream = struct
           max_bytes;
           max_age;
           max_msg_size;
+          max_consumers;
+          discard_new_per_subject =
+            Option.value ~default:false discard_new_per_subject;
+          no_ack = Option.value ~default:false no_ack;
+          duplicate_window;
           allow_msg_ttl;
           allow_atomic_publish;
           allow_msg_schedules;
@@ -1862,6 +2160,9 @@ module Stream = struct
           allow_rollup = Option.value ~default:false allow_rollup;
           allow_direct = Option.value ~default:false allow_direct;
           deny_delete = Option.value ~default:false deny_delete;
+          deny_purge = Option.value ~default:false deny_purge;
+          first_sequence;
+          consumer_limits;
           sealed = Option.value ~default:false sealed;
           unknown;
         })
@@ -1908,6 +2209,14 @@ module Stream = struct
         value.max_age)
     |> Jsont.Object.opt_mem "max_msg_size" Jsont.int64 ~enc:(fun value ->
         value.max_msg_size)
+    |> Jsont.Object.opt_mem "max_consumers" Jsont.int ~enc:(fun value ->
+        value.max_consumers)
+    |> Jsont.Object.opt_mem "discard_new_per_subject" Jsont.bool
+         ~enc:(fun value -> Some value.discard_new_per_subject)
+    |> Jsont.Object.opt_mem "no_ack" Jsont.bool ~enc:(fun value ->
+        Some value.no_ack)
+    |> Jsont.Object.opt_mem "duplicate_window" Jsont.int64 ~enc:(fun value ->
+        value.duplicate_window)
     |> Jsont.Object.opt_mem "allow_msg_ttl" Jsont.bool ~enc:(fun value ->
         value.allow_msg_ttl)
     |> Jsont.Object.opt_mem "allow_atomic" Jsont.bool ~enc:(fun value ->
@@ -1924,6 +2233,12 @@ module Stream = struct
         Some value.allow_direct)
     |> Jsont.Object.opt_mem "deny_delete" Jsont.bool ~enc:(fun value ->
         Some value.deny_delete)
+    |> Jsont.Object.opt_mem "deny_purge" Jsont.bool ~enc:(fun value ->
+        Some value.deny_purge)
+    |> Jsont.Object.opt_mem "first_seq" Jsont.int64 ~enc:(fun value ->
+        value.first_sequence)
+    |> Jsont.Object.opt_mem "consumer_limits" wire_consumer_limits_codec
+         ~enc:(fun value -> value.consumer_limits)
     |> Jsont.Object.opt_mem "sealed" Jsont.bool ~enc:(fun value ->
         Some value.sealed)
     |> Jsont.Object.keep_unknown
@@ -2074,6 +2389,11 @@ module Stream = struct
       max_bytes = Config.max_bytes value;
       max_age = Option.map Mtime.Span.to_uint64_ns (Config.max_age value);
       max_msg_size = Config.max_msg_size value;
+      max_consumers = Config.max_consumers value;
+      discard_new_per_subject = Config.discard_new_per_subject value;
+      no_ack = Config.no_ack value;
+      duplicate_window =
+        Option.map Mtime.Span.to_uint64_ns (Config.duplicate_window value);
       allow_msg_ttl = (if Config.allow_msg_ttl value then Some true else None);
       allow_atomic_publish =
         (if Config.allow_atomic_publish value then Some true else None);
@@ -2087,6 +2407,10 @@ module Stream = struct
       allow_rollup = Config.allow_rollup value;
       allow_direct = Config.allow_direct value;
       deny_delete = Config.deny_delete value;
+      deny_purge = Config.deny_purge value;
+      first_sequence = Config.first_sequence value;
+      consumer_limits =
+        Option.map consumer_limits_to_wire (Config.consumer_limits value);
       sealed = Config.sealed value;
       unknown = Jsont.Json.object' [];
     }
@@ -2131,6 +2455,15 @@ module Stream = struct
              (Option.map Mtime.Span.to_uint64_ns (Config.max_age value)));
       max_msg_size =
         Some (Option.value ~default:(-1L) (Config.max_msg_size value));
+      max_consumers =
+        Some (Option.value ~default:(-1) (Config.max_consumers value));
+      discard_new_per_subject = Config.discard_new_per_subject value;
+      no_ack = Config.no_ack value;
+      duplicate_window =
+        Some
+          (Option.value ~default:0L
+             (Option.map Mtime.Span.to_uint64_ns
+                (Config.duplicate_window value)));
       allow_msg_ttl = Some (Config.allow_msg_ttl value);
       allow_atomic_publish = Some (Config.allow_atomic_publish value);
       allow_msg_schedules = Some (Config.allow_msg_schedules value);
@@ -2143,6 +2476,10 @@ module Stream = struct
       allow_rollup = Config.allow_rollup value;
       allow_direct = Config.allow_direct value;
       deny_delete = Config.deny_delete value;
+      deny_purge = current.deny_purge || Config.deny_purge value;
+      first_sequence = Config.first_sequence value;
+      consumer_limits =
+        Option.map consumer_limits_to_wire (Config.consumer_limits value);
       sealed = current.sealed || Config.sealed value;
     }
 
@@ -2174,6 +2511,9 @@ module Stream = struct
     let max_msg_size =
       match value.max_msg_size with Some -1L -> None | value -> value
     in
+    let max_consumers =
+      match value.max_consumers with Some (-1 | 0) -> None | value -> value
+    in
     let subject_delete_marker_ttl =
       match value.subject_delete_marker_ttl with
       | None | Some 0L -> None
@@ -2183,6 +2523,18 @@ module Stream = struct
       match value.max_age with
       | None | Some 0L -> None
       | Some nanoseconds -> Some (Mtime.Span.of_uint64_ns nanoseconds)
+    in
+    let duplicate_window =
+      match value.duplicate_window with
+      | None | Some 0L -> Ok None
+      | Some nanoseconds when Int64.compare nanoseconds 0L < 0 ->
+          Error
+            (Error.Invalid_config Error.Invalid_duplicate_window)
+      | Some nanoseconds ->
+          Ok (Some (Mtime.Span.of_uint64_ns nanoseconds))
+    in
+    let first_sequence =
+      match value.first_sequence with Some 0L -> None | value -> value
     in
     let* placement =
       match value.placement with
@@ -2219,6 +2571,13 @@ module Stream = struct
       | None -> Ok None
       | Some republish -> republish_of_wire republish |> Result.map Option.some
     in
+    let* duplicate_window = duplicate_window in
+    let* consumer_limits =
+      match value.consumer_limits with
+      | None -> Ok None
+      | Some limits ->
+          consumer_limits_of_wire limits |> Result.map Option.some
+    in
     match
       Config.v_internal ~allow_empty_subjects:true ~name:value.name ~subjects
         ?description:value.description ~storage:value.storage
@@ -2227,7 +2586,9 @@ module Stream = struct
         ~compression:value.compression
         ~metadata:(metadata_of_wire value.metadata)
         ~retention:value.retention ~discard:value.discard ?max_msgs
-        ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size
+        ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size ?max_consumers
+        ~discard_new_per_subject:value.discard_new_per_subject
+        ~no_ack:value.no_ack ?duplicate_window
         ~allow_msg_ttl:(Option.value ~default:false value.allow_msg_ttl)
         ~allow_atomic_publish:
           (Option.value ~default:false value.allow_atomic_publish)
@@ -2237,6 +2598,7 @@ module Stream = struct
           (Option.value ~default:false value.allow_batch_publish)
         ?subject_delete_marker_ttl ~allow_rollup:value.allow_rollup
         ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+        ~deny_purge:value.deny_purge ?first_sequence ?consumer_limits
         ~sealed:value.sealed ()
     with
     | Ok config -> Ok config
