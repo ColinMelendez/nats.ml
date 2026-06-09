@@ -26,7 +26,7 @@ the capabilities marked as covered.
 | JetStream consumption | Pull, push, ordered, heartbeats, flow control, priority, consumer reset | Some ordered/ack fields and Go's continuous batching controls |
 | Key-Value | CRUD, CAS, history, finite keys, watches, per-key/marker TTL, purge-delete cleanup, resumable/multi-filter watches, listers | Bucket manager/listers |
 | Object Store | Streaming CRUD, links, metadata, watches, list, seal, and Go interop | Bucket manager/listers and file helpers |
-| Services | Registration, groups, requests, errors, discovery, stats, reset, stopped state, pending limits | Custom lifecycle/stat callbacks |
+| Services | Registration, groups, requests, errors, discovery, stats, reset, stopped state, pending limits, custom lifecycle/stat callbacks | Broader cross-SDK/version acceptance |
 
 ## Core and transport
 
@@ -171,16 +171,19 @@ not block the data-plane feature set.
 The OCaml service module covers typed identity/configuration, endpoint and group
 composition, queue and metadata declarations, successful and error replies,
 monitoring discovery, statistics, service-local stopping, statistics reset,
-stopped-state inspection, and endpoint pending message/byte limits. Go also
-offers custom statistics, error, and done callbacks. Those callbacks need an
-explicit Eio ownership policy and should not be added as unstructured mutable
-hooks.
+stopped-state inspection, endpoint pending message/byte limits, custom endpoint
+statistics data, and service error/done callbacks. The callbacks are configured
+as immutable service options: statistics callbacks receive immutable endpoint
+snapshots, while error and done callbacks are serialized by a service-owned Eio
+dispatcher outside the service mutex. This matches the Go capability without
+turning callbacks into a global mutable registry.
 
 ## Prioritized follow-up
 
-1. **Service callbacks.** Decide whether custom statistics, error, and done
-   callbacks fit the Eio ownership model; alternative transports such as
-   WebSocket remain intentionally out of scope for now.
+1. **Cross-SDK/version acceptance.** Exercise callback and custom-statistics
+   behavior against the pinned official Go peer, then expand the version and
+   failure matrix; alternative transports such as WebSocket remain intentionally
+   out of scope for now.
 
 This ordering keeps the narrow protocol waist intact, gives each addition a
 behavioral test target, and avoids claiming parity merely because unknown JSON

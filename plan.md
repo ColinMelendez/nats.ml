@@ -976,6 +976,11 @@ subscriptions, queue groups, and request/reply.
 - Completed locally: query `$SRV.PING`, `$SRV.INFO`, and `$SRV.STATS` for all
   services, named services, or individual instances through bounded fan-out
   collection windows with typed JSON response decoding.
+- Completed locally: expose custom endpoint statistics data plus service error
+  and completion callbacks. Statistics callbacks receive immutable endpoint
+  snapshots; error and done callbacks run in FIFO order on a service-owned Eio
+  dispatcher, outside the service mutex, with normal stop waiting for done
+  delivery.
 - Remaining: broader cross-SDK/version acceptance, including reconnect,
   NKey/JWT, mTLS, and feature-family matrix coverage. The baseline official-Go
   Service wire contract is covered by the dedicated Service interop runner.
@@ -986,7 +991,8 @@ Local mock-transport tests cover configuration, monitoring wire payloads,
 fan-out discovery, malformed response rejection, queue policy,
 request/service-error replies, statistics and reset, stopped-state transitions,
 pending-limit backpressure, reconnect replay, service-local drain, and
-parent-connection isolation. The opt-in server runner now covers one
+parent-connection isolation, custom statistics data, and lifecycle callbacks.
+The opt-in server runner now covers one
 live service's monitoring, endpoint/group requests, service errors, failure
 isolation, statistics, and drain behavior, plus two-instance queue-group
 routing. The two-server reconnect runner also checks Service endpoint and
@@ -1061,7 +1067,6 @@ Do not freeze these before their phase needs them:
 
 - NKey/JWT package boundary and private-key parsing;
 - optional Core reconnect buffering;
-- callback bridge shape;
 - WebSocket and second-runtime package boundaries;
 - metrics/probe naming and payload policy.
 
