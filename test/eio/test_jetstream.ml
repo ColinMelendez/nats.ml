@@ -650,6 +650,280 @@ let () =
               fail
                 (Format.asprintf "unexpected replica error: %a"
                    Nats_eio.Jetstream.Error.pp_config error));
+      test "stream source configuration is typed and composable" (fun () ->
+          let filter = Nats.Subject.Filter.literal "orders.*" in
+          let transform =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.Transform.v ~source:filter
+                 ~destination:"archive.{{wildcard(1)}}" ())
+          in
+          let external_config =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.External.v
+                 ~api_prefix:"$JS.eu.API" ~deliver_prefix:"$JS.eu.DELIVER"
+                 ())
+          in
+          let source =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.Source.v ~name:"ORDERS"
+                 ~start:(Nats_eio.Jetstream.Stream.Config.Source.Sequence 7L)
+                 ~subject_transforms:[ transform ] ~external_:external_config ())
+          in
+          let mirror =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.v ~name:"ORDERS_MIRROR"
+                 ~subjects:[] ~mirror:source ~mirror_direct:true ())
+          in
+          equal string "ORDERS"
+            (Nats_eio.Jetstream.Stream.Config.Source.name
+               (Option.get
+                  (Nats_eio.Jetstream.Stream.Config.mirror mirror)));
+          equal bool true
+            (Nats_eio.Jetstream.Stream.Config.mirror_direct mirror);
+          (match
+             Nats_eio.Jetstream.Stream.Config.Source.start
+               (Option.get
+                  (Nats_eio.Jetstream.Stream.Config.mirror mirror))
+           with
+          | Some
+              (Nats_eio.Jetstream.Stream.Config.Source.Sequence sequence) ->
+              equal int64 7L sequence
+          | _ -> fail "stream source lost its sequence start");
+          (match
+             Nats_eio.Jetstream.Stream.Config.v ~name:"invalid"
+               ~subjects:[] ~mirror:source ~sources:[ source ] ()
+           with
+          | Error Nats_eio.Jetstream.Error.Mirror_and_sources -> ()
+          | Ok _ -> fail "stream accepted mirror and sources together"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected stream relationship error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
+          (match
+             Nats_eio.Jetstream.Stream.Config.v ~name:"invalid"
+               ~subjects:[ Nats.Subject.Filter.literal "orders" ] ~mirror:source
+               ()
+           with
+          | Error Nats_eio.Jetstream.Error.Mirror_and_subjects -> ()
+          | Ok _ -> fail "stream accepted mirror subjects"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected mirror subject error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
+          (match
+             Nats_eio.Jetstream.Stream.Config.Source.v ~name:"ORDERS"
+               ~filter_subject:filter ~subject_transforms:[ transform ] ()
+           with
+          | Error Nats_eio.Jetstream.Error.Source_filter_and_transforms -> ()
+          | Ok _ -> fail "source accepted a filter and transforms together"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected source validation error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
+          (match
+             Nats_eio.Jetstream.Stream.Config.Source.v ~name:"ORDERS"
+               ~start:(Nats_eio.Jetstream.Stream.Config.Source.Sequence 0L) ()
+           with
+          | Error
+              (Nats_eio.Jetstream.Error.Invalid_source_start_sequence 0L) ->
+              ()
+          | Ok _ -> fail "source accepted sequence zero"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected source start error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
+          let republish =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.Republish.v
+                 ~source:(Nats.Subject.Filter.literal "orders.>")
+                 ~destination:"archive.>" ~headers_only:true ())
+          in
+          let mirror =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_republish mirror
+                 (Some republish))
+          in
+          (match
+             Nats_eio.Jetstream.Stream.Config.with_mirror mirror None
+           with
+          | Error Nats_eio.Jetstream.Error.Empty_subjects -> ()
+          | Ok _ -> fail "stream cleared its last relation without subjects"
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected relation clearing error: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
+          match
+            Nats_eio.Jetstream.Stream.Config.republish mirror
+          with
+          | Some value ->
+              equal bool true
+                (Nats_eio.Jetstream.Stream.Config.Republish.headers_only value)
+          | None -> fail "stream config lost republish");
+      test "stream source fields use the JetStream wire contract" (fun () ->
+          let info_payload =
+            {|{"config":{"name":"ARCHIVE","subjects":[],"storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":-1,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":false,"allow_direct":false,"mirror_direct":true,"sources":[{"name":"ORDERS","opt_start_time":"2026-08-16T12:00:00.000000000Z","subject_transforms":[{"src":"orders.*","dest":"archive.{{wildcard(1)}}","transform_extra":true}],"external":{"api":"$JS.eu.API","deliver":"$JS.eu.DELIVER","external_extra":"kept"},"source_extra":"kept"}],"republish":{"src":"orders.>","dest":"archive.>","headers_only":true,"republish_extra":true}},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}
+          in
+          let make_response ~sid =
+            Ok (consumer_info_wire_with_sid ~sid info_payload)
+          in
+          let response, response_u = Eio.Promise.create () in
+          let info_response, info_response_u = Eio.Promise.create () in
+          let update_info_response, update_info_response_u =
+            Eio.Promise.create ()
+          in
+          let update_response, update_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await response;
+                `Await info_response;
+                `Await update_info_response;
+                `Await update_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let filter = Nats.Subject.Filter.literal "orders.*" in
+              let transform =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Stream.Config.Transform.v ~source:filter
+                     ~destination:"archive.{{wildcard(1)}}" ())
+              in
+              let external_config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Stream.Config.External.v
+                     ~api_prefix:"$JS.eu.API" ~deliver_prefix:"$JS.eu.DELIVER"
+                     ())
+              in
+              let source =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Stream.Config.Source.v ~name:"ORDERS"
+                     ~start:
+                       (Nats_eio.Jetstream.Stream.Config.Source.Time
+                          (ptime_of_rfc3339
+                             "2026-08-16T12:00:00.000000000Z"))
+                     ~subject_transforms:[ transform ]
+                     ~external_:external_config ())
+              in
+              let republish =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Stream.Config.Republish.v
+                     ~source:(Nats.Subject.Filter.literal "orders.>")
+                     ~destination:"archive.>" ~headers_only:true ())
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Stream.Config.v ~name:"ARCHIVE"
+                     ~subjects:[] ~sources:[ source ] ~republish
+                     ~mirror_direct:true ())
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Stream.create jetstream config));
+              yield_n 5;
+              let create_trace = Buffer.contents trace in
+              if
+                not
+                  (contains_substring
+                     ~needle:"sources\\\":[{\\\"name\\\":\\\"ORDERS\\\""
+                     create_trace)
+              then fail "stream create omitted source configuration";
+              if
+                not
+                  (contains_substring
+                     ~needle:"opt_start_time\\\":\\\"2026-08-16T12:00:00.000000000Z"
+                     create_trace)
+              then fail "stream create omitted source start time";
+              if
+                not
+                  (contains_substring
+                     ~needle:"subject_transforms\\\":[{\\\"src\\\":\\\"orders.*\\\",\\\"dest\\\":\\\"archive.{{wildcard(1)}}"
+                     create_trace)
+              then fail "stream create omitted source transform";
+              if
+                not
+                  (contains_substring
+                     ~needle:"external\\\":{\\\"api\\\":\\\"$JS.eu.API\\\",\\\"deliver\\\":\\\"$JS.eu.DELIVER\\\"}"
+                     create_trace)
+              then fail "stream create omitted external prefixes";
+              if
+                not
+                  (contains_substring
+                     ~needle:"republish\\\":{\\\"src\\\":\\\"orders.>\\\",\\\"dest\\\":\\\"archive.>\\\",\\\"headers_only\\\":true}"
+                     create_trace)
+              then fail "stream create omitted republish configuration";
+              if
+                not
+                  (contains_substring ~needle:"mirror_direct\\\":true"
+                     create_trace)
+              then fail "stream create omitted mirror direct flag";
+              Eio.Promise.resolve response_u (make_response ~sid:1);
+              let stream = expect_jetstream_ok (Eio.Promise.await result) in
+              let info_result, info_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve info_result_u
+                    (Nats_eio.Jetstream.Stream.info stream));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u (make_response ~sid:2);
+              let info =
+                expect_jetstream_ok (Eio.Promise.await info_result)
+              in
+              let config = Nats_eio.Jetstream.Stream.Info.config info in
+              let source =
+                match Nats_eio.Jetstream.Stream.Config.sources config with
+                | [ source ] -> source
+                | _ -> fail "stream response lost source configuration"
+              in
+              (match
+                 Nats_eio.Jetstream.Stream.Config.Source.start source
+               with
+              | Some (Nats_eio.Jetstream.Stream.Config.Source.Time time) ->
+                  equal bool true
+                    (Ptime.equal time
+                       (ptime_of_rfc3339 "2026-08-16T12:00:00.000000000Z"))
+              | _ -> fail "stream response lost source start time");
+              equal string "$JS.eu.API"
+                (Nats_eio.Jetstream.Stream.Config.External.api_prefix
+                   (Option.get
+                      (Nats_eio.Jetstream.Stream.Config.Source.external_ source)));
+              let updated_config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Stream.Config.with_description config
+                     (Some "updated"))
+              in
+              let update_result, update_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve update_result_u
+                    (Nats_eio.Jetstream.Stream.update stream updated_config));
+              yield_n 5;
+              Eio.Promise.resolve update_info_response_u (make_response ~sid:3);
+              yield_n 5;
+              let trace = Buffer.contents trace in
+              if
+                not
+                  (contains_substring ~needle:"source_extra\\\":\\\"kept" trace)
+              then fail "stream update discarded the source's unknown field";
+              if
+                not
+                  (contains_substring ~needle:"transform_extra\\\":true" trace)
+              then fail "stream update discarded the transform's unknown field";
+              if
+                not
+                  (contains_substring ~needle:"external_extra\\\":\\\"kept" trace)
+              then fail "stream update discarded the external unknown field";
+              if
+                not
+                  (contains_substring ~needle:"republish_extra\\\":true" trace)
+              then fail "stream update discarded the republish unknown field";
+              Eio.Promise.resolve update_response_u (make_response ~sid:4);
+              ignore (expect_jetstream_ok (Eio.Promise.await update_result));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "consumer config updaters preserve modeled fields" (fun () ->
           let span = Mtime.Span.of_uint64_ns 1_000_000L in
           let second_span = Mtime.Span.of_uint64_ns 2_000_000L in
@@ -1771,6 +2045,12 @@ let () =
                 expect_jetstream_ok
                   (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
               in
+              let republish =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Stream.Config.Republish.v
+                     ~source:(Nats.Subject.Filter.literal "orders.in")
+                     ~destination:"orders.out" ())
+              in
               let config =
                 expect_jetstream_config_ok
                   (Nats_eio.Jetstream.Stream.Config.v ~name:"ORDERS"
@@ -1778,7 +2058,7 @@ let () =
                      ~description:"updated" ~max_msgs_per_subject:5L
                      ~allow_rollup:true ~allow_direct:true ~replicas:2
                      ~compression:Nats_eio.Jetstream.Stream.Config.S2
-                     ~metadata:[ ("owner", "client") ]
+                     ~metadata:[ ("owner", "client") ] ~republish
                      ())
               in
               let placement =
@@ -1836,7 +2116,7 @@ let () =
                     "republish\\\":{\\\"src\\\":\\\"orders.in\\\",\\\"dest\\\":\\\"orders.out\\\"}"
                   trace
                 < 1
-              then fail "stream update discarded an unmodeled object field";
+              then fail "stream update discarded the modeled republish field";
               Eio.Promise.resolve update_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:2

@@ -1,6 +1,6 @@
 (executable
  (name fuzz)
- (libraries nats alcobar))
+ (libraries nats nats-eio alcobar))
 
 (rule
  (alias runtest)

@@ -8,4 +8,5 @@ let () =
       Fuzz_info.suite;
       Fuzz_endpoint.suite;
       Fuzz_header.suite;
+      Fuzz_jetstream.suite;
     ]
