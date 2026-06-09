@@ -988,9 +988,15 @@ subscriptions, queue groups, and request/reply.
   TLS variants. The shared authentication helper is used by the Service
   acceptance executable, so the advanced matrix modes exercise the OCaml
   client as well as the Go peer.
-- Remaining: cross-SDK Service reconnect and failure-injection coverage and
-  broader feature-family matrices. The callbacks themselves remain local API
-  behavior because they are not represented on the NATS service wire.
+- Completed: the cross-SDK Service reconnect runner reuses the three-server
+  failover harness, gates each kill on a round barrier after both peers have
+  validated their requests and counters, and checks endpoint replay plus
+  named INFO/STATS monitoring after each failover. Anonymous and TLS runs
+  pass through the same official Go `micro` peer.
+- Remaining: explicit cross-SDK Service subscription-failure and
+  parent-connection failure injection, plus broader feature-family matrices.
+  The callbacks themselves remain local API behavior because they are not
+  represented on the NATS service wire.
 
 ### Acceptance tests and gate G6
 
@@ -1010,8 +1016,8 @@ headers, named INFO/STATS discovery, queue and metadata declarations, exact
 counters, custom endpoint statistics data in both directions, and a request/
 reply completion barrier. The Service matrix repeats this exchange across the
 three pinned server releases and eleven anonymous/token/username-password/
-NKey/JWT/mTLS plaintext/TLS modes. Run the remaining cross-SDK Service
-reconnect and failure-matrix tests against a real server before G6.
+NKey/JWT/mTLS plaintext/TLS modes. Run the remaining explicit cross-SDK
+  Service failure-injection tests against a real server before G6.
 Services may start after G2 and do not block JetStream,
 KV, or Object Store. Stabilize only after confirming that all service behavior
 composes with the Core connection ownership model.

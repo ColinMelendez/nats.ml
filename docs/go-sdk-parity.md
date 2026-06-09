@@ -26,7 +26,7 @@ the capabilities marked as covered.
 | JetStream consumption | Pull, push, ordered, heartbeats, flow control, priority, consumer reset | Some ordered/ack fields and Go's continuous batching controls |
 | Key-Value | CRUD, CAS, history, finite keys, watches, per-key/marker TTL, purge-delete cleanup, resumable/multi-filter watches, listers | Bucket manager/listers |
 | Object Store | Streaming CRUD, links, metadata, watches, list, seal, and Go interop | Bucket manager/listers and file helpers |
-| Services | Registration, groups, requests, errors, discovery, stats, reset, stopped state, pending limits, custom lifecycle/stat callbacks, bidirectional Go interop across the pinned server matrix | Cross-SDK reconnect/failure injection and future server/SDK versions |
+| Services | Registration, groups, requests, errors, discovery, stats, reset, stopped state, pending limits, custom lifecycle/stat callbacks, bidirectional Go interop across the pinned server matrix, cross-SDK failover recovery | Explicit subscription-failure injection and future server/SDK versions |
 
 ## Core and transport
 
@@ -185,10 +185,17 @@ anonymous, token, username/password, NKey, JWT, mTLS, and their supported TLS
 variants. Lifecycle callback execution remains a local API contract because
 callbacks are not encoded on the NATS service wire.
 
+The Service reconnect runner reuses the three-node cross-SDK failover harness.
+It performs bidirectional endpoint requests before each server kill, gates the
+kill on a round barrier after both peers have validated their counters, waits
+for both clients to reconnect, and then verifies endpoint replay plus named
+INFO/STATS monitoring on the surviving servers. Explicit subscription-failure
+injection remains a separate acceptance slice.
+
 ## Prioritized follow-up
 
-1. **Cross-SDK failure and reconnect acceptance.** Exercise Service recovery,
-   subscription failure, and parent-connection failure against the official Go
+1. **Cross-SDK Service failure acceptance.** Exercise explicit Service
+   subscription failure and parent-connection failure against the official Go
    peer; future server/SDK versions and alternative transports such as
    WebSocket remain separate concerns.
 

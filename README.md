@@ -44,6 +44,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-interop-auth-negative-matrix.sh
 ./scripts/runtest-interop-service.sh
 ./scripts/runtest-interop-service-matrix.sh
+./scripts/runtest-interop-service-reconnect.sh
 ./scripts/runtest-interop-jetstream.sh
 ./scripts/runtest-interop-jetstream-matrix.sh
 ./scripts/runtest-interop-key-value.sh
@@ -63,6 +64,7 @@ NATS_TEST_TLS=1 ./scripts/runtest-interop.sh
 ./scripts/runtest-server-matrix.sh
 ./scripts/runtest-interop-reconnect.sh
 NATS_TEST_TLS=1 ./scripts/runtest-interop-reconnect.sh
+NATS_TEST_TLS=1 ./scripts/runtest-interop-service-reconnect.sh
 ```
 
 The script requires Docker and is intentionally outside `dune runtest`; Docker
@@ -251,7 +253,12 @@ that exchange across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` in all
 eleven plaintext/TLS authentication modes (33 cases by default); set
 `NATS_SERVER_IMAGES` or `NATS_INTEROP_SERVICE_MATRIX_MODES` to select a
 bounded subset. Cross-SDK reconnect and failure-injection coverage remains
-separate work.
+separate from that version matrix. The Service reconnect runner reuses the
+three-server failover harness, performs bidirectional endpoint requests before
+each kill, waits for both clients to report recovery, and checks endpoint
+replay plus INFO/STATS monitoring after each failover. It accepts the same
+authentication and TLS controls as the Core reconnect runner; explicit
+subscription-failure injection remains separate.
 
 The first JetStream layer is available through `Nats_eio.Jetstream`: typed
 stream and consumer configuration and management, including consumer metadata,
