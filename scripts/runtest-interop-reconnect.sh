@@ -13,6 +13,7 @@ fi
 
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
 tls_enabled=${NATS_TEST_TLS-0}
+interop_mode=${NATS_TEST_INTEROP_MODE:-core}
 interop_auth_mode=${NATS_TEST_INTEROP_AUTH_MODE-}
 auth_user=${NATS_TEST_USER-}
 auth_pass=${NATS_TEST_PASS-}
@@ -31,6 +32,21 @@ peer_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-reconnect-peer.XXXXXX")
 ocaml_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-reconnect-ocaml.XXXXXX")
 rm -f "$signal"
 prefix="ocaml.interop.reconnect.$$"
+
+case "$interop_mode" in
+  core)
+    acceptance_executable=test/interop/interop_reconnect_acceptance.exe
+    peer_mode=reconnect
+    ;;
+  service)
+    acceptance_executable=test/interop/interop_service_reconnect_acceptance.exe
+    peer_mode=service-reconnect
+    ;;
+  *)
+    echo "NATS_TEST_INTEROP_MODE must be core or service" >&2
+    exit 1
+    ;;
+esac
 
 case "$tls_enabled" in
   0|1) ;;
@@ -262,7 +278,7 @@ nix develop .#integration -c true
 NATS_TEST_SERVER="$servers" NATS_TEST_SERVERS="$servers" \
   NATS_TEST_INTEROP_PREFIX="$prefix" \
   nix develop .#integration -c nats-ocaml-interop-peer \
-  --mode reconnect --server "$servers" --prefix "$prefix" \
+  --mode "$peer_mode" --server "$servers" --prefix "$prefix" \
   --ready-file "$peer_signal" --signal-file "$signal" \
   >"$peer_log" 2>&1 &
 peer_pid=$!
@@ -288,7 +304,7 @@ status=0
 if NATS_TEST_SERVER="$servers" NATS_TEST_SERVERS="$servers" \
     NATS_TEST_INTEROP_PREFIX="$prefix" \
     nix develop .#integration -c dune exec \
-    test/interop/interop_reconnect_acceptance.exe >"$ocaml_log" 2>&1
+    "$acceptance_executable" >"$ocaml_log" 2>&1
 then
   :
 else
