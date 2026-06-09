@@ -44,6 +44,30 @@ func checkEndpointInfo(label string, endpoint micro.EndpointInfo, name, subject 
 	return checkMetadata(label, endpoint.Metadata, "role", "interop")
 }
 
+func checkStatsData(label string, endpoint *micro.EndpointStats, generator, name string) error {
+	if len(endpoint.Data) == 0 {
+		return fmt.Errorf("%s omitted custom endpoint data", label)
+	}
+	var data map[string]string
+	if err := json.Unmarshal(endpoint.Data, &data); err != nil {
+		return fmt.Errorf("%s custom endpoint data: %w", label, err)
+	}
+	expected := map[string]string{
+		"generator": generator,
+		"endpoint":  name,
+		"status":    "ready",
+	}
+	if len(data) != len(expected) {
+		return fmt.Errorf("%s custom endpoint data had %d fields, expected %d", label, len(data), len(expected))
+	}
+	for key, expectedValue := range expected {
+		if actualValue := data[key]; actualValue != expectedValue {
+			return fmt.Errorf("%s custom endpoint data %q was %q, expected %q", label, key, actualValue, expectedValue)
+		}
+	}
+	return nil
+}
+
 func requestServiceInfo(connection *nats.Conn, service string) (micro.Info, error) {
 	subject, err := micro.ControlSubject(micro.InfoVerb, service, "")
 	if err != nil {
@@ -128,6 +152,13 @@ func runServicePeer(config options) error {
 		Version:     "1.2.3",
 		Description: "Go Service interop",
 		Metadata:    map[string]string{"language": "go", "suite": "interop"},
+		StatsHandler: func(endpoint *micro.Endpoint) any {
+			return map[string]string{
+				"generator": "go",
+				"endpoint":  endpoint.Name,
+				"status":    "ready",
+			}
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("add Go service: %w", err)
@@ -239,16 +270,24 @@ func runServicePeer(config options) error {
 		return err
 	}
 
-	_, err = waitForServiceStats("OCaml service", func() (micro.Stats, error) {
+	ocamlStats, err := waitForServiceStats("OCaml service", func() (micro.Stats, error) {
 		return requestServiceStats(connection, ocamlServiceName, ocamlInfo.ID)
 	}, func(stats micro.Stats) bool {
 		if stats.Name != ocamlServiceName || stats.ID != ocamlInfo.ID || len(stats.Endpoints) != 1 {
 			return false
 		}
 		endpoint, endpointErr := endpointStats(stats, "echo")
-		return endpointErr == nil && endpoint.NumRequests >= 1 && endpoint.NumErrors == 0
+		return endpointErr == nil && endpoint.NumRequests >= 1 && endpoint.NumErrors == 0 &&
+			checkStatsData("OCaml echo", endpoint, "ocaml", "echo") == nil
 	})
 	if err != nil {
+		return err
+	}
+	ocamlEcho, err := endpointStats(ocamlStats, "echo")
+	if err != nil {
+		return err
+	}
+	if err := checkStatsData("OCaml echo", ocamlEcho, "ocaml", "echo"); err != nil {
 		return err
 	}
 

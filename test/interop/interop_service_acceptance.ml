@@ -171,6 +171,22 @@ let expect_stats_endpoint ~prefix ~label ~name ~subject_suffix ~requests ~errors
       (Nats_eio.Service.Stats.num_errors endpoint)
       errors
 
+let stats_data ~generator ~endpoint =
+  Jsont.Json.object'
+    [
+      Jsont.Json.mem (Jsont.Json.name "generator") (Jsont.Json.string generator);
+      Jsont.Json.mem (Jsont.Json.name "endpoint") (Jsont.Json.string endpoint);
+      Jsont.Json.mem (Jsont.Json.name "status") (Jsont.Json.string "ready");
+    ]
+
+let expect_stats_data label ~generator ~endpoint = function
+  | Some actual ->
+      let expected = stats_data ~generator ~endpoint in
+      if not (Jsont.Json.equal actual expected) then
+        failf "%s was %a, expected %a" label Jsont.Json.pp actual Jsont.Json.pp
+          expected
+  | None -> failf "%s omitted custom endpoint data" label
+
 let find_info_endpoint label name endpoints =
   match
     List.find_opt
@@ -232,6 +248,10 @@ let expect_go_stats ~prefix ~id stats =
     ~subject_suffix:"go.echo" ~requests:1L ~errors:0L echo;
   expect_stats_endpoint ~prefix ~label:"Go error stats" ~name:"error"
     ~subject_suffix:"go.error" ~requests:1L ~errors:1L error;
+  expect_stats_data "Go echo custom stats" ~generator:"go" ~endpoint:"echo"
+    (Nats_eio.Service.Stats.data echo);
+  expect_stats_data "Go error custom stats" ~generator:"go" ~endpoint:"error"
+    (Nats_eio.Service.Stats.data error);
   if Int.equal (String.length (Nats_eio.Service.Stats.last_error error)) 0 then
     failf "Go error stats omitted its last error"
 
@@ -270,6 +290,13 @@ let run env =
           (Nats_eio.Service.Config.v ~name:"ocaml-interop-service"
              ~version:"1.2.3" ~description:"OCaml Service interop"
              ~metadata:[ ("language", "ocaml"); ("suite", "interop") ]
+             ~stats_handler:(fun endpoint ->
+               if
+                 String.equal
+                   (Nats_eio.Service.Stats.endpoint_name endpoint)
+                   "echo"
+               then Some (stats_data ~generator:"ocaml" ~endpoint:"echo")
+               else None)
              ())
       in
       let service =
