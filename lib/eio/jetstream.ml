@@ -3303,7 +3303,7 @@ end
 
 module Consumer = struct
   module Config = struct
-    type ack_policy = No_ack | All | Explicit
+    type ack_policy = No_ack | All | Explicit | Flow_control
     type priority_policy = Overflow | Pinned_client | Prioritized
 
     type deliver_policy =
@@ -3317,6 +3317,7 @@ module Consumer = struct
     type replay_policy = Instant | Original
 
     type t = {
+      name : string option;
       durable_name : string option;
       description : string option;
       deliver_subject : Nats.Subject.t option;
@@ -3455,7 +3456,7 @@ module Consumer = struct
                  value = "only one group is currently supported";
                })
 
-    let v ?durable_name ?description ?deliver_subject ?deliver_group
+    let v ?name ?durable_name ?description ?deliver_subject ?deliver_group
         ?idle_heartbeat ?flow_control ?(deliver_policy = All)
         ?(ack_policy = Explicit) ?ack_wait ?max_deliver ?filter_subject
         ?(filter_subjects = []) ?(backoff = []) ?pause_until
@@ -3471,7 +3472,20 @@ module Consumer = struct
       let ( let* ) value f =
         match value with Error error -> Error error | Ok value -> f value
       in
+      let* () = validate_name name in
       let* () = validate_name durable_name in
+      let* () =
+        match (name, durable_name) with
+        | Some name, Some durable_name when not (String.equal name durable_name)
+          ->
+            Error
+              (Error.Invalid_consumer_policy
+                 {
+                   field = "name";
+                   value = "must equal durable_name when both are set";
+                 })
+        | _ -> Ok ()
+      in
       let* () =
         match (deliver_subject, deliver_group) with
         | None, Some _ ->
@@ -3589,6 +3603,7 @@ module Consumer = struct
       let* () = validate_limit "max_bytes" max_bytes in
       Ok
         {
+          name;
           durable_name;
           description;
           deliver_subject;
@@ -3621,6 +3636,7 @@ module Consumer = struct
           mem_storage;
         }
 
+    let name value = value.name
     let durable_name value = value.durable_name
     let description value = value.description
     let deliver_subject value = value.deliver_subject
@@ -3652,14 +3668,14 @@ module Consumer = struct
     let inactive_threshold value = value.inactive_threshold
     let mem_storage value = value.mem_storage
 
-    let rebuild ~durable_name ~description ~deliver_subject ~deliver_group
+    let rebuild ?name ~durable_name ~description ~deliver_subject ~deliver_group
         ~idle_heartbeat ~flow_control ~deliver_policy ~ack_policy ~ack_wait
         ~max_deliver ~filter_subject ~filter_subjects ~backoff ~pause_until
         ~priority_groups ~priority_policy ~priority_timeout ~sample_frequency
         ~rate_limit ~replicas ~metadata ~replay_policy ~max_ack_pending
         ~max_waiting ~max_batch ~max_expires ~max_bytes ~headers_only
-        ~inactive_threshold ~mem_storage =
-      v ?durable_name ?description ?deliver_subject ?deliver_group
+        ~inactive_threshold ~mem_storage () =
+      v ?name ?durable_name ?description ?deliver_subject ?deliver_group
         ?idle_heartbeat ?flow_control ~deliver_policy ~ack_policy ?ack_wait
         ?max_deliver ?filter_subject ~filter_subjects ~backoff ?sample_frequency
         ?pause_until ~priority_groups ?priority_policy ?priority_timeout
@@ -3689,7 +3705,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let rebuild_delivery value ~filter_subject ~filter_subjects ~backoff =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -3708,7 +3724,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let rebuild_priority value ~priority_groups ~priority_policy
         ~priority_timeout =
@@ -3728,7 +3744,7 @@ module Consumer = struct
         ~max_expires:value.max_expires ~max_bytes:value.max_bytes
         ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_durable_name value durable_name =
       rebuild ~durable_name ~description:value.description
@@ -3748,7 +3764,27 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
+
+    let with_name value name =
+      rebuild ?name ~durable_name:value.durable_name
+        ~description:value.description ~deliver_subject:value.deliver_subject
+        ~deliver_group:value.deliver_group
+        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
+        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
+        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
+        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~filter_subjects:value.filter_subjects ~backoff:value.backoff
+        ~pause_until:value.pause_until ~priority_groups:value.priority_groups
+        ~priority_policy:value.priority_policy
+        ~priority_timeout:value.priority_timeout
+        ~sample_frequency:value.sample_frequency ~rate_limit:value.rate_limit
+        ~replicas:value.replicas ~metadata:value.metadata
+        ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
+        ~max_batch:value.max_batch ~max_expires:value.max_expires
+        ~max_bytes:value.max_bytes ~headers_only:value.headers_only
+        ~inactive_threshold:value.inactive_threshold
+        ~mem_storage:value.mem_storage ()
 
     let with_description value description =
       rebuild ~durable_name:value.durable_name ~description
@@ -3768,7 +3804,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_deliver_subject value deliver_subject =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -3787,7 +3823,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_deliver_group value deliver_group =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -3806,7 +3842,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_idle_heartbeat value idle_heartbeat =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -3826,7 +3862,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_flow_control value flow_control =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -3846,7 +3882,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_deliver_policy value deliver_policy =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -3866,7 +3902,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_ack_policy value ack_policy =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -3885,7 +3921,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_ack_wait value ack_wait =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -3904,7 +3940,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_max_deliver value max_deliver =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -3923,7 +3959,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_filter_subject value filter_subject =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -3943,7 +3979,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_filter_subjects value filter_subjects =
       rebuild_delivery value ~filter_subject:None ~filter_subjects
@@ -4013,7 +4049,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_max_ack_pending value max_ack_pending =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -4033,7 +4069,7 @@ module Consumer = struct
         ~max_expires:value.max_expires ~max_bytes:value.max_bytes
         ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_max_waiting value max_waiting =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -4053,7 +4089,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_max_batch value max_batch =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -4073,7 +4109,7 @@ module Consumer = struct
         ~max_batch ~max_expires:value.max_expires ~max_bytes:value.max_bytes
         ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_max_expires value max_expires =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -4093,7 +4129,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires ~max_bytes:value.max_bytes
         ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_max_bytes value max_bytes =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -4113,7 +4149,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires ~max_bytes
         ~headers_only:value.headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_headers_only value headers_only =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -4133,7 +4169,7 @@ module Consumer = struct
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only
         ~inactive_threshold:value.inactive_threshold
-        ~mem_storage:value.mem_storage
+        ~mem_storage:value.mem_storage ()
 
     let with_inactive_threshold value inactive_threshold =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -4152,7 +4188,7 @@ module Consumer = struct
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
-        ~inactive_threshold ~mem_storage:value.mem_storage
+        ~inactive_threshold ~mem_storage:value.mem_storage ()
 
     let with_mem_storage value mem_storage =
       rebuild ~durable_name:value.durable_name ~description:value.description
@@ -4171,10 +4207,11 @@ module Consumer = struct
         ~max_ack_pending:value.max_ack_pending ~max_waiting:value.max_waiting
         ~max_batch:value.max_batch ~max_expires:value.max_expires
         ~max_bytes:value.max_bytes ~headers_only:value.headers_only
-        ~inactive_threshold:value.inactive_threshold ~mem_storage
+        ~inactive_threshold:value.inactive_threshold ~mem_storage ()
   end
 
   type wire_config = {
+    name : string option;
     durable_name : string option;
     description : string option;
     deliver_subject : string option;
@@ -4216,6 +4253,7 @@ module Consumer = struct
         ("none", Config.No_ack);
         ("all", Config.All);
         ("explicit", Config.Explicit);
+        ("flow_control", Config.Flow_control);
       ]
 
   let replay_policy_codec =
@@ -4300,6 +4338,7 @@ module Consumer = struct
   let wire_config_codec =
     Jsont.Object.map ~kind:"JetStream consumer config"
       (fun
+        name
         durable_name
         description
         deliver_subject
@@ -4335,6 +4374,7 @@ module Consumer = struct
         unknown
       ->
         {
+          name;
           durable_name;
           description;
           deliver_subject;
@@ -4369,6 +4409,7 @@ module Consumer = struct
           mem_storage;
           unknown;
         })
+    |> Jsont.Object.opt_mem "name" Jsont.string ~enc:(fun value -> value.name)
     |> Jsont.Object.opt_mem "durable_name" Jsont.string ~enc:(fun value ->
         value.durable_name)
     |> Jsont.Object.opt_mem "description" Jsont.string ~enc:(fun value ->
@@ -4473,6 +4514,7 @@ module Consumer = struct
       | Config.Last_per_subject -> ("last_per_subject", None, None)
     in
     {
+      name = Config.name value;
       durable_name = Config.durable_name value;
       description = Config.description value;
       deliver_subject =
@@ -4653,7 +4695,8 @@ module Consumer = struct
     let max_batch = value.max_batch in
     let max_bytes = value.max_bytes in
     match
-      Config.v ?durable_name:value.durable_name ?description:value.description
+      Config.v ?name:value.name ?durable_name:value.durable_name
+        ?description:value.description
         ?deliver_subject ?deliver_group ?idle_heartbeat
         ?flow_control:value.flow_control ~deliver_policy
         ~ack_policy:value.ack_policy ?ack_wait ?max_deliver ?filter_subject
@@ -5142,6 +5185,10 @@ module Consumer = struct
     in
     {
       value with
+      name =
+        (match (current.name, value.name) with
+        | Some name, None -> Some name
+        | _ -> value.name);
       durable_name =
         (match (current.durable_name, value.durable_name) with
         | Some durable_name, None -> Some durable_name
@@ -5940,7 +5987,11 @@ module Consumer = struct
     let jetstream = stream.jetstream in
     let stream_name = Stream.name stream in
     let subject =
-      match Config.durable_name config with
+      match
+        match (Config.durable_name config, Config.name config) with
+        | Some name, _ | None, Some name -> Some name
+        | None, None -> None
+      with
       | None -> api_subject jetstream [ "CONSUMER"; "CREATE"; stream_name ]
       | Some name ->
           api_subject jetstream [ "CONSUMER"; "CREATE"; stream_name; name ]
@@ -5967,7 +6018,12 @@ module Consumer = struct
                   num_pending;
                   _;
                 } -> (
-                match Config.durable_name config with
+                let expected_name =
+                  match (Config.name config, Config.durable_name config) with
+                  | Some expected, _ | None, Some expected -> Some expected
+                  | None, None -> None
+                in
+                match expected_name with
                 | Some expected when not (String.equal expected name) ->
                     Error
                       (Error.Unexpected_consumer_name
@@ -6181,7 +6237,12 @@ module Consumer = struct
                     Ok ())))
 
   let update ?timeout consumer config =
-    match Config.durable_name config with
+    let configured_name =
+      match (Config.name config, Config.durable_name config) with
+      | Some actual, _ | None, Some actual -> Some actual
+      | None, None -> None
+    in
+    match configured_name with
     | Some actual when not (String.equal actual consumer.name) ->
         Error
           (Error.Unexpected_consumer_name { expected = consumer.name; actual })

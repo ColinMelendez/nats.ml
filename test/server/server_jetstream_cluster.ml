@@ -169,6 +169,8 @@ let expect_consumer_config info ~name ~delivery ~filter =
   | Nats_eio.Jetstream.Consumer.Config.No_ack ->
       failf "cluster consumer did not use explicit acknowledgements"
   | Nats_eio.Jetstream.Consumer.Config.All ->
+      failf "cluster consumer did not use explicit acknowledgements"
+  | Nats_eio.Jetstream.Consumer.Config.Flow_control ->
       failf "cluster consumer did not use explicit acknowledgements");
   (match Nats_eio.Jetstream.Consumer.Config.replicas config with
   | Some 3 -> ()

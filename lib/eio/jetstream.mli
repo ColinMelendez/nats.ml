@@ -702,7 +702,7 @@ end
 
 module Consumer : sig
   module Config : sig
-    type ack_policy = No_ack | All | Explicit
+    type ack_policy = No_ack | All | Explicit | Flow_control
     type priority_policy = Overflow | Pinned_client | Prioritized
 
     type deliver_policy =
@@ -718,6 +718,7 @@ module Consumer : sig
     type error = Error.config
 
     val v :
+      ?name:string ->
       ?durable_name:string ->
       ?description:string ->
       ?deliver_subject:Nats.Subject.t ->
@@ -751,6 +752,7 @@ module Consumer : sig
       unit ->
       (t, error) result
 
+    val name : t -> string option
     val durable_name : t -> string option
     val description : t -> string option
     val deliver_subject : t -> Nats.Subject.t option
@@ -811,6 +813,9 @@ module Consumer : sig
     val headers_only : t -> bool option
     val inactive_threshold : t -> Mtime.Span.t option
     val mem_storage : t -> bool option
+
+    val with_name : t -> string option -> (t, error) result
+    (** [with_name config value] replaces the optional consumer name. *)
 
     val with_durable_name : t -> string option -> (t, error) result
     (** [with_durable_name config value] replaces the durable identity. *)

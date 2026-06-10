@@ -1178,8 +1178,9 @@ let () =
           let pause_until = ptime_of_rfc3339 "2026-08-13T12:00:00.000000000Z" in
           let config =
             expect_jetstream_config_ok
-              (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"worker"
-                 ~description:"before" ~deliver_subject:subject
+              (Nats_eio.Jetstream.Consumer.Config.v ~name:"worker"
+                 ~durable_name:"worker" ~description:"before"
+                 ~deliver_subject:subject
                  ~deliver_group:group ~idle_heartbeat:span ~flow_control:true
                  ~deliver_policy:
                    (Nats_eio.Jetstream.Consumer.Config.By_start_sequence 1L)
@@ -1193,6 +1194,8 @@ let () =
                  ~max_expires:span ~max_bytes:1024 ~headers_only:true
                  ~inactive_threshold:span ~mem_storage:true ())
           in
+          equal (option string) (Some "worker")
+            (Nats_eio.Jetstream.Consumer.Config.name config);
           let described =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Consumer.Config.with_description config
@@ -1492,7 +1495,7 @@ let () =
               in
               let config =
                 expect_jetstream_config_ok
-                  (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"worker"
+                  (Nats_eio.Jetstream.Consumer.Config.v
                      ~priority_groups:[ "blue" ]
                      ~priority_policy:
                        Nats_eio.Jetstream.Consumer.Config.Pinned_client
@@ -1653,7 +1656,8 @@ let () =
               in
               let config =
                 expect_jetstream_config_ok
-                  (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"worker"
+                  (Nats_eio.Jetstream.Consumer.Config.v ~name:"worker"
+                     ~durable_name:"worker"
                      ~deliver_subject:(Nats.Subject.literal "orders.push")
                      ~filter_subjects:
                        [
@@ -1666,6 +1670,7 @@ let () =
                          Mtime.Span.of_uint64_ns 2_000_000L;
                        ]
                      ~pause_until ~sample_frequency:25 ~rate_limit:65536L
+                     ~ack_policy:Nats_eio.Jetstream.Consumer.Config.Flow_control
                      ~replicas:3
                      ~metadata:[ ("owner", "client") ]
                      ())
@@ -1684,6 +1689,14 @@ let () =
               if
                 not (contains_substring ~needle:"sample_freq\\\":\\\"25%" trace)
               then fail "consumer create omitted sample frequency";
+              if not (contains_substring ~needle:"name\\\":\\\"worker" trace)
+              then fail "consumer create omitted the consumer name";
+              if
+                not
+                  (contains_substring
+                     ~needle:"ack_policy\\\":\\\"flow_control"
+                     trace)
+              then fail "consumer create omitted flow-control acknowledgements";
               if
                 not
                   (contains_substring ~needle:"rate_limit_bps\\\":65536" trace)
@@ -1717,7 +1730,7 @@ let () =
               Eio.Promise.resolve response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:1
-                      {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"explicit","sample_freq":"25%","rate_limit_bps":65536,"num_replicas":3,"metadata":{"owner":"client"},"replay_policy":"instant"}}|}));
+                      {|{"stream_name":"ORDERS","name":"worker","config":{"name":"worker","durable_name":"worker","deliver_subject":"orders.push","deliver_policy":"all","ack_policy":"flow_control","sample_freq":"25%","rate_limit_bps":65536,"num_replicas":3,"metadata":{"owner":"client"},"replay_policy":"instant"}}|}));
               let consumer = expect_jetstream_ok (Eio.Promise.await result) in
               equal string "worker" (Nats_eio.Jetstream.Consumer.name consumer);
               expect_ok (Nats_eio.Connection.close connection);
