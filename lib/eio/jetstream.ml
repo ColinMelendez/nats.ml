@@ -701,6 +701,7 @@ module Stream = struct
     type retention = Limits | Interest | Work_queue
     type discard = Old | New
     type compression = Uncompressed | S2
+    type persist_mode = Default | Async
 
     let allowed_name_character character =
       let code = Char.code character in
@@ -989,8 +990,10 @@ module Stream = struct
       no_ack : bool;
       duplicate_window : Mtime.Span.t option;
       allow_msg_ttl : bool;
+      allow_msg_counter : bool;
       allow_atomic_publish : bool;
       allow_msg_schedules : bool;
+      persist_mode : persist_mode;
       allow_batch_publish : bool;
       subject_delete_marker_ttl : Mtime.Span.t option;
       allow_rollup : bool;
@@ -1021,8 +1024,10 @@ module Stream = struct
         ?(discard = Old) ?max_msgs ?max_msgs_per_subject ?max_bytes ?max_age
         ?max_msg_size ?max_consumers ?(discard_new_per_subject = false)
         ?(no_ack = false) ?duplicate_window ?(allow_msg_ttl = false)
+        ?(allow_msg_counter = false)
         ?(allow_atomic_publish = false) ?(allow_msg_schedules = false)
-        ?(allow_batch_publish = false) ?subject_delete_marker_ttl
+        ?(persist_mode = Default) ?(allow_batch_publish = false)
+        ?subject_delete_marker_ttl
         ?(allow_rollup = false) ?(allow_direct = false) ?(deny_delete = false)
         ?(deny_purge = false) ?first_sequence ?consumer_limits ?(sealed = false)
         () =
@@ -1154,8 +1159,10 @@ module Stream = struct
           no_ack;
           duplicate_window;
           allow_msg_ttl;
+          allow_msg_counter;
           allow_atomic_publish;
           allow_msg_schedules;
+          persist_mode;
           allow_batch_publish;
           subject_delete_marker_ttl;
           allow_rollup;
@@ -1172,7 +1179,8 @@ module Stream = struct
         ?metadata ?retention ?discard ?max_msgs
         ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size ?max_consumers
         ?discard_new_per_subject ?no_ack ?duplicate_window ?allow_msg_ttl
-        ?allow_atomic_publish ?allow_msg_schedules ?allow_batch_publish
+        ?allow_msg_counter ?allow_atomic_publish ?allow_msg_schedules
+        ?persist_mode ?allow_batch_publish
         ?subject_delete_marker_ttl ?allow_rollup ?allow_direct ?deny_delete
         ?deny_purge ?first_sequence ?consumer_limits ?sealed () =
       v_internal ~allow_empty_subjects:false ~name ~subjects ?description
@@ -1180,8 +1188,9 @@ module Stream = struct
         ?republish ?mirror_direct ?compression ?metadata ?retention ?discard
         ?max_msgs ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size
         ?max_consumers ?discard_new_per_subject ?no_ack ?duplicate_window
-        ?allow_msg_ttl ?allow_atomic_publish ?allow_msg_schedules
-        ?allow_batch_publish ?subject_delete_marker_ttl ?allow_rollup
+        ?allow_msg_ttl ?allow_msg_counter ?allow_atomic_publish
+        ?allow_msg_schedules ?persist_mode ?allow_batch_publish
+        ?subject_delete_marker_ttl ?allow_rollup
         ?allow_direct ?deny_delete ?deny_purge ?first_sequence ?consumer_limits
         ?sealed ()
 
@@ -1210,8 +1219,10 @@ module Stream = struct
     let no_ack value = value.no_ack
     let duplicate_window value = value.duplicate_window
     let allow_msg_ttl value = value.allow_msg_ttl
+    let allow_msg_counter value = value.allow_msg_counter
     let allow_atomic_publish value = value.allow_atomic_publish
     let allow_msg_schedules value = value.allow_msg_schedules
+    let persist_mode value = value.persist_mode
     let allow_batch_publish value = value.allow_batch_publish
     let subject_delete_marker_ttl value = value.subject_delete_marker_ttl
     let allow_rollup value = value.allow_rollup
@@ -1224,8 +1235,9 @@ module Stream = struct
 
     let rebuild ?sealed ?replicas ?placement ?mirror ?sources ?subject_transform
         ?republish ?mirror_direct ?compression ?metadata
-        ?allow_msg_ttl ?allow_atomic_publish ?allow_msg_schedules
-        ?allow_batch_publish ?subject_delete_marker_ttl ?max_consumers
+        ?allow_msg_ttl ?allow_msg_counter ?allow_atomic_publish
+        ?allow_msg_schedules ?persist_mode ?allow_batch_publish
+        ?subject_delete_marker_ttl ?max_consumers
         ?discard_new_per_subject ?no_ack ?duplicate_window ?deny_purge
         ?first_sequence ?consumer_limits value ~name ~subjects ~storage
         ~retention ~discard ~max_msgs ~max_msgs_per_subject ~max_bytes ~max_age
@@ -1246,12 +1258,16 @@ module Stream = struct
       let allow_msg_ttl =
         Option.value ~default:value.allow_msg_ttl allow_msg_ttl
       in
+      let allow_msg_counter =
+        Option.value ~default:value.allow_msg_counter allow_msg_counter
+      in
       let allow_atomic_publish =
         Option.value ~default:value.allow_atomic_publish allow_atomic_publish
       in
       let allow_msg_schedules =
         Option.value ~default:value.allow_msg_schedules allow_msg_schedules
       in
+      let persist_mode = Option.value ~default:value.persist_mode persist_mode in
       let allow_batch_publish =
         Option.value ~default:value.allow_batch_publish allow_batch_publish
       in
@@ -1282,8 +1298,9 @@ module Stream = struct
         ~mirror_direct ~compression ~metadata ~discard ?max_msgs
         ?max_bytes ?max_msgs_per_subject ?max_age ?max_msg_size ?max_consumers
         ~discard_new_per_subject ~no_ack ?duplicate_window ~allow_rollup
-        ~allow_msg_ttl ~allow_atomic_publish ~allow_msg_schedules
-        ~allow_batch_publish ?subject_delete_marker_ttl ~allow_direct
+        ~allow_msg_ttl ~allow_msg_counter ~allow_atomic_publish
+        ~allow_msg_schedules ~persist_mode ~allow_batch_publish
+        ?subject_delete_marker_ttl ~allow_direct
         ~deny_delete ~deny_purge ?first_sequence ?consumer_limits
         ~sealed:(Option.value sealed ~default:value.sealed)
         ()
@@ -1311,8 +1328,10 @@ module Stream = struct
         ~allow_rollup:value.allow_rollup
         ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
         ~allow_msg_ttl:value.allow_msg_ttl
+        ~allow_msg_counter:value.allow_msg_counter
         ~allow_atomic_publish:value.allow_atomic_publish
         ~allow_msg_schedules:value.allow_msg_schedules
+        ~persist_mode:value.persist_mode
         ~allow_batch_publish:value.allow_batch_publish
         ?subject_delete_marker_ttl:value.subject_delete_marker_ttl
         ~deny_purge:value.deny_purge ?first_sequence:value.first_sequence
@@ -1440,6 +1459,15 @@ module Stream = struct
         ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
         ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
 
+    let with_allow_msg_counter value allow_msg_counter =
+      rebuild ~allow_msg_counter value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention
+        ~discard:value.discard ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+
     let with_allow_atomic_publish value allow_atomic_publish =
       rebuild ~allow_atomic_publish value ~name:value.name
         ~subjects:value.subjects ~storage:value.storage
@@ -1455,6 +1483,15 @@ module Stream = struct
         ~subjects:value.subjects ~storage:value.storage
         ~retention:value.retention ~discard:value.discard
         ~max_msgs:value.max_msgs
+        ~max_msgs_per_subject:value.max_msgs_per_subject
+        ~max_bytes:value.max_bytes ~max_age:value.max_age
+        ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
+        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
+
+    let with_persist_mode value persist_mode =
+      rebuild ~persist_mode value ~name:value.name ~subjects:value.subjects
+        ~storage:value.storage ~retention:value.retention
+        ~discard:value.discard ~max_msgs:value.max_msgs
         ~max_msgs_per_subject:value.max_msgs_per_subject
         ~max_bytes:value.max_bytes ~max_age:value.max_age
         ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
@@ -1576,8 +1613,10 @@ module Stream = struct
         ~allow_rollup:value.allow_rollup
         ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
         ~allow_msg_ttl:value.allow_msg_ttl
+        ~allow_msg_counter:value.allow_msg_counter
         ~allow_atomic_publish:value.allow_atomic_publish
         ~allow_msg_schedules:value.allow_msg_schedules
+        ~persist_mode:value.persist_mode
         ~allow_batch_publish:value.allow_batch_publish
         ?subject_delete_marker_ttl:value.subject_delete_marker_ttl
         ~deny_purge:value.deny_purge ?first_sequence:value.first_sequence
@@ -1602,8 +1641,10 @@ module Stream = struct
         ~discard_new_per_subject:value.discard_new_per_subject
         ~no_ack:value.no_ack ?duplicate_window:value.duplicate_window
         ~allow_msg_ttl:value.allow_msg_ttl
+        ~allow_msg_counter:value.allow_msg_counter
         ~allow_atomic_publish:value.allow_atomic_publish
         ~allow_msg_schedules:value.allow_msg_schedules
+        ~persist_mode:value.persist_mode
         ~allow_batch_publish:value.allow_batch_publish
         ?subject_delete_marker_ttl:value.subject_delete_marker_ttl
         ~allow_rollup:value.allow_rollup ~allow_direct:value.allow_direct
@@ -1722,8 +1763,10 @@ module Stream = struct
     no_ack : bool;
     duplicate_window : int64 option;
     allow_msg_ttl : bool option;
+    allow_msg_counter : bool option;
     allow_atomic_publish : bool option;
     allow_msg_schedules : bool option;
+    persist_mode : Config.persist_mode option;
     allow_batch_publish : bool option;
     subject_delete_marker_ttl : int64 option;
     allow_rollup : bool;
@@ -1793,6 +1836,9 @@ module Stream = struct
         ("none", Config.Uncompressed);
         ("", Config.Uncompressed);
       ]
+
+  let persist_mode_codec =
+    Jsont.enum [ ("default", Config.Default); ("async", Config.Async) ]
 
   let wire_placement_codec =
     Jsont.Object.map ~kind:"JetStream placement" (fun cluster tags ->
@@ -2113,8 +2159,10 @@ module Stream = struct
         no_ack
         duplicate_window
         allow_msg_ttl
+        allow_msg_counter
         allow_atomic_publish
         allow_msg_schedules
+        persist_mode
         allow_batch_publish
         subject_delete_marker_ttl
         allow_rollup
@@ -2153,8 +2201,10 @@ module Stream = struct
           no_ack = Option.value ~default:false no_ack;
           duplicate_window;
           allow_msg_ttl;
+          allow_msg_counter;
           allow_atomic_publish;
           allow_msg_schedules;
+          persist_mode;
           allow_batch_publish;
           subject_delete_marker_ttl;
           allow_rollup = Option.value ~default:false allow_rollup;
@@ -2219,10 +2269,14 @@ module Stream = struct
         value.duplicate_window)
     |> Jsont.Object.opt_mem "allow_msg_ttl" Jsont.bool ~enc:(fun value ->
         value.allow_msg_ttl)
+    |> Jsont.Object.opt_mem "allow_msg_counter" Jsont.bool ~enc:(fun value ->
+        value.allow_msg_counter)
     |> Jsont.Object.opt_mem "allow_atomic" Jsont.bool ~enc:(fun value ->
         value.allow_atomic_publish)
     |> Jsont.Object.opt_mem "allow_msg_schedules" Jsont.bool ~enc:(fun value ->
         value.allow_msg_schedules)
+    |> Jsont.Object.opt_mem "persist_mode" persist_mode_codec ~enc:(fun value ->
+        value.persist_mode)
     |> Jsont.Object.opt_mem "allow_batched" Jsont.bool ~enc:(fun value ->
         value.allow_batch_publish)
     |> Jsont.Object.opt_mem "subject_delete_marker_ttl" Jsont.int64
@@ -2395,10 +2449,16 @@ module Stream = struct
       duplicate_window =
         Option.map Mtime.Span.to_uint64_ns (Config.duplicate_window value);
       allow_msg_ttl = (if Config.allow_msg_ttl value then Some true else None);
+      allow_msg_counter =
+        if Config.allow_msg_counter value then Some true else None;
       allow_atomic_publish =
         (if Config.allow_atomic_publish value then Some true else None);
       allow_msg_schedules =
         (if Config.allow_msg_schedules value then Some true else None);
+      persist_mode =
+        (match Config.persist_mode value with
+        | Config.Default -> None
+        | Config.Async -> Some Config.Async);
       allow_batch_publish =
         (if Config.allow_batch_publish value then Some true else None);
       subject_delete_marker_ttl =
@@ -2465,8 +2525,10 @@ module Stream = struct
              (Option.map Mtime.Span.to_uint64_ns
                 (Config.duplicate_window value)));
       allow_msg_ttl = Some (Config.allow_msg_ttl value);
+      allow_msg_counter = Some (Config.allow_msg_counter value);
       allow_atomic_publish = Some (Config.allow_atomic_publish value);
       allow_msg_schedules = Some (Config.allow_msg_schedules value);
+      persist_mode = Some (Config.persist_mode value);
       allow_batch_publish = Some (Config.allow_batch_publish value);
       subject_delete_marker_ttl =
         Some
@@ -2590,10 +2652,13 @@ module Stream = struct
         ~discard_new_per_subject:value.discard_new_per_subject
         ~no_ack:value.no_ack ?duplicate_window
         ~allow_msg_ttl:(Option.value ~default:false value.allow_msg_ttl)
+        ~allow_msg_counter:
+          (Option.value ~default:false value.allow_msg_counter)
         ~allow_atomic_publish:
           (Option.value ~default:false value.allow_atomic_publish)
         ~allow_msg_schedules:
           (Option.value ~default:false value.allow_msg_schedules)
+        ~persist_mode:(Option.value ~default:Config.Default value.persist_mode)
         ~allow_batch_publish:
           (Option.value ~default:false value.allow_batch_publish)
         ?subject_delete_marker_ttl ~allow_rollup:value.allow_rollup

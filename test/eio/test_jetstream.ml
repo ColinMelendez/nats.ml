@@ -488,7 +488,9 @@ let () =
                  ~deny_delete:true ~replicas:3 ~placement
                  ~compression:Nats_eio.Jetstream.Stream.Config.S2
                  ~allow_msg_ttl:true
+                 ~allow_msg_counter:true
                  ~allow_atomic_publish:true ~allow_msg_schedules:true
+                 ~persist_mode:Nats_eio.Jetstream.Stream.Config.Async
                  ~allow_batch_publish:true
                  ~subject_delete_marker_ttl:Mtime.Span.(2 * s)
                  ~metadata:[ ("owner", "users") ]
@@ -511,9 +513,15 @@ let () =
           equal bool true
             (Nats_eio.Jetstream.Stream.Config.allow_msg_ttl config);
           equal bool true
+            (Nats_eio.Jetstream.Stream.Config.allow_msg_counter config);
+          equal bool true
             (Nats_eio.Jetstream.Stream.Config.allow_atomic_publish config);
           equal bool true
             (Nats_eio.Jetstream.Stream.Config.allow_msg_schedules config);
+          (match Nats_eio.Jetstream.Stream.Config.persist_mode config with
+          | Nats_eio.Jetstream.Stream.Config.Async -> ()
+          | Nats_eio.Jetstream.Stream.Config.Default ->
+              fail "stream config lost async persistence mode");
           equal bool true
             (Nats_eio.Jetstream.Stream.Config.allow_batch_publish config);
           (match
@@ -606,6 +614,13 @@ let () =
             (Nats_eio.Jetstream.Stream.Config.allow_msg_ttl updated);
           let updated =
             expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_allow_msg_counter config
+                 false)
+          in
+          equal bool false
+            (Nats_eio.Jetstream.Stream.Config.allow_msg_counter updated);
+          let updated =
+            expect_jetstream_config_ok
               (Nats_eio.Jetstream.Stream.Config.with_allow_atomic_publish config
                  false)
           in
@@ -618,6 +633,15 @@ let () =
           in
           equal bool false
             (Nats_eio.Jetstream.Stream.Config.allow_msg_schedules updated);
+          let updated =
+            expect_jetstream_config_ok
+              (Nats_eio.Jetstream.Stream.Config.with_persist_mode config
+                 Nats_eio.Jetstream.Stream.Config.Default)
+          in
+          (match Nats_eio.Jetstream.Stream.Config.persist_mode updated with
+          | Nats_eio.Jetstream.Stream.Config.Default -> ()
+          | Nats_eio.Jetstream.Stream.Config.Async ->
+              fail "stream config updater retained async persistence mode");
           let updated =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Stream.Config.with_allow_batch_publish config
@@ -2204,6 +2228,8 @@ let () =
                      ~duplicate_window:(Mtime.Span.of_uint64_ns 2_000_000_000L)
                      ~first_sequence:3L ~consumer_limits
                      ~allow_rollup:true ~allow_direct:true ~deny_delete:true
+                     ~allow_msg_counter:true
+                     ~persist_mode:Nats_eio.Jetstream.Stream.Config.Async
                      ~replicas:3
                      ~compression:Nats_eio.Jetstream.Stream.Config.S2
                      ~metadata:[ ("owner", "users") ]
@@ -2247,6 +2273,16 @@ let () =
               then fail "stream create omitted the no-ack flag";
               if
                 not
+                  (contains_substring ~needle:"allow_msg_counter\\\":true"
+                     trace)
+              then fail "stream create omitted the message-counter flag";
+              if
+                not
+                  (contains_substring ~needle:"persist_mode\\\":\\\"async"
+                     trace)
+              then fail "stream create omitted the persistence mode";
+              if
+                not
                   (contains_substring
                      ~needle:"duplicate_window\\\":2000000000" trace)
               then fail "stream create omitted the duplicate window";
@@ -2269,7 +2305,7 @@ let () =
               Eio.Promise.resolve response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:1
-                      {|{"config":{"name":"KV_users","subjects":["$KV.users.>"],"description":"user values","storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":5,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":true,"allow_direct":true,"deny_delete":true,"num_replicas":3,"sealed":true,"metadata":{"owner":"test"}}}|}));
+                      {|{"config":{"name":"KV_users","subjects":["$KV.users.>"],"description":"user values","storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":5,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_msg_counter":true,"persist_mode":"async","allow_rollup_hdrs":true,"allow_direct":true,"deny_delete":true,"num_replicas":3,"sealed":true,"metadata":{"owner":"test"}}}|}));
               let stream = expect_jetstream_ok (Eio.Promise.await result) in
               equal string "KV_users" (Nats_eio.Jetstream.Stream.name stream);
               expect_ok (Nats_eio.Connection.close connection);
@@ -2371,7 +2407,7 @@ let () =
               Eio.Promise.resolve update_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:2
-                      {|{"config":{"name":"ORDERS","subjects":["orders.>"],"description":"updated","storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":5,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":true,"allow_direct":true,"num_replicas":2,"sealed":true,"placement":{"cluster":"east"},"compression":"s2","metadata":{"owner":"client"},"republish":{"src":"orders.in","dest":"orders.out"}},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}));
+                      {|{"config":{"name":"ORDERS","subjects":["orders.>"],"description":"updated","storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":5,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_msg_counter":true,"persist_mode":"async","allow_rollup_hdrs":true,"allow_direct":true,"num_replicas":2,"sealed":true,"placement":{"cluster":"east"},"compression":"s2","metadata":{"owner":"client"},"republish":{"src":"orders.in","dest":"orders.out"}},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}));
               let info = expect_jetstream_ok (Eio.Promise.await result) in
               equal (option string) (Some "updated")
                 (Nats_eio.Jetstream.Stream.Config.description
@@ -2382,6 +2418,12 @@ let () =
               | Nats_eio.Jetstream.Stream.Config.S2 -> ()
               | Nats_eio.Jetstream.Stream.Config.Uncompressed ->
                   fail "stream update lost compression");
+              equal bool true
+                (Nats_eio.Jetstream.Stream.Config.allow_msg_counter config);
+              (match Nats_eio.Jetstream.Stream.Config.persist_mode config with
+              | Nats_eio.Jetstream.Stream.Config.Async -> ()
+              | Nats_eio.Jetstream.Stream.Config.Default ->
+                  fail "stream update lost persistence mode");
               (match Nats_eio.Jetstream.Stream.Config.metadata config with
               | [ ("owner", "client") ] -> ()
               | _ -> fail "stream update lost stream metadata");

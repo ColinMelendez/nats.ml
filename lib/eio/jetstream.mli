@@ -180,6 +180,9 @@ module Stream : sig
       | Uncompressed
       | S2  (** The server-side stream compression policy. *)
 
+    type persist_mode = Default | Async
+    (** The server's stream persistence acknowledgement policy. *)
+
     module Placement : sig
       type t
       type error = Error.config
@@ -322,8 +325,10 @@ module Stream : sig
       ?no_ack:bool ->
       ?duplicate_window:Mtime.Span.t ->
       ?allow_msg_ttl:bool ->
+      ?allow_msg_counter:bool ->
       ?allow_atomic_publish:bool ->
       ?allow_msg_schedules:bool ->
+      ?persist_mode:persist_mode ->
       ?allow_batch_publish:bool ->
       ?subject_delete_marker_ttl:Mtime.Span.t ->
       ?allow_rollup:bool ->
@@ -371,8 +376,10 @@ module Stream : sig
     val no_ack : t -> bool
     val duplicate_window : t -> Mtime.Span.t option
     val allow_msg_ttl : t -> bool
+    val allow_msg_counter : t -> bool
     val allow_atomic_publish : t -> bool
     val allow_msg_schedules : t -> bool
+    val persist_mode : t -> persist_mode
     val allow_batch_publish : t -> bool
     val subject_delete_marker_ttl : t -> Mtime.Span.t option
     val allow_rollup : t -> bool
@@ -491,6 +498,10 @@ module Stream : sig
     (** [with_allow_msg_ttl config value] replaces whether message-level TTL
         headers are accepted by the stream. *)
 
+    val with_allow_msg_counter : t -> bool -> (t, error) result
+    (** [with_allow_msg_counter config value] replaces whether per-message
+        counters are enabled for the stream. *)
+
     val with_allow_atomic_publish : t -> bool -> (t, error) result
     (** [with_allow_atomic_publish config value] replaces whether atomic batch
         publishing is accepted by the stream. *)
@@ -498,6 +509,10 @@ module Stream : sig
     val with_allow_msg_schedules : t -> bool -> (t, error) result
     (** [with_allow_msg_schedules config value] replaces whether scheduled
         messages are accepted by the stream. *)
+
+    val with_persist_mode : t -> persist_mode -> (t, error) result
+    (** [with_persist_mode config value] replaces when stream writes are
+        flushed relative to their publish acknowledgements. *)
 
     val with_allow_batch_publish : t -> bool -> (t, error) result
     (** [with_allow_batch_publish config value] replaces whether fast batch
