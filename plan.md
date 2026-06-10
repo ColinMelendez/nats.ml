@@ -993,8 +993,15 @@ subscriptions, queue groups, and request/reply.
   validated their requests and counters, and checks endpoint replay plus
   named INFO/STATS monitoring after each failover. Anonymous and TLS runs
   pass through the same official Go `micro` peer.
-- Remaining: explicit cross-SDK Service subscription-failure and
-  parent-connection failure injection, plus broader feature-family matrices.
+- Completed: the single-server Service failure runner uses the official Go
+  client as a controlled publisher to overflow a bounded OCaml endpoint queue,
+  validates the structured slow-consumer failure and failed Service state, and
+  proves the parent connection remains usable. Anonymous and TLS runs pass.
+- Completed: the parent-close runner closes the OCaml parent connection while
+  a Service is active, waits for an after-close marker, proves the Go peer can
+  no longer reach a stale endpoint, and checks clean explicit Service
+  stopping. Anonymous and TLS runs pass.
+- Remaining: broader feature-family matrices and future server/SDK versions.
   The callbacks themselves remain local API behavior because they are not
   represented on the NATS service wire.
 
@@ -1016,8 +1023,9 @@ headers, named INFO/STATS discovery, queue and metadata declarations, exact
 counters, custom endpoint statistics data in both directions, and a request/
 reply completion barrier. The Service matrix repeats this exchange across the
 three pinned server releases and eleven anonymous/token/username-password/
-NKey/JWT/mTLS plaintext/TLS modes. Run the remaining explicit cross-SDK
-  Service failure-injection tests against a real server before G6.
+NKey/JWT/mTLS plaintext/TLS modes. The focused Service failure and
+parent-close runners also pass against a real server in anonymous plaintext
+and TLS modes; broaden those cases across the matrix before G6.
 Services may start after G2 and do not block JetStream,
 KV, or Object Store. Stabilize only after confirming that all service behavior
 composes with the Core connection ownership model.

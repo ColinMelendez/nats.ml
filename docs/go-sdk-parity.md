@@ -26,7 +26,7 @@ the capabilities marked as covered.
 | JetStream consumption | Pull, push, ordered, heartbeats, flow control, priority, consumer reset | Some ordered/ack fields and Go's continuous batching controls |
 | Key-Value | CRUD, CAS, history, finite keys, watches, per-key/marker TTL, purge-delete cleanup, resumable/multi-filter watches, listers | Bucket manager/listers |
 | Object Store | Streaming CRUD, links, metadata, watches, list, seal, and Go interop | Bucket manager/listers and file helpers |
-| Services | Registration, groups, requests, errors, discovery, stats, reset, stopped state, pending limits, custom lifecycle/stat callbacks, bidirectional Go interop across the pinned server matrix, cross-SDK failover recovery | Explicit subscription-failure injection and future server/SDK versions |
+| Services | Registration, groups, requests, errors, discovery, stats, reset, stopped state, pending limits, custom lifecycle/stat callbacks, bidirectional Go interop across the pinned server matrix, cross-SDK failover recovery, controlled subscription-failure recovery, and parent-connection closure cleanup | Future server/SDK versions |
 
 ## Core and transport
 
@@ -190,14 +190,20 @@ It performs bidirectional endpoint requests before each server kill, gates the
 kill on a round barrier after both peers have validated their counters, waits
 for both clients to reconnect, and then verifies endpoint replay plus named
 INFO/STATS monitoring on the surviving servers. Explicit subscription-failure
-injection remains a separate acceptance slice.
+injection is covered separately by a single-server runner that uses the Go
+client to fill a bounded OCaml endpoint queue, validates the structured
+slow-consumer error and failed Service state, and proves the parent connection
+still serves an ordinary request. The parent-close runner then closes the
+parent connection, waits for a marker written after the close completes, and
+proves that the endpoint has no stale responder before explicitly stopping the
+Service.
 
 ## Prioritized follow-up
 
-1. **Cross-SDK Service failure acceptance.** Exercise explicit Service
-   subscription failure and parent-connection failure against the official Go
-   peer; future server/SDK versions and alternative transports such as
-   WebSocket remain separate concerns.
+1. **Broader Service matrices and future SDK/server versions.** Extend the
+   focused failure and parent-close cases across the version/authentication
+   matrix as useful; alternative transports such as WebSocket remain separate
+   concerns.
 
 This ordering keeps the narrow protocol waist intact, gives each addition a
 behavioral test target, and avoids claiming parity merely because unknown JSON

@@ -45,6 +45,8 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-interop-service.sh
 ./scripts/runtest-interop-service-matrix.sh
 ./scripts/runtest-interop-service-reconnect.sh
+./scripts/runtest-interop-service-failure.sh
+./scripts/runtest-interop-service-parent-close.sh
 ./scripts/runtest-interop-jetstream.sh
 ./scripts/runtest-interop-jetstream-matrix.sh
 ./scripts/runtest-interop-key-value.sh
@@ -65,6 +67,8 @@ NATS_TEST_TLS=1 ./scripts/runtest-interop.sh
 ./scripts/runtest-interop-reconnect.sh
 NATS_TEST_TLS=1 ./scripts/runtest-interop-reconnect.sh
 NATS_TEST_TLS=1 ./scripts/runtest-interop-service-reconnect.sh
+NATS_TEST_TLS=1 ./scripts/runtest-interop-service-failure.sh
+NATS_TEST_TLS=1 ./scripts/runtest-interop-service-parent-close.sh
 ```
 
 The script requires Docker and is intentionally outside `dune runtest`; Docker
@@ -257,8 +261,13 @@ separate from that version matrix. The Service reconnect runner reuses the
 three-server failover harness, performs bidirectional endpoint requests before
 each kill, waits for both clients to report recovery, and checks endpoint
 replay plus INFO/STATS monitoring after each failover. It accepts the same
-authentication and TLS controls as the Core reconnect runner; explicit
-subscription-failure injection remains separate.
+authentication and TLS controls as the Core reconnect runner. The Service
+failure runner uses a bounded pending queue and a controlled Go publisher to
+force the OCaml endpoint subscription into a slow-consumer failure, then
+checks the failed Service state and parent-connection usability. Explicit
+parent-connection closure is covered by a separate runner that waits for an
+after-close marker before probing the endpoint, verifies that no stale
+responder remains, and checks clean explicit Service stopping.
 
 The first JetStream layer is available through `Nats_eio.Jetstream`: typed
 stream and consumer configuration and management, including consumer metadata,
