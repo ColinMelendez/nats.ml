@@ -4095,12 +4095,17 @@ let () =
                     (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ~batch:1
                        ~expires:Mtime.Span.(10 * ms)
                        ~idle_heartbeat:Mtime.Span.(1 * ms)
-                       ~filter_subject:
-                         (Nats.Subject.Filter.literal "orders.created")
+                       ~filter_subjects:
+                         [ Nats.Subject.Filter.literal "orders.created" ]
+                       ~replay_policy:Nats_eio.Jetstream.Consumer.Config.Original
+                       ~headers_only:true
+                       ~inactive_threshold:Mtime.Span.(2 * min)
+                       ~max_reset_attempts:3
+                       ~metadata:[ ("owner", "ordered") ] ~name_prefix:"ordered"
                        stream));
               yield_n 5;
               let create_wire =
-                ordered_create_wire ~sid:1 ~name:"ordered-1"
+                ordered_create_wire ~sid:1 ~name:"ordered_1"
                   ~deliver_policy:"all" ()
               in
               Eio.Promise.resolve create_response_u (Ok create_wire);
@@ -4131,9 +4136,36 @@ let () =
               if
                 not
                   (contains_substring
-                     ~needle:"inactive_threshold\\\":300000000000"
+                     ~needle:"inactive_threshold\\\":120000000000"
                      (Buffer.contents trace))
               then fail "ordered consumer did not set an inactive threshold";
+              if
+                not
+                  (contains_substring ~needle:"name\\\":\\\"ordered_1"
+                     (Buffer.contents trace))
+              then fail "ordered consumer did not use its name prefix";
+              if
+                not
+                  (contains_substring
+                     ~needle:"filter_subjects\\\":[\\\"orders.created\\\"]"
+                     (Buffer.contents trace))
+              then fail "ordered consumer omitted plural filters";
+              if
+                not
+                  (contains_substring ~needle:"replay_policy\\\":\\\"original"
+                     (Buffer.contents trace))
+              then fail "ordered consumer omitted replay policy";
+              if
+                not
+                  (contains_substring ~needle:"headers_only\\\":true"
+                     (Buffer.contents trace))
+              then fail "ordered consumer omitted headers-only delivery";
+              if
+                not
+                  (contains_substring
+                     ~needle:"metadata\\\":{\\\"owner\\\":\\\"ordered\\\"}"
+                     (Buffer.contents trace))
+              then fail "ordered consumer omitted metadata";
               let first_result, first_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve first_result_u
@@ -4141,7 +4173,7 @@ let () =
               yield_n 5;
               Eio.Promise.resolve first_delivery_u
                 (Ok
-                   (ordered_delivery_wire ~sid:2 ~consumer:"ordered-1"
+                   (ordered_delivery_wire ~sid:2 ~consumer:"ordered_1"
                       ~stream_sequence:10L ~consumer_sequence:1L "first"));
               let first =
                 expect_jetstream_ok (Eio.Promise.await first_result)
@@ -4154,7 +4186,7 @@ let () =
               yield_n 5;
               Eio.Promise.resolve second_delivery_u
                 (Ok
-                   (ordered_delivery_wire ~sid:2 ~consumer:"ordered-1"
+                   (ordered_delivery_wire ~sid:2 ~consumer:"ordered_1"
                       ~stream_sequence:12L ~consumer_sequence:2L "filtered"));
               let second =
                 expect_jetstream_ok (Eio.Promise.await second_result)

@@ -6881,6 +6881,14 @@ module Consumer = struct
       max_bytes : int option;
       initial_deliver_policy : Config.deliver_policy;
       filter_subject : Nats.Subject.Filter.t option;
+      filter_subjects : Nats.Subject.Filter.t list;
+      replay_policy : Config.replay_policy;
+      headers_only : bool;
+      inactive_threshold : Mtime.Span.t;
+      max_reset_attempts : int option;
+      metadata : (string * string) list;
+      name_prefix : string option;
+      mutable generation : int;
       mutable consumer : consumer option;
       mutable pull : Pull.t option;
       mutable consumer_sequence : int64;
@@ -6891,7 +6899,7 @@ module Consumer = struct
 
     let default_expires = Mtime.Span.(30 * s)
     let default_idle_heartbeat = Mtime.Span.(5 * s)
-    let inactive_threshold = Mtime.Span.(5 * min)
+    let default_inactive_threshold = Mtime.Span.(5 * min)
     let cleanup_timeout = Mtime.Span.(1 * s)
     let recreate_attempt_timeout = Mtime.Span.(5 * s)
     let timeout_error = Error.Connection Core_error.Timeout
@@ -6971,10 +6979,31 @@ module Consumer = struct
         | Some sequence ->
             Config.By_start_sequence (next_stream_sequence sequence)
       in
+      let filter_subject, filter_subjects =
+        match (ordered.filter_subject, ordered.filter_subjects) with
+        | Some subject, [] -> (Some subject, [])
+        | None, subjects -> (
+            match (deliver_policy, subjects) with
+            | Config.Last_per_subject, [] ->
+                (match Nats.Subject.Filter.of_string ">" with
+                | Ok subject -> (None, [ subject ])
+                | Error _ -> (None, []))
+            | _, _ -> (None, subjects))
+        | Some _, _ :: _ -> (ordered.filter_subject, [])
+      in
+      let name =
+        match ordered.name_prefix with
+        | None -> None
+        | Some prefix ->
+            ordered.generation <- ordered.generation + 1;
+            Some (Format.asprintf "%s_%d" prefix ordered.generation)
+      in
       match
-        Config.v ~deliver_policy ~ack_policy:Config.No_ack
-          ?filter_subject:ordered.filter_subject ~replicas:1 ~inactive_threshold
-          ~mem_storage:true ()
+        Config.v ?name ~deliver_policy ~ack_policy:Config.No_ack
+          ?filter_subject ~filter_subjects
+          ~replay_policy:ordered.replay_policy ~headers_only:ordered.headers_only
+          ~replicas:1 ~inactive_threshold:ordered.inactive_threshold
+          ~metadata:ordered.metadata ~mem_storage:true ()
       with
       | Ok config -> Ok config
       | Error error -> Error (Error.Invalid_config error)
@@ -7033,6 +7062,8 @@ module Consumer = struct
       stop_current_pull ordered;
       let previous_consumer = ordered.consumer in
       ordered.consumer <- None;
+      let attempts = ref 0 in
+      let last_error = ref None in
       let rec attempt ~cleanup_previous =
         match await_connection ordered ~deadline with
         | Error error -> Error error
@@ -7040,11 +7071,19 @@ module Consumer = struct
             if cleanup_previous then (
               ordered.consumer <- previous_consumer;
               cleanup_current_consumer ordered ~deadline);
-            match create_generation ordered ~deadline with
-            | Ok () -> Ok ()
-            | Error error when reconnectable_recreate_error error ->
-                attempt ~cleanup_previous:false
-            | Error error -> Error error)
+            match ordered.max_reset_attempts with
+            | Some limit when !attempts >= limit -> (
+                match !last_error with
+                | Some error -> Error error
+                | None -> Error Error.Consumer_deleted)
+            | _ ->
+                incr attempts;
+                match create_generation ordered ~deadline with
+                | Ok () -> Ok ()
+                | Error error when reconnectable_recreate_error error ->
+                    last_error := Some error;
+                    attempt ~cleanup_previous:false
+                | Error error -> Error error)
       in
       attempt ~cleanup_previous:true
 
@@ -7143,11 +7182,55 @@ module Consumer = struct
           | Ok () -> delete_result)
 
     let v ~sw ?batch ?expires ?idle_heartbeat ?max_bytes
-        ?(deliver_policy = Config.All) ?filter_subject (stream : stream) =
+        ?(deliver_policy = Config.All) ?filter_subject ?(filter_subjects = [])
+        ?(replay_policy = Config.Instant) ?(headers_only = false)
+        ?inactive_threshold ?max_reset_attempts ?(metadata = []) ?name_prefix
+        (stream : stream) =
       let batch = Option.value batch ~default:1 in
       let expires = Option.value expires ~default:default_expires in
       let idle_heartbeat =
         Option.value idle_heartbeat ~default:default_idle_heartbeat
+      in
+      let inactive_threshold =
+        Option.value inactive_threshold ~default:default_inactive_threshold
+      in
+      let max_reset_attempts =
+        match max_reset_attempts with
+        | None | Some 0 -> Ok None
+        | Some value when value > 0 -> Ok (Some value)
+        | Some value ->
+            Error
+              (Error.Invalid_config
+                 (Error.Invalid_consumer_policy
+                    {
+                      field = "max_reset_attempts";
+                      value = Int.to_string value;
+                    }))
+      in
+      let filter_subjects_result =
+        match (filter_subject, filter_subjects) with
+        | Some _, _ :: _ ->
+            Error
+              (Error.Invalid_config
+                 (Error.Invalid_consumer_policy
+                    {
+                      field = "filter_subjects";
+                      value = "exclusive with filter_subject";
+                    }))
+        | _ -> Ok filter_subjects
+      in
+      let name_prefix_result =
+        match name_prefix with
+        | None -> Ok None
+        | Some prefix when String.equal prefix "" ->
+            Error
+              (Error.Invalid_config
+                 (Error.Invalid_consumer_policy
+                    { field = "name_prefix"; value = "must not be empty" }))
+        | Some prefix -> (
+            match Config.v ~name:(prefix ^ "_1") () with
+            | Ok _ -> Ok (Some prefix)
+            | Error error -> Error (Error.Invalid_config error))
       in
       match
         validate_fetch ~batch ~expires ~max_bytes
@@ -7156,6 +7239,11 @@ module Consumer = struct
       with
       | Error error -> Error error
       | Ok () -> (
+          match (max_reset_attempts, filter_subjects_result, name_prefix_result)
+          with
+          | Error error, _, _ | _, Error error, _ | _, _, Error error ->
+              Error error
+          | Ok max_reset_attempts, Ok filter_subjects, Ok name_prefix ->
           let ordered =
             {
               stream;
@@ -7167,6 +7255,14 @@ module Consumer = struct
               max_bytes;
               initial_deliver_policy = deliver_policy;
               filter_subject;
+              filter_subjects;
+              replay_policy;
+              headers_only;
+              inactive_threshold;
+              max_reset_attempts;
+              metadata;
+              name_prefix;
+              generation = 0;
               consumer = None;
               pull = None;
               consumer_sequence = 0L;

@@ -1213,18 +1213,29 @@ module Consumer : sig
       ?max_bytes:int ->
       ?deliver_policy:Config.deliver_policy ->
       ?filter_subject:Nats.Subject.Filter.t ->
+      ?filter_subjects:Nats.Subject.Filter.t list ->
+      ?replay_policy:Config.replay_policy ->
+      ?headers_only:bool ->
+      ?inactive_threshold:Mtime.Span.t ->
+      ?max_reset_attempts:int ->
+      ?metadata:(string * string) list ->
+      ?name_prefix:string ->
       stream ->
       (t, Error.t) result
     (** [v ~sw stream] creates a client-managed ephemeral pull consumer. The
-        initial delivery policy defaults to [All]. Ordered sessions always use
-        [No_ack], one-replica memory storage, and a five-minute inactive
-        threshold; they request idle heartbeats (five seconds by default) to
-        detect a lost consumer. The session owns its pull subscription and
-        recreates the ephemeral consumer after a consumer-sequence gap, a
-        missing heartbeat, consumer deletion, or a non-replayed transport
-        disconnect. Recreated consumers resume at the next stream sequence. The
-        consumer identity is not preserved across every recovery: a server-side
-        consumer leader failure can require a new ephemeral consumer. *)
+        initial delivery policy defaults to [All], and [filter_subject] is
+        exclusive with [filter_subjects]. Ordered sessions always use [No_ack],
+        one-replica memory storage, and a five-minute inactive threshold unless
+        [inactive_threshold] is supplied; they request idle heartbeats (five
+        seconds by default) to detect a lost consumer. [headers_only],
+        [replay_policy], [metadata], and [name_prefix] are applied to every
+        generation. [max_reset_attempts] bounds one recovery cycle; [0] or an
+        omitted value means unlimited retries. The session owns its pull
+        subscription and recreates the ephemeral consumer after a
+        consumer-sequence gap, a missing heartbeat, consumer deletion, or a
+        non-replayed transport disconnect. Recreated consumers resume at the
+        next stream sequence. The consumer identity is not preserved across
+        every recovery unless [name_prefix] is supplied. *)
 
     val next : t -> (Msg.t, Error.t) result
     (** [next ordered] returns the next message in consumer order. A call may
