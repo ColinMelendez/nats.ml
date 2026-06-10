@@ -27,6 +27,11 @@ auth_dir=
 ready=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-ready.XXXXXX")
 peer_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-peer.XXXXXX")
 ocaml_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-ocaml.XXXXXX")
+parent_close_file=
+if [ "$interop_mode" = service-parent-close ]; then
+  parent_close_file=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-parent-close.XXXXXX")
+  rm -f "$parent_close_file"
+fi
 rm -f "$ready"
 prefix="ocaml.interop.$$"
 # shellcheck disable=SC1091 # script_dir points at this file's directory.
@@ -36,12 +41,22 @@ artifact_init interop "$$"
 case "$interop_mode" in
   core)
     acceptance_executable=test/interop/interop_acceptance.exe
+    peer_mode=core
     ;;
   service)
     acceptance_executable=test/interop/interop_service_acceptance.exe
+    peer_mode=service
+    ;;
+  service-failure)
+    acceptance_executable=test/interop/interop_service_failure_acceptance.exe
+    peer_mode=service-failure
+    ;;
+  service-parent-close)
+    acceptance_executable=test/interop/interop_service_parent_close_acceptance.exe
+    peer_mode=service-parent-close
     ;;
   *)
-    echo "NATS_TEST_INTEROP_MODE must be core or service" >&2
+    echo "NATS_TEST_INTEROP_MODE must be core, service, service-failure, or service-parent-close" >&2
     exit 1
     ;;
 esac
@@ -77,6 +92,9 @@ cleanup() {
   fi
   if [ -n "$auth_dir" ]; then
     rm -rf "$auth_dir"
+  fi
+  if [ -n "$parent_close_file" ]; then
+    rm -f "$parent_close_file"
   fi
   rm -f "$ready" "$peer_log" "$ocaml_log"
 }
@@ -291,13 +309,13 @@ run_negative_go() {
           NATS_TEST_NKEY_SEED_FILE="$auth_dir/bad.seed" \
           nix develop .#integration -c nats-ocaml-interop-peer \
           --server "$server" --prefix "$prefix" --ready-file "$ready" \
-          --mode "$interop_mode" >"$peer_log" 2>&1
+          --mode "$peer_mode" >"$peer_log" 2>&1
       else
         NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
           NATS_TEST_USER_SEED_FILE="$auth_dir/bad.seed" \
           nix develop .#integration -c nats-ocaml-interop-peer \
           --server "$server" --prefix "$prefix" --ready-file "$ready" \
-          --mode "$interop_mode" >"$peer_log" 2>&1
+          --mode "$peer_mode" >"$peer_log" 2>&1
       fi
       ;;
     certificate)
@@ -306,7 +324,7 @@ run_negative_go() {
         NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
           nix develop .#integration -c nats-ocaml-interop-peer \
           --server "$server" --prefix "$prefix" --ready-file "$ready" \
-          --mode "$interop_mode" >"$peer_log" 2>&1
+          --mode "$peer_mode" >"$peer_log" 2>&1
       )
       ;;
   esac
@@ -371,11 +389,20 @@ if [ -n "$negative_mode" ]; then
   exit "$status"
 fi
 
-NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
-  nix develop .#integration -c nats-ocaml-interop-peer \
-  --server "$server" --prefix "$prefix" --ready-file "$ready" \
-  --mode "$interop_mode" \
-  >"$peer_log" 2>&1 &
+if [ "$interop_mode" = service-parent-close ]; then
+  NATS_TEST_INTEROP_PARENT_CLOSE_FILE="$parent_close_file" \
+    NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
+    nix develop .#integration -c nats-ocaml-interop-peer \
+    --server "$server" --prefix "$prefix" --ready-file "$ready" \
+    --mode "$peer_mode" \
+    >"$peer_log" 2>&1 &
+else
+  NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
+    nix develop .#integration -c nats-ocaml-interop-peer \
+    --server "$server" --prefix "$prefix" --ready-file "$ready" \
+    --mode "$peer_mode" \
+    >"$peer_log" 2>&1 &
+fi
 peer_pid=$!
 
 attempt=0
@@ -396,7 +423,17 @@ if [ ! -e "$ready" ]; then
 fi
 
 status=0
-if NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
+if [ "$interop_mode" = service-parent-close ]; then
+  if NATS_TEST_INTEROP_PARENT_CLOSE_FILE="$parent_close_file" \
+      NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
+      nix develop .#integration -c dune exec "$acceptance_executable" \
+      >"$ocaml_log" 2>&1
+  then
+    :
+  else
+    status=$?
+  fi
+elif NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
     nix develop .#integration -c dune exec "$acceptance_executable" \
     >"$ocaml_log" 2>&1
 then

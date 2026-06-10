@@ -238,6 +238,10 @@ func runMode(config options) error {
 			return fmt.Errorf("signal-file is required in service-reconnect mode")
 		}
 		return runServiceReconnectPeer(config)
+	case "service-failure":
+		return runServiceFailurePeer(config)
+	case "service-parent-close":
+		return runServiceParentClosePeer(config)
 	case "jetstream":
 		if config.stream == "" {
 			return fmt.Errorf("stream is required in jetstream mode")
