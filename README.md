@@ -256,8 +256,11 @@ against the pinned `nats:2.10.22` image. The Service matrix runner repeats
 that exchange across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` in all
 eleven plaintext/TLS authentication modes (33 cases by default); set
 `NATS_SERVER_IMAGES` or `NATS_INTEROP_SERVICE_MATRIX_MODES` to select a
-bounded subset. Cross-SDK reconnect and failure-injection coverage remains
-separate from that version matrix. The Service reconnect runner reuses the
+bounded subset. Set `NATS_INTEROP_SERVICE_MATRIX_SCENARIOS` to
+`service-failure` and/or `service-parent-close` to apply the same matrix to
+the focused lifecycle cases; both scenarios pass all 33 version/authentication
+cells. Cross-SDK reconnect coverage remains separate from that version matrix.
+The Service reconnect runner reuses the
 three-server failover harness, performs bidirectional endpoint requests before
 each kill, waits for both clients to report recovery, and checks endpoint
 replay plus INFO/STATS monitoring after each failover. It accepts the same

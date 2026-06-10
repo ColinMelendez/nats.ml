@@ -1001,6 +1001,9 @@ subscriptions, queue groups, and request/reply.
   a Service is active, waits for an after-close marker, proves the Go peer can
   no longer reach a stale endpoint, and checks clean explicit Service
   stopping. Anonymous and TLS runs pass.
+- Completed: the Service failure and parent-close scenarios now run through
+  the existing three-version, eleven-mode matrix. All 66 lifecycle cases pass
+  across anonymous, token, username/password, NKey, JWT, mTLS, and TLS modes.
 - Remaining: broader feature-family matrices and future server/SDK versions.
   The callbacks themselves remain local API behavior because they are not
   represented on the NATS service wire.
@@ -1023,9 +1026,10 @@ headers, named INFO/STATS discovery, queue and metadata declarations, exact
 counters, custom endpoint statistics data in both directions, and a request/
 reply completion barrier. The Service matrix repeats this exchange across the
 three pinned server releases and eleven anonymous/token/username-password/
-NKey/JWT/mTLS plaintext/TLS modes. The focused Service failure and
-parent-close runners also pass against a real server in anonymous plaintext
-and TLS modes; broaden those cases across the matrix before G6.
+NKey/JWT/mTLS plaintext/TLS modes. Its selectable Service failure and
+parent-close scenarios pass all 66 lifecycle cases across that same matrix;
+future server versions and additional cluster-level failure topologies remain
+follow-up work.
 Services may start after G2 and do not block JetStream,
 KV, or Object Store. Stabilize only after confirming that all service behavior
 composes with the Core connection ownership model.

@@ -183,7 +183,9 @@ both directions against the pinned Go `micro` peer. Its matrix repeats the
 wire contract across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` under
 anonymous, token, username/password, NKey, JWT, mTLS, and their supported TLS
 variants. Lifecycle callback execution remains a local API contract because
-callbacks are not encoded on the NATS service wire.
+callbacks are not encoded on the NATS service wire. The same matrix runner can
+select the controlled subscription-failure and parent-close scenarios; both
+focused lifecycle scenarios pass all 33 version/authentication cells.
 
 The Service reconnect runner reuses the three-node cross-SDK failover harness.
 It performs bidirectional endpoint requests before each server kill, gates the
@@ -200,10 +202,10 @@ Service.
 
 ## Prioritized follow-up
 
-1. **Broader Service matrices and future SDK/server versions.** Extend the
-   focused failure and parent-close cases across the version/authentication
-   matrix as useful; alternative transports such as WebSocket remain separate
-   concerns.
+1. **Future SDK/server versions and additional failure topologies.** Repeat
+   the established Service matrix against newer releases and add cluster-level
+   lifecycle cases as useful; alternative transports such as WebSocket remain
+   separate concerns.
 
 This ordering keeps the narrow protocol waist intact, gives each addition a
 behavioral test target, and avoids claiming parity merely because unknown JSON
