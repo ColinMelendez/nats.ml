@@ -5,7 +5,39 @@ script_dir=$(CDPATH=; export CDPATH; cd "$(dirname "$0")" && pwd)
 cd "$script_dir/.."
 
 images=${NATS_SERVER_IMAGES:-nats:2.10.22,nats:2.12.15,nats:2.14.5}
+scenarios=${NATS_INTEROP_SERVICE_MATRIX_SCENARIOS:-service}
 modes=${NATS_INTEROP_SERVICE_MATRIX_MODES:-anonymous,anonymous-tls,token,token-tls,user-pass,user-pass-tls,nkey,nkey-tls,jwt,jwt-tls,mtls}
+
+case "$scenarios" in
+  ""|,*|*,|*,,*)
+    echo "NATS_INTEROP_SERVICE_MATRIX_SCENARIOS must contain service, service-failure, and/or service-parent-close with no empty entries" >&2
+    exit 1
+    ;;
+esac
+
+old_ifs=$IFS
+IFS=','
+# shellcheck disable=SC2086
+set -- $scenarios
+IFS=$old_ifs
+
+if [ "$#" -eq 0 ]; then
+  echo "NATS_INTEROP_SERVICE_MATRIX_SCENARIOS must contain at least one scenario" >&2
+  exit 1
+fi
+
+scenario_list=
+for scenario do
+  case "$scenario" in
+    service|service-failure|service-parent-close)
+      ;;
+    *)
+      echo "unknown Service interop matrix scenario: $scenario (expected service, service-failure, or service-parent-close)" >&2
+      exit 1
+      ;;
+  esac
+  scenario_list="$scenario_list${scenario_list:+ }$scenario"
+done
 
 case "$modes" in
   ""|,*|*,|*,,*)
@@ -92,26 +124,27 @@ clear_credentials() {
 
 run_case() {
   run_image=$1
-  run_mode=$2
+  run_scenario=$2
+  run_mode=$3
   case "$run_mode" in
     anonymous)
       (
         clear_credentials
-        NATS_TEST_INTEROP_MODE=service NATS_TEST_TLS=0 \
+        NATS_TEST_INTEROP_MODE="$run_scenario" NATS_TEST_TLS=0 \
           NATS_SERVER_IMAGE="$run_image" ./scripts/runtest-interop.sh
       )
       ;;
     anonymous-tls)
       (
         clear_credentials
-        NATS_TEST_INTEROP_MODE=service NATS_TEST_TLS=1 \
+        NATS_TEST_INTEROP_MODE="$run_scenario" NATS_TEST_TLS=1 \
           NATS_SERVER_IMAGE="$run_image" ./scripts/runtest-interop.sh
       )
       ;;
     token)
       (
         clear_credentials
-        NATS_TEST_TOKEN="$matrix_token" NATS_TEST_INTEROP_MODE=service \
+        NATS_TEST_TOKEN="$matrix_token" NATS_TEST_INTEROP_MODE="$run_scenario" \
           NATS_TEST_TLS=0 NATS_SERVER_IMAGE="$run_image" \
           ./scripts/runtest-interop.sh
       )
@@ -119,7 +152,7 @@ run_case() {
     token-tls)
       (
         clear_credentials
-        NATS_TEST_TOKEN="$matrix_token" NATS_TEST_INTEROP_MODE=service \
+        NATS_TEST_TOKEN="$matrix_token" NATS_TEST_INTEROP_MODE="$run_scenario" \
           NATS_TEST_TLS=1 NATS_SERVER_IMAGE="$run_image" \
           ./scripts/runtest-interop.sh
       )
@@ -128,7 +161,7 @@ run_case() {
       (
         clear_credentials
         NATS_TEST_USER="$matrix_user" NATS_TEST_PASS="$matrix_pass" \
-          NATS_TEST_INTEROP_MODE=service NATS_TEST_TLS=0 \
+          NATS_TEST_INTEROP_MODE="$run_scenario" NATS_TEST_TLS=0 \
           NATS_SERVER_IMAGE="$run_image" ./scripts/runtest-interop.sh
       )
       ;;
@@ -136,14 +169,14 @@ run_case() {
       (
         clear_credentials
         NATS_TEST_USER="$matrix_user" NATS_TEST_PASS="$matrix_pass" \
-          NATS_TEST_INTEROP_MODE=service NATS_TEST_TLS=1 \
+          NATS_TEST_INTEROP_MODE="$run_scenario" NATS_TEST_TLS=1 \
           NATS_SERVER_IMAGE="$run_image" ./scripts/runtest-interop.sh
       )
       ;;
     nkey)
       (
         clear_credentials
-        NATS_TEST_INTEROP_MODE=service NATS_TEST_INTEROP_AUTH_MODE=nkey \
+        NATS_TEST_INTEROP_MODE="$run_scenario" NATS_TEST_INTEROP_AUTH_MODE=nkey \
           NATS_TEST_TLS=0 NATS_SERVER_IMAGE="$run_image" \
           ./scripts/runtest-interop.sh
       )
@@ -151,7 +184,7 @@ run_case() {
     nkey-tls)
       (
         clear_credentials
-        NATS_TEST_INTEROP_MODE=service NATS_TEST_INTEROP_AUTH_MODE=nkey \
+        NATS_TEST_INTEROP_MODE="$run_scenario" NATS_TEST_INTEROP_AUTH_MODE=nkey \
           NATS_TEST_TLS=1 NATS_SERVER_IMAGE="$run_image" \
           ./scripts/runtest-interop.sh
       )
@@ -159,7 +192,7 @@ run_case() {
     jwt)
       (
         clear_credentials
-        NATS_TEST_INTEROP_MODE=service NATS_TEST_INTEROP_AUTH_MODE=jwt \
+        NATS_TEST_INTEROP_MODE="$run_scenario" NATS_TEST_INTEROP_AUTH_MODE=jwt \
           NATS_TEST_TLS=0 NATS_SERVER_IMAGE="$run_image" \
           ./scripts/runtest-interop.sh
       )
@@ -167,7 +200,7 @@ run_case() {
     jwt-tls)
       (
         clear_credentials
-        NATS_TEST_INTEROP_MODE=service NATS_TEST_INTEROP_AUTH_MODE=jwt \
+        NATS_TEST_INTEROP_MODE="$run_scenario" NATS_TEST_INTEROP_AUTH_MODE=jwt \
           NATS_TEST_TLS=1 NATS_SERVER_IMAGE="$run_image" \
           ./scripts/runtest-interop.sh
       )
@@ -175,7 +208,7 @@ run_case() {
     mtls)
       (
         clear_credentials
-        NATS_TEST_INTEROP_MODE=service NATS_TEST_INTEROP_AUTH_MODE=mtls \
+        NATS_TEST_INTEROP_MODE="$run_scenario" NATS_TEST_INTEROP_AUTH_MODE=mtls \
           NATS_TEST_TLS=1 NATS_SERVER_IMAGE="$run_image" \
           ./scripts/runtest-interop.sh
       )
@@ -190,6 +223,7 @@ run_case() {
 status=0
 case_number=0
 echo "Service interop matrix images: $*"
+echo "Service interop matrix scenarios: $scenario_list"
 echo "Service interop matrix modes: $mode_list"
 for image do
   if [ -z "$image" ]; then
@@ -205,17 +239,20 @@ for image do
       continue
     fi
   fi
-  # mode_list contains only validated names above.
+  # scenario_list and mode_list contain only validated names above.
   # shellcheck disable=SC2086
-  for mode in $mode_list; do
-    case_number=$((case_number + 1))
-    echo "Service interop matrix case $case_number: $image ($mode)"
-    if run_case "$image" "$mode"; then
-      :
-    else
-      status=1
-      echo "Service interop matrix case $case_number failed: $image ($mode)" >&2
-    fi
+  for scenario in $scenario_list; do
+    # shellcheck disable=SC2086
+    for mode in $mode_list; do
+      case_number=$((case_number + 1))
+      echo "Service interop matrix case $case_number: $image ($scenario, $mode)"
+      if run_case "$image" "$scenario" "$mode"; then
+        :
+      else
+        status=1
+        echo "Service interop matrix case $case_number failed: $image ($scenario, $mode)" >&2
+      fi
+    done
   done
 done
 
