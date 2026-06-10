@@ -21,9 +21,9 @@ the capabilities marked as covered.
 | Core NATS | Covered for the Eio model | Some Go-specific diagnostics/options; alternative transports are intentionally out of scope |
 | Authentication and TLS | Covered | Dynamic callback and transport-option breadth is narrower |
 | Reconnect, discovery, drain | Covered | Go-style callback hooks and connection statistics are not mirrored |
-| JetStream management | Account info, stream/consumer lookup, upsert, names, reset, detailed lists | Newer stream fields and system-level administration |
+| JetStream management | Account info, stream/consumer lookup, upsert, names, reset, detailed lists | Message-counter and newer persistence fields; broader system-level administration |
 | JetStream publishing | Synchronous and switch-owned asynchronous acknowledgements; expectation/retry/TTL/schedule options; atomic and fast batch wire paths | Shared async reply multiplexing and a few newer server-only publish controls |
-| JetStream consumption | Pull, push, ordered, heartbeats, flow control, priority, consumer reset | Some ordered/ack fields and Go's continuous batching controls |
+| JetStream consumption | Pull, push, ordered, heartbeats, flow control, priority, consumer reset | Ack-flow-control policy, some ordered options, and Go's continuous batching controls |
 | Key-Value | CRUD, CAS, history, finite keys, watches, per-key/marker TTL, purge-delete cleanup, resumable/multi-filter watches, listers | Bucket manager/listers |
 | Object Store | Streaming CRUD, links, metadata, watches, list, seal, and Go interop | Bucket manager/listers and file helpers |
 | Services | Registration, groups, requests, errors, discovery, stats, reset, stopped state, pending limits, custom lifecycle/stat callbacks, bidirectional Go interop across the pinned server matrix, cross-SDK failover recovery, controlled subscription-failure recovery, and parent-connection closure cleanup | Future server/SDK versions |
@@ -74,9 +74,10 @@ consumer limits. Their constructors validate the server's local invariants, and
 the stream wire tests cover create, response decoding, update preservation, and
 boundary failures.
 
-The remaining Go `jetstream.StreamConfig` gaps are newer placement
-metadata/options, per-message TTL/counter support, scheduled messages, atomic or
-batched publish feature flags, and newer persistence settings.
+The current API already models placement constraints, per-message TTL,
+scheduled messages, atomic publishing, and fast batch publishing. The remaining
+`jetstream.StreamConfig` gaps are message-counter support and newer persistence
+or placement fields introduced after the modeled server surface.
 
 The OCaml projection now also configures mirrors, sources, source filters and
 subject transforms, input subject transforms, republish rules, cross-account
@@ -95,7 +96,8 @@ The OCaml surface now exposes those operations compositionally through the
 JetStream capability and typed stream/consumer handles. Name listers eagerly
 collect the server's paged responses into ordered lists, while `bind` remains
 the explicit local-handle operation for callers that already know a resource
-exists.
+exists. The remaining management work is the newer configuration surface and
+system-level administration described above.
 
 ### Publishing
 
@@ -118,7 +120,8 @@ The remaining publishing optimization is to replace the current per-future
 private request subscriptions with a shared wildcard acknowledgement
 subscription. That is an allocation/throughput improvement, not a wire
 capability gap; the current implementation retains explicit request ownership
-and cancellation semantics.
+and cancellation semantics. A few server controls may also be added as the
+message-counter and newer persistence features become available.
 
 ### Consumption gaps
 
@@ -202,10 +205,14 @@ Service.
 
 ## Prioritized follow-up
 
-1. **Future SDK/server versions and additional failure topologies.** Repeat
+1. **Close the remaining pinned-SDK surface.** Add message-counter and newer
+   persistence fields, the missing consumer options and continuous pull
+   controls, and the KV/Object Store managers and convenience operations. Keep
+   alternative transports such as WebSocket separate from this work.
+
+2. **Future SDK/server versions and additional failure topologies.** Repeat
    the established Service matrix against newer releases and add cluster-level
-   lifecycle cases as useful; alternative transports such as WebSocket remain
-   separate concerns.
+   lifecycle cases as useful.
 
 This ordering keeps the narrow protocol waist intact, gives each addition a
 behavioral test target, and avoids claiming parity merely because unknown JSON
