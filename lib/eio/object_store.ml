@@ -207,6 +207,7 @@ module Error = struct
     | Invalid_link_name of { value : string; reason : name }
     | Invalid_metadata of string
     | Invalid_metadata_subject of string
+    | File of { operation : string; message : string }
     | Not_found
     | Deleted of Info.t
     | Object_already_exists of Info.t
@@ -273,6 +274,8 @@ module Error = struct
         Format.fprintf ppf "invalid object metadata field %S" field
     | Invalid_metadata_subject subject ->
         Format.fprintf ppf "unexpected object metadata subject %S" subject
+    | File { operation; message } ->
+        Format.fprintf ppf "object file %s failed: %s" operation message
     | Not_found -> Format.pp_print_string ppf "object was not found"
     | Deleted _ -> Format.pp_print_string ppf "object is deleted"
     | Object_already_exists _ ->
@@ -986,6 +989,58 @@ let put ?timeout value meta reader =
 let put_string ?timeout value meta payload =
   put ?timeout value meta (Bytesrw.Bytes.Reader.of_string payload)
 
+let reader_of_flow flow =
+  let buffer = Cstruct.create (64 * 1024) in
+  Bytesrw.Bytes.Reader.make (fun () ->
+      try
+        let length = Eio.Flow.single_read flow buffer in
+        if Int.equal length 0 then Bytesrw.Bytes.Slice.eod
+        else
+          let bytes = Cstruct.to_bytes (Cstruct.sub buffer 0 length) in
+          Bytesrw.Bytes.Slice.of_bytes bytes
+      with End_of_file -> Bytesrw.Bytes.Slice.eod)
+
+let writer_of_flow flow =
+  Bytesrw.Bytes.Writer.make (fun slice ->
+      if not (Bytesrw.Bytes.Slice.is_eod slice) then
+        let bytes = Bytesrw.Bytes.Slice.bytes slice in
+        let cstruct =
+          Cstruct.of_bytes ~off:(Bytesrw.Bytes.Slice.first slice)
+            ~len:(Bytesrw.Bytes.Slice.length slice) bytes
+        in
+        Eio.Flow.write flow [ cstruct ])
+
+let file_error ~operation error =
+  Error
+    (Error.File
+       { operation; message = Format.asprintf "%a" Eio.Exn.pp error })
+
+let protect_file ~operation f =
+  try f () with
+  | Eio.Io _ as error -> file_error ~operation error
+  | Sys_error message -> Error (Error.File { operation; message })
+
+let file_basename path =
+  match Eio.Path.split path with
+  | None -> Error (Error.Invalid_name { value = ""; reason = Name.Empty_name })
+  | Some (_, basename) -> (
+      match Name.of_string basename with
+      | Ok name -> Ok name
+      | Error reason -> Error (Error.Invalid_name { value = basename; reason }))
+
+let put_file ?timeout ?name ?description ?headers ?metadata ?chunk_size value
+    path =
+  let name = match name with Some name -> Ok name | None -> file_basename path in
+  match name with
+  | Error error -> Error error
+  | Ok name -> (
+      match Meta.v ~name ?description ?headers ?metadata ?chunk_size () with
+      | Error error -> Error (Error.Invalid_meta error)
+      | Ok meta ->
+          protect_file ~operation:"read" (fun () ->
+              Eio.Path.with_open_in path (fun flow ->
+                  put ?timeout value meta (reader_of_flow flow))))
+
 let link_to_wire (link : Link.t) =
   {
     bucket = Link.bucket link;
@@ -1227,6 +1282,12 @@ let get_string ?timeout ?include_deleted ?max_links value name =
   match get ?timeout ?include_deleted ?max_links value name writer with
   | Error error -> Error error
   | Ok _ -> Ok (Buffer.contents buffer)
+
+let get_file ?timeout ?include_deleted ?max_links value name path =
+  protect_file ~operation:"write" (fun () ->
+      Eio.Path.with_open_out ~create:(`Or_truncate 0o600) path (fun flow ->
+          get ?timeout ?include_deleted ?max_links value name
+            (writer_of_flow flow)))
 
 let publish_metadata ~deadline value name wire =
   match encode_wire wire with
@@ -1617,3 +1678,105 @@ let delete ?timeout value name =
                                 Error
                                   (Error.Cleanup_failed
                                      { info = Some info; error })))))))
+
+let manager_update jetstream config =
+  match stream_config config with
+  | Error error -> Error error
+  | Ok stream_config -> (
+      match
+        Jetstream.Stream.bind jetstream
+          ~name:(Jetstream.Stream.Config.name stream_config)
+      with
+      | Error error -> Error (map_jetstream_error error)
+      | Ok stream -> (
+          match Jetstream.Stream.update stream stream_config with
+          | Error error -> Error (map_jetstream_error error)
+          | Ok _ -> Ok { jetstream; stream; bucket = Config.bucket config }))
+
+let manager_create_or_update jetstream config =
+  match stream_config config with
+  | Error error -> Error error
+  | Ok stream_config -> (
+      match Jetstream.Stream.create_or_update jetstream stream_config with
+      | Error error -> Error (map_jetstream_error error)
+      | Ok stream -> Ok { jetstream; stream; bucket = Config.bucket config })
+
+let manager_delete jetstream ~bucket =
+  match Config.v ~bucket () with
+  | Error error -> Error (map_config_error error)
+  | Ok _ -> (
+      match Jetstream.Stream.bind jetstream ~name:(stream_name bucket) with
+      | Error error -> Error (map_jetstream_error error)
+      | Ok stream -> (
+          match Jetstream.Stream.delete stream with
+          | Ok () -> Ok ()
+          | Error error -> Error (map_jetstream_error error)))
+
+let manager_bucket_name ~prefix name =
+  let prefix_length = String.length prefix in
+  if
+    String.length name <= prefix_length
+    || not (String.equal (String.sub name 0 prefix_length) prefix)
+  then None
+  else Some (String.sub name prefix_length (String.length name - prefix_length))
+
+let manager_entries jetstream =
+  let subject = Nats.Subject.Filter.literal "$O.*.>" in
+  match Jetstream.Stream.list ~subject jetstream with
+  | Error error -> Error (map_jetstream_error error)
+  | Ok infos ->
+      let entries = ref [] in
+      let result = ref None in
+      List.iter
+        (fun info ->
+          match !result with
+          | Some _ -> ()
+          | None -> (
+              let name =
+                Jetstream.Stream.Config.name
+                  (Jetstream.Stream.Info.config info)
+              in
+              match manager_bucket_name ~prefix:"OBJ_" name with
+              | None -> ()
+              | Some bucket -> (
+                  match Config.v ~bucket () with
+                  | Error error -> result := Some (Error (map_config_error error))
+                  | Ok _ -> entries := (bucket, info) :: !entries)))
+        infos;
+      match !result with
+      | Some result -> result
+      | None -> Ok (List.rev !entries)
+
+let manager_statuses jetstream entries =
+  let statuses = ref [] in
+  let result = ref None in
+  List.iter
+    (fun (bucket, info) ->
+      match !result with
+      | Some _ -> ()
+      | None -> (
+          match Jetstream.Stream.bind jetstream ~name:(stream_name bucket) with
+          | Error error -> result := Some (Error (map_jetstream_error error))
+          | Ok stream ->
+              let value = { jetstream; stream; bucket } in
+              statuses := status_of_info value info :: !statuses))
+    entries;
+  match !result with Some result -> result | None -> Ok (List.rev !statuses)
+
+module Manager = struct
+  let open_ = open_
+  let create = create
+  let update = manager_update
+  let create_or_update = manager_create_or_update
+  let delete = manager_delete
+
+  let names jetstream =
+    match manager_entries jetstream with
+    | Error error -> Error error
+    | Ok entries -> Ok (List.map fst entries)
+
+  let statuses jetstream =
+    match manager_entries jetstream with
+    | Error error -> Error error
+    | Ok entries -> manager_statuses jetstream entries
+end

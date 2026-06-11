@@ -62,6 +62,14 @@ let stream_info_response ~sid ~bucket ~history =
   in
   response_wire_with_sid ~sid payload
 
+let stream_list_response ~sid ~bucket ~history =
+  let payload =
+    Format.asprintf
+      {|{"total":1,"offset":0,"limit":1,"streams":[{"config":{"name":"KV_%s","subjects":["$KV.%s.>"],"storage":"file","retention":"limits","discard":"new","max_msgs":-1,"max_msgs_per_subject":%d,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":true,"allow_direct":true,"deny_delete":true},"state":{"messages":3,"bytes":42,"first_seq":1,"last_seq":7,"consumer_count":0}}]}|}
+      bucket bucket history
+  in
+  response_wire_with_sid ~sid payload
+
 let publish_ack_response ~sid ~stream ~sequence =
   let payload = Format.asprintf {|{"stream":"%s","seq":%Ld}|} stream sequence in
   response_wire_with_sid ~sid payload
@@ -460,6 +468,49 @@ let () =
                 (Option.get (Nats_eio.Key_value.Status.history status));
               equal int64 1L (Nats_eio.Key_value.Status.first_revision status);
               equal int64 7L (Nats_eio.Key_value.Status.last_revision status);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "bucket managers list names and statuses" (fun () ->
+          let names_response, names_response_u = Eio.Promise.create () in
+          let statuses_response, statuses_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await names_response;
+                `Await statuses_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let names_result, names_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve names_result_u
+                    (Nats_eio.Key_value.Manager.names jetstream));
+              wait_for_trace_count ~trace ~needle:"STREAM.LIST" ~count:1;
+              require_trace ~trace ~needle:"$KV.*.>";
+              Eio.Promise.resolve names_response_u
+                (Ok (stream_list_response ~sid:1 ~bucket:"users" ~history:5));
+              equal (list string) [ "users" ]
+                (expect_kv_ok (Eio.Promise.await names_result));
+              let statuses_result, statuses_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve statuses_result_u
+                    (Nats_eio.Key_value.Manager.statuses jetstream));
+              wait_for_trace_count ~trace ~needle:"STREAM.LIST" ~count:2;
+              Eio.Promise.resolve statuses_response_u
+                (Ok (stream_list_response ~sid:2 ~bucket:"users" ~history:5));
+              let statuses = expect_kv_ok (Eio.Promise.await statuses_result) in
+              (match statuses with
+              | [ status ] ->
+                  equal string "users" (Nats_eio.Key_value.Status.bucket status);
+                  equal int64 3L (Nats_eio.Key_value.Status.values status);
+                  equal int64 5L
+                    (Option.get (Nats_eio.Key_value.Status.history status))
+              | _ -> fail "manager status listing returned the wrong buckets");
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "direct reads expose values and tombstones" (fun () ->

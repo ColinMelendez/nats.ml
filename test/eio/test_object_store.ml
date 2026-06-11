@@ -77,6 +77,14 @@ let stream_info_response ~sid ~bucket ?(sealed = false) () =
   in
   response_wire_with_sid ~sid payload
 
+let stream_list_response ~sid ~bucket =
+  let payload =
+    Format.asprintf
+      {|{"total":1,"offset":0,"limit":1,"streams":[{"config":{"name":"OBJ_%s","description":"media","subjects":["$O.%s.C.>","$O.%s.M.>"],"storage":"memory","retention":"limits","discard":"new","max_bytes":4096,"max_age":1000000000,"allow_rollup_hdrs":true,"allow_direct":true,"num_replicas":3,"placement":{"cluster":"objects","tags":["ssd"]},"compression":"s2","metadata":{"owner":"object-test"}},"state":{"messages":4,"bytes":321,"first_seq":3,"last_seq":9,"consumer_count":0}}]}|}
+      bucket bucket bucket
+  in
+  response_wire_with_sid ~sid payload
+
 let with_connection_traced ~reads f =
   Eio_mock.Backend.run_full @@ fun env ->
   let flow = Eio_mock.Flow.make "object-store-server" in
@@ -473,6 +481,50 @@ let () =
               | [ ("owner", "object-test") ] -> ()
               | _ -> fail "object-store status lost metadata");
               Eio.Promise.resolve hold_u (Ok "done")));
+      test "bucket managers list names and statuses" (fun () ->
+          let names_response, names_response_u = Eio.Promise.create () in
+          let statuses_response, statuses_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await names_response;
+                `Await statuses_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let names_result, names_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve names_result_u
+                    (Nats_eio.Object_store.Manager.names jetstream));
+              wait_for_trace_count ~trace ~needle:"STREAM.LIST" ~count:1;
+              require_trace ~trace ~needle:"$O.*.>";
+              Eio.Promise.resolve names_response_u
+                (Ok (stream_list_response ~sid:1 ~bucket:"assets"));
+              equal (list string) [ "assets" ]
+                (expect_object_ok (Eio.Promise.await names_result));
+              let statuses_result, statuses_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve statuses_result_u
+                    (Nats_eio.Object_store.Manager.statuses jetstream));
+              wait_for_trace_count ~trace ~needle:"STREAM.LIST" ~count:2;
+              Eio.Promise.resolve statuses_response_u
+                (Ok (stream_list_response ~sid:2 ~bucket:"assets"));
+              let statuses = expect_object_ok (Eio.Promise.await statuses_result) in
+              (match statuses with
+              | [ status ] ->
+                  equal string "assets"
+                    (Nats_eio.Object_store.Status.bucket status);
+                  equal int64 4L
+                    (Nats_eio.Object_store.Status.messages status);
+                  equal int 3 (Nats_eio.Object_store.Status.replicas status)
+              | _ -> fail "manager status listing returned the wrong buckets");
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "bucket config update preserves stream fields and object messages"
         (fun () ->
           let first_info, first_info_u = Eio.Promise.create () in

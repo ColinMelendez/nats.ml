@@ -378,31 +378,31 @@ let delete_bucket value =
   | Ok () -> Ok ()
   | Error error -> Error (map_jetstream_error error)
 
+let status_of_info (value : t) info =
+  let config = Jetstream.Stream.Info.config info in
+  let storage =
+    match Jetstream.Stream.Config.storage config with
+    | Jetstream.Stream.Config.Memory -> Config.Memory
+    | Jetstream.Stream.Config.File -> Config.File
+  in
+  {
+    Status.bucket = value.bucket;
+    values = Jetstream.Stream.Info.messages info;
+    bytes = Jetstream.Stream.Info.bytes info;
+    first_revision = Jetstream.Stream.Info.first_sequence info;
+    last_revision = Jetstream.Stream.Info.last_sequence info;
+    history = Jetstream.Stream.Config.max_msgs_per_subject config;
+    ttl = Jetstream.Stream.Config.max_age config;
+    limit_marker_ttl = Jetstream.Stream.Config.subject_delete_marker_ttl config;
+    max_bytes = Jetstream.Stream.Config.max_bytes config;
+    max_value_size = Jetstream.Stream.Config.max_msg_size config;
+    storage;
+  }
+
 let status value =
   match Jetstream.Stream.info value.stream with
   | Error error -> Error (map_jetstream_error error)
-  | Ok info ->
-      let config = Jetstream.Stream.Info.config info in
-      let storage =
-        match Jetstream.Stream.Config.storage config with
-        | Jetstream.Stream.Config.Memory -> Config.Memory
-        | Jetstream.Stream.Config.File -> Config.File
-      in
-      Ok
-        {
-          Status.bucket = value.bucket;
-          values = Jetstream.Stream.Info.messages info;
-          bytes = Jetstream.Stream.Info.bytes info;
-          first_revision = Jetstream.Stream.Info.first_sequence info;
-          last_revision = Jetstream.Stream.Info.last_sequence info;
-          history = Jetstream.Stream.Config.max_msgs_per_subject config;
-          ttl = Jetstream.Stream.Config.max_age config;
-          limit_marker_ttl =
-            Jetstream.Stream.Config.subject_delete_marker_ttl config;
-          max_bytes = Jetstream.Stream.Config.max_bytes config;
-          max_value_size = Jetstream.Stream.Config.max_msg_size config;
-          storage;
-        }
+  | Ok info -> Ok (status_of_info value info)
 
 let operation_of_headers headers =
   match Nats.Header.find "KV-Operation" headers with
@@ -1145,4 +1145,106 @@ module Key_lister = struct
       | Ok (Watch.Entry entry) -> Ok (Some (Entry.key entry))
 
   let close lister = Watch.close lister.watch
+end
+
+let manager_update jetstream config =
+  match stream_for_config config jetstream with
+  | Error error -> Error error
+  | Ok (stream_config, jetstream) -> (
+      match
+        Jetstream.Stream.bind jetstream
+          ~name:(Jetstream.Stream.Config.name stream_config)
+      with
+      | Error error -> Error (map_jetstream_error error)
+      | Ok stream -> (
+          match Jetstream.Stream.update stream stream_config with
+          | Error error -> Error (map_jetstream_error error)
+          | Ok _ -> Ok { jetstream; stream; bucket = Config.bucket config }))
+
+let manager_create_or_update jetstream config =
+  match stream_for_config config jetstream with
+  | Error error -> Error error
+  | Ok (stream_config, jetstream) -> (
+      match Jetstream.Stream.create_or_update jetstream stream_config with
+      | Error error -> Error (map_jetstream_error error)
+      | Ok stream -> Ok { jetstream; stream; bucket = Config.bucket config })
+
+let manager_delete jetstream ~bucket =
+  match Config.v ~bucket () with
+  | Error error -> Error (map_config_error error)
+  | Ok _ -> (
+      match Jetstream.Stream.bind jetstream ~name:(stream_name bucket) with
+      | Error error -> Error (map_jetstream_error error)
+      | Ok stream -> (
+          match Jetstream.Stream.delete stream with
+          | Ok () -> Ok ()
+          | Error error -> Error (map_jetstream_error error)))
+
+let manager_bucket_name ~prefix name =
+  let prefix_length = String.length prefix in
+  if
+    String.length name <= prefix_length
+    || not (String.equal (String.sub name 0 prefix_length) prefix)
+  then None
+  else Some (String.sub name prefix_length (String.length name - prefix_length))
+
+let manager_entries jetstream =
+  let subject = Nats.Subject.Filter.literal "$KV.*.>" in
+  match Jetstream.Stream.list ~subject jetstream with
+  | Error error -> Error (map_jetstream_error error)
+  | Ok infos ->
+      let entries = ref [] in
+      let result = ref None in
+      List.iter
+        (fun info ->
+          match !result with
+          | Some _ -> ()
+          | None -> (
+              let name =
+                Jetstream.Stream.Config.name
+                  (Jetstream.Stream.Info.config info)
+              in
+              match manager_bucket_name ~prefix:"KV_" name with
+              | None -> ()
+              | Some bucket -> (
+                  match Config.v ~bucket () with
+                  | Error error -> result := Some (Error (map_config_error error))
+                  | Ok _ -> entries := (bucket, info) :: !entries)))
+        infos;
+      match !result with
+      | Some result -> result
+      | None -> Ok (List.rev !entries)
+
+let manager_statuses jetstream entries =
+  let statuses = ref [] in
+  let result = ref None in
+  List.iter
+    (fun (bucket, info) ->
+      match !result with
+      | Some _ -> ()
+      | None -> (
+          match Jetstream.Stream.bind jetstream ~name:(stream_name bucket) with
+          | Error error -> result := Some (Error (map_jetstream_error error))
+          | Ok stream ->
+              let value = { jetstream; stream; bucket } in
+              statuses := status_of_info value info :: !statuses))
+    entries;
+  match !result with Some result -> result | None -> Ok (List.rev !statuses)
+
+module Manager = struct
+  let open_ = open_
+  let create = create
+  let update = manager_update
+  let create_or_update = manager_create_or_update
+  let delete = manager_delete
+
+  let names jetstream =
+    match manager_entries jetstream with
+    | Error error -> Error error
+    | Ok entries -> Ok (List.map fst entries)
+
+  let statuses jetstream =
+    match manager_entries jetstream with
+    | Error error -> Error error
+    | Ok entries -> manager_statuses jetstream entries
 end

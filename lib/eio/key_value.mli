@@ -279,6 +279,38 @@ module Key_lister : sig
   (** [close lister] closes the underlying watch. *)
 end
 
+module Manager : sig
+  (** Account-wide Key-Value bucket management over a JetStream capability.
+
+      Listing functions eagerly collect the server's paged responses into
+      ordered lists. They are intended for administrative views; use {!Watch}
+      or {!Key_lister} for data-plane streaming. *)
+
+  val open_ : Jetstream.t -> bucket:string -> (t, Error.t) result
+  (** [open_ jetstream ~bucket] validates and checks an existing bucket. *)
+
+  val create : Jetstream.t -> Config.t -> (t, Error.t) result
+  (** [create jetstream config] creates a bucket and returns its capability. *)
+
+  val update : Jetstream.t -> Config.t -> (t, Error.t) result
+  (** [update jetstream config] updates an existing bucket's modeled
+      configuration and returns its capability. *)
+
+  val create_or_update : Jetstream.t -> Config.t -> (t, Error.t) result
+  (** [create_or_update jetstream config] creates a bucket when absent or
+      updates it when present. *)
+
+  val delete : Jetstream.t -> bucket:string -> (unit, Error.t) result
+  (** [delete jetstream ~bucket] deletes the named bucket. *)
+
+  val names : Jetstream.t -> (string list, Error.t) result
+  (** [names jetstream] returns the names of all Key-Value buckets. *)
+
+  val statuses : Jetstream.t -> (Status.t list, Error.t) result
+  (** [statuses jetstream] returns current status snapshots for all Key-Value
+      buckets in server listing order. *)
+end
+
 val create : Jetstream.t -> Config.t -> (t, Error.t) result
 (** [create jetstream config] creates the bucket's JetStream stream and returns
     a local bucket capability. *)

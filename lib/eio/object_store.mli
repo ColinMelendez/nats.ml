@@ -146,6 +146,7 @@ module Error : sig
     | Invalid_link_name of { value : string; reason : name }
     | Invalid_metadata of string
     | Invalid_metadata_subject of string
+    | File of { operation : string; message : string }
     | Not_found
     | Deleted of Info.t
     | Object_already_exists of Info.t
@@ -271,6 +272,20 @@ val put :
 val put_string :
   ?timeout:Mtime.Span.t -> t -> Meta.t -> string -> (Info.t, Error.t) result
 
+val put_file :
+  ?timeout:Mtime.Span.t ->
+  ?name:Name.t ->
+  ?description:string ->
+  ?headers:Nats.Header.t ->
+  ?metadata:(string * string) list ->
+  ?chunk_size:int ->
+  t ->
+  _ Eio.Path.t ->
+  (Info.t, Error.t) result
+(** [put_file ?name bucket path] uploads [path] as an object. [name] defaults
+    to the path's basename; metadata options describe the new object. File
+    reads use Eio flows and return {!Error.File} for filesystem failures. *)
+
 val get :
   ?timeout:Mtime.Span.t ->
   ?include_deleted:bool ->
@@ -290,6 +305,18 @@ val get_string :
   t ->
   Name.t ->
   (string, Error.t) result
+
+val get_file :
+  ?timeout:Mtime.Span.t ->
+  ?include_deleted:bool ->
+  ?max_links:int ->
+  t ->
+  Name.t ->
+  _ Eio.Path.t ->
+  (Info.t, Error.t) result
+(** [get_file ?include_deleted ?max_links bucket name path] writes the object
+    to [path], replacing or creating the file. The object is verified before
+    end-of-data is written; filesystem failures return {!Error.File}. *)
 
 val delete : ?timeout:Mtime.Span.t -> t -> Name.t -> (unit, Error.t) result
 (** [delete bucket name] publishes a deleted metadata marker and purges the
@@ -314,4 +341,36 @@ module Watch : sig
   val next_with_timeout : timeout:Mtime.Span.t -> t -> (event, Error.t) result
   val iter : t -> f:(event -> unit) -> (unit, Error.t) result
   val close : t -> (unit, Error.t) result
+end
+
+module Manager : sig
+  (** Account-wide Object Store bucket management over a JetStream capability.
+
+      Listing functions eagerly collect the server's paged responses into
+      ordered lists. They complement the per-bucket data-plane operations in
+      this module. *)
+
+  val open_ : Jetstream.t -> bucket:string -> (t, Error.t) result
+  (** [open_ jetstream ~bucket] validates and checks an existing bucket. *)
+
+  val create : Jetstream.t -> Config.t -> (t, Error.t) result
+  (** [create jetstream config] creates a bucket and returns its capability. *)
+
+  val update : Jetstream.t -> Config.t -> (t, Error.t) result
+  (** [update jetstream config] updates an existing bucket's modeled
+      configuration and returns its capability. *)
+
+  val create_or_update : Jetstream.t -> Config.t -> (t, Error.t) result
+  (** [create_or_update jetstream config] creates a bucket when absent or
+      updates it when present. *)
+
+  val delete : Jetstream.t -> bucket:string -> (unit, Error.t) result
+  (** [delete jetstream ~bucket] deletes the named bucket. *)
+
+  val names : Jetstream.t -> (string list, Error.t) result
+  (** [names jetstream] returns the names of all Object Store buckets. *)
+
+  val statuses : Jetstream.t -> (Status.t list, Error.t) result
+  (** [statuses jetstream] returns current status snapshots for all Object
+      Store buckets in server listing order. *)
 end
