@@ -456,6 +456,20 @@ let wait_for_trace ~clock ~trace ~needle ~count =
          "trace did not contain %d occurrences of %S (saw %d); trace:\n%s" count
          needle !seen (Buffer.contents trace))
 
+let wait_for_trace_count ~trace ~needle ~count =
+  let seen = ref 0 in
+  let attempts = ref 0 in
+  while !seen < count && !attempts < 100 do
+    Eio.Fiber.yield ();
+    seen := count_substring ~needle (Buffer.contents trace);
+    incr attempts
+  done;
+  if !seen < count then
+    fail
+      (Format.asprintf
+         "trace did not contain %d occurrences of %S (saw %d); trace:\n%s"
+         count needle !seen (Buffer.contents trace))
+
 let consumer connection =
   let jetstream = expect_jetstream_ok (Nats_eio.Jetstream.v connection) in
   let stream =
@@ -5028,6 +5042,66 @@ let () =
                     && String.equal description "message size exceeds maxbytes"
                 | _ -> false);
               expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Pull.close pull);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "continuous consumption buffers and drains stop-after messages"
+        (fun () ->
+          let first, first_u = Eio.Promise.create () in
+          let second, second_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await first; `Await second; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let consume =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Consumer.Consume.v ~sw ~batch:1
+                     ~max_messages:2 ~stop_after:2 (consumer connection))
+              in
+              wait_for_trace_count ~trace
+                ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker" ~count:1;
+              Eio.Promise.resolve first_u (Ok (delivery_wire_with_sid ~sid:1 "one"));
+              wait_for_trace_count ~trace
+                ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker" ~count:2;
+              Eio.Promise.resolve second_u
+                (Ok (delivery_wire_with_sid ~sid:1 "two"));
+              let first_message =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Consumer.Consume.next consume)
+              in
+              let second_message =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Consumer.Consume.next consume)
+              in
+              equal string "one"
+                (Nats_eio.Jetstream.Msg.payload first_message);
+              equal string "two"
+                (Nats_eio.Jetstream.Msg.payload second_message);
+              expect_jetstream_error
+                (Nats_eio.Jetstream.Consumer.Consume.next consume)
+                (function Nats_eio.Jetstream.Error.Pull_closed -> true | _ -> false);
+              equal bool true
+                (Nats_eio.Jetstream.Consumer.Consume.closed consume);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "continuous stop makes buffered messages unavailable" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw connection ->
+              let consume =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Consumer.Consume.v ~sw ~max_messages:1
+                     (consumer connection))
+              in
+              yield_n 5;
+              Eio.Promise.resolve response_u
+                (Ok (delivery_wire_with_sid ~sid:1 "discard-me"));
+              yield_n 5;
+              Nats_eio.Jetstream.Consumer.Consume.stop consume;
+              expect_jetstream_error
+                (Nats_eio.Jetstream.Consumer.Consume.next consume)
+                (function Nats_eio.Jetstream.Error.Pull_closed -> true | _ -> false);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "one-shot fetch retains a pinned priority id" (fun () ->

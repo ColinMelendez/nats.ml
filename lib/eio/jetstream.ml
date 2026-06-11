@@ -73,6 +73,7 @@ module Error = struct
     | Unexpected_stream_name of { expected : string; actual : string }
     | Unexpected_consumer_name of { expected : string; actual : string }
     | Invalid_batch of int
+    | Invalid_consume_limit of { field : string; value : int }
     | Invalid_max_bytes of int
     | Invalid_priority_group of string
     | Invalid_priority_threshold of { field : string; value : int64 }
@@ -248,7 +249,10 @@ module Error = struct
           actual expected
     | Invalid_batch value ->
         Format.fprintf ppf
-          "JetStream fetch batch must be between 1 and 256, got %d" value
+          "JetStream fetch batch must be positive, got %d" value
+    | Invalid_consume_limit { field; value } ->
+        Format.fprintf ppf "JetStream consume %s must be positive, got %d" field
+          value
     | Invalid_max_bytes value ->
         Format.fprintf ppf
           "JetStream fetch max_bytes must not be negative, got %d" value
@@ -5358,8 +5362,7 @@ module Consumer = struct
       match value with Error error -> Error error | Ok value -> f value
     in
     let* () =
-      if Int.compare batch 1 >= 0 && Int.compare batch 256 <= 0 then Ok ()
-      else Error (Error.Invalid_batch batch)
+      if Int.compare batch 1 >= 0 then Ok () else Error (Error.Invalid_batch batch)
     in
     let* () =
       if Mtime.Span.compare expires Mtime.Span.zero > 0 then Ok ()
@@ -5985,6 +5988,252 @@ module Consumer = struct
         | Error error -> result := Some (Error error)
       done;
       match !result with Some result -> result | None -> assert false
+  end
+
+  module Consume = struct
+    type consumer = t
+
+    type event = Message of Msg.t | Finished of Error.t option
+
+    type state = Open | Draining | Closed | Failed of Error.t
+
+    exception Stop
+
+    let default_expires = Mtime.Span.(30 * s)
+    let default_idle_heartbeat = Mtime.Span.(15 * s)
+
+    type t = {
+      queue : event Eio.Stream.t;
+      mutex : Eio.Mutex.t;
+      changed : Eio.Condition.t;
+      max_messages : int;
+      mutable state : state;
+      mutable terminal_seen : bool;
+      mutable worker_switch : Eio.Switch.t option;
+    }
+
+    type options = {
+      batch : int option;
+      expires : Mtime.Span.t option;
+      idle_heartbeat : Mtime.Span.t option;
+      max_bytes : int option;
+      group : string option;
+      min_pending : int64 option;
+      min_ack_pending : int64 option;
+      priority : int option;
+      stop_after : int option;
+    }
+
+    let state value =
+      Eio.Mutex.use_ro value.mutex (fun () -> value.state)
+
+    let open_ value =
+      match state value with Open -> true | Draining | Closed | Failed _ -> false
+
+    let wait_for_capacity value =
+      Eio.Mutex.use_rw ~protect:false value.mutex (fun () ->
+          while
+            Eio.Stream.length value.queue >= value.max_messages
+            && match value.state with Open -> true | Draining | Closed | Failed _ -> false
+          do
+            Eio.Condition.await value.changed value.mutex
+          done;
+          match value.state with Open -> true | Draining | Closed | Failed _ -> false)
+
+    let enqueue value message =
+      if wait_for_capacity value then (
+        Eio.Stream.add value.queue (Message message);
+        Eio.Condition.broadcast value.changed;
+        true)
+      else false
+
+    let finish value error =
+      let should_finish =
+        Eio.Mutex.use_rw ~protect:false value.mutex (fun () ->
+            match value.state with
+            | Open ->
+                value.state <-
+                  (match error with None -> Draining | Some error -> Failed error);
+                true
+            | Draining | Closed | Failed _ -> false)
+      in
+      if should_finish then (
+        Eio.Stream.add value.queue (Finished error);
+        Eio.Condition.broadcast value.changed)
+
+    let worker_failure value error =
+      finish value (Some error)
+
+    let fail_worker value =
+      match value.worker_switch with
+      | None -> ()
+      | Some worker_switch -> (
+          match Eio.Switch.get_error worker_switch with
+          | None -> Eio.Switch.fail worker_switch Stop
+          | Some _ -> ())
+
+    let request_stop value ~drain =
+      let should_signal =
+        Eio.Mutex.use_rw ~protect:false value.mutex (fun () ->
+            match value.state with
+            | Open ->
+                value.state <- if drain then Draining else Closed;
+                true
+            | Failed _ when not drain ->
+                value.state <- Closed;
+                false
+            | Draining when not drain ->
+                value.state <- Closed;
+                false
+            | Draining | Closed | Failed _ -> false)
+      in
+      fail_worker value;
+      if should_signal then (
+        Eio.Stream.add value.queue (Finished None);
+        Eio.Condition.broadcast value.changed)
+
+    let worker_loop value ~sw consumer options =
+      match
+        Pull.v ~sw ?batch:options.batch ?expires:options.expires
+          ?idle_heartbeat:options.idle_heartbeat ?max_bytes:options.max_bytes
+          ?group:options.group ?min_pending:options.min_pending
+          ?min_ack_pending:options.min_ack_pending ?priority:options.priority
+          consumer
+      with
+      | Error error -> worker_failure value error
+      | Ok pull ->
+          let remaining = ref options.stop_after in
+          let running = ref true in
+          while !running do
+            if not (open_ value) then running := false
+            else
+              match Pull.next pull with
+              | Error error ->
+                  running := false;
+                  worker_failure value error
+              | Ok message ->
+                  if enqueue value message then
+                    match !remaining with
+                    | None -> ()
+                    | Some remaining_count ->
+                        if Int.equal remaining_count 1 then (
+                          remaining := Some 0;
+                          running := false;
+                          finish value None)
+                        else remaining := Some (remaining_count - 1)
+                  else running := false
+          done;
+          ignore (Pull.close pull)
+
+    let v ~sw ?batch ?expires ?idle_heartbeat ?max_bytes ?group ?min_pending
+        ?min_ack_pending ?priority ?(max_messages = 500) ?stop_after consumer =
+      if Int.compare max_messages 1 < 0 then
+        Error
+          (Error.Invalid_consume_limit
+             { field = "max_messages"; value = max_messages })
+      else if Int.compare max_messages (Int.max_int - 1) > 0 then
+        Error
+          (Error.Invalid_consume_limit
+             { field = "max_messages"; value = max_messages })
+      else
+        match stop_after with
+        | Some value when Int.compare value 1 < 0 ->
+            Error
+              (Error.Invalid_consume_limit
+                 { field = "stop_after"; value })
+        | None | Some _ -> (
+            let expires = Option.value expires ~default:default_expires in
+            let idle_heartbeat =
+              Option.value idle_heartbeat ~default:default_idle_heartbeat
+            in
+            let batch = Option.value batch ~default:max_messages in
+            let batch =
+              match stop_after with
+              | None -> batch
+              | Some stop_after -> Int.min batch stop_after
+            in
+            match
+              validate_fetch ~batch
+                ~expires ~max_bytes ~idle_heartbeat:(Some idle_heartbeat) ~group
+                ~min_pending
+                ~min_ack_pending ~priority
+            with
+            | Error error -> Error error
+            | Ok () ->
+                let value =
+                  {
+                    queue = Eio.Stream.create (max_messages + 1);
+                    mutex = Eio.Mutex.create ();
+                    changed = Eio.Condition.create ();
+                    max_messages;
+                    state = Open;
+                    terminal_seen = false;
+                    worker_switch = None;
+                  }
+                in
+                let ready, resolve_ready = Eio.Promise.create () in
+                let options =
+                  {
+                    batch = Some batch;
+                    expires = Some expires;
+                    idle_heartbeat = Some idle_heartbeat;
+                    max_bytes;
+                    group;
+                    min_pending;
+                    min_ack_pending;
+                    priority;
+                    stop_after;
+                  }
+                in
+                Eio.Fiber.fork ~sw (fun () ->
+                    try
+                      Eio.Switch.run (fun worker_sw ->
+                          Eio.Promise.resolve resolve_ready worker_sw;
+                          worker_loop value ~sw:worker_sw consumer options)
+                    with Stop -> ());
+                value.worker_switch <- Some (Eio.Promise.await ready);
+                Ok value)
+
+    let next value =
+      let result = ref None in
+      while Option.is_none !result do
+        match state value with
+        | Closed -> result := Some (Error Error.Pull_closed)
+        | Failed error when value.terminal_seen -> result := Some (Error error)
+        | Open | Draining | Failed _ -> (
+            match Eio.Stream.take value.queue with
+            | Message message ->
+                Eio.Condition.broadcast value.changed;
+                (match state value with
+                | Closed -> ()
+                | Open | Draining | Failed _ -> result := Some (Ok message))
+            | Finished error ->
+                value.terminal_seen <- true;
+                let next_state =
+                  match error with None -> Closed | Some _ -> state value
+                in
+                Eio.Mutex.use_rw ~protect:false value.mutex (fun () ->
+                    value.state <- next_state);
+                result := Some (match error with None -> Error Error.Pull_closed | Some error -> Error error))
+      done;
+      match !result with Some result -> result | None -> assert false
+
+    let iter value ~f =
+      let result = ref None in
+      while Option.is_none !result do
+        match next value with
+        | Ok message -> f message
+        | Error Error.Pull_closed -> result := Some (Ok ())
+        | Error error -> result := Some (Error error)
+      done;
+      match !result with Some result -> result | None -> assert false
+
+    let stop value = request_stop value ~drain:false
+    let drain value = request_stop value ~drain:true
+    let close value = stop value
+
+    let closed value =
+      match state value with Open -> false | Draining | Closed | Failed _ -> true
   end
 
   let bind (stream : Stream.t) ~name =

@@ -75,6 +75,7 @@ module Error : sig
     | Unexpected_stream_name of { expected : string; actual : string }
     | Unexpected_consumer_name of { expected : string; actual : string }
     | Invalid_batch of int
+    | Invalid_consume_limit of { field : string; value : int }
     | Invalid_max_bytes of int
     | Invalid_priority_group of string
     | Invalid_priority_threshold of { field : string; value : int64 }
@@ -1137,6 +1138,63 @@ module Consumer : sig
     (** [close pull] stops the session and is idempotent. An outstanding pull
         request is abandoned; messages not received by the client may be
         redelivered according to the consumer's acknowledgement policy. *)
+  end
+
+  module Consume : sig
+    type consumer = t
+    type t
+
+    val v :
+      sw:Eio.Switch.t ->
+      ?batch:int ->
+      ?expires:Mtime.Span.t ->
+      ?idle_heartbeat:Mtime.Span.t ->
+      ?max_bytes:int ->
+      ?group:string ->
+      ?min_pending:int64 ->
+      ?min_ack_pending:int64 ->
+      ?priority:int ->
+      ?max_messages:int ->
+      ?stop_after:int ->
+      consumer ->
+      (t, Error.t) result
+    (** [v ~sw consumer] starts a bounded, background pull loop. Messages are
+        made available through {!next}; the loop replenishes the queue as the
+        consumer removes messages. [max_messages] bounds the buffered messages
+        and defaults to [500]. The default expiry is thirty seconds and the
+        default idle heartbeat is fifteen seconds. Unless supplied, [batch]
+        follows [max_messages] and is reduced to [stop_after] for the first
+        request. [stop_after] ends the loop after that many messages have been
+        admitted to the queue. The other pull options have the same validation
+        and wire semantics as {!Pull.v}. The session owns its resources and is
+        cancelled with [sw]. *)
+
+    val next : t -> (Msg.t, Error.t) result
+    (** [next consume] waits for the next buffered message. It returns
+        [Pull_closed] after {!stop}, {!drain}, or a completed [stop_after], and
+        returns the worker error after already-buffered messages have been
+        drained. A consume session is single-owner: do not call [next]
+        concurrently on the same value. *)
+
+    val iter : t -> f:(Msg.t -> unit) -> (unit, Error.t) result
+    (** [iter consume ~f] processes messages until the session is stopped or
+        completes. It does not acknowledge messages. *)
+
+    val stop : t -> unit
+    (** [stop consume] cancels the worker and discards buffered messages from
+        the caller's point of view. Subsequent {!next} calls return
+        [Pull_closed]. *)
+
+    val drain : t -> unit
+    (** [drain consume] cancels the worker but preserves messages already in the
+        buffer for {!next} before it returns [Pull_closed]. *)
+
+    val close : t -> unit
+    (** [close consume] is an alias for {!stop}. *)
+
+    val closed : t -> bool
+    (** [closed consume] is [true] after the worker has been stopped, drained,
+        or completed. *)
   end
 
   module Push : sig
