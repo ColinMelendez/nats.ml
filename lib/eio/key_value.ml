@@ -4,6 +4,8 @@ module Config = struct
   type storage = Memory | File
 
   module Placement = Jetstream.Stream.Config.Placement
+  module Source = Jetstream.Stream.Config.Source
+  module Republish = Jetstream.Stream.Config.Republish
 
   type compression = Jetstream.Stream.Config.compression =
     | Uncompressed
@@ -20,6 +22,9 @@ module Config = struct
     storage : storage;
     replicas : int;
     placement : Placement.t option;
+    mirror : Source.t option;
+    sources : Source.t list;
+    republish : Republish.t option;
     compression : compression;
     metadata : (string * string) list;
   }
@@ -31,6 +36,7 @@ module Config = struct
     | Invalid_ttl
     | Invalid_limit_marker_ttl
     | Invalid_replicas of int
+    | Mirror_and_sources
     | Invalid_limit of { field : string; value : int64 }
 
   let allowed_bucket_character character =
@@ -63,14 +69,17 @@ module Config = struct
   let normalize_limit = function Some -1L -> None | value -> value
 
   let v ~bucket ?description ?(history = 1) ?ttl ?limit_marker_ttl ?max_bytes
-      ?max_value_size ?(storage = File) ?(replicas = 1) ?placement
-      ?(compression = Uncompressed) ?(metadata = []) () =
+      ?max_value_size ?(storage = File) ?(replicas = 1) ?placement ?mirror
+      ?(sources = []) ?republish ?(compression = Uncompressed)
+      ?(metadata = []) () =
     match validate_bucket bucket with
     | Error error -> Error error
     | Ok () when Int.compare history 1 < 0 || Int.compare history 64 > 0 ->
         Error (Invalid_history history)
     | Ok () when Int.compare replicas 1 < 0 || Int.compare replicas 5 > 0 ->
         Error (Invalid_replicas replicas)
+    | Ok () when Option.is_some mirror && List.length sources > 0 ->
+        Error Mirror_and_sources
     | Ok () -> (
         match ttl with
         | Some value when Mtime.Span.compare value Mtime.Span.zero < 0 ->
@@ -112,6 +121,9 @@ module Config = struct
                             description;
                             replicas;
                             placement;
+                            mirror;
+                            sources;
+                            republish;
                             compression;
                             metadata;
                           }))))
@@ -126,6 +138,9 @@ module Config = struct
   let storage value = value.storage
   let replicas value = value.replicas
   let placement value = value.placement
+  let mirror value = value.mirror
+  let sources value = value.sources
+  let republish value = value.republish
   let compression value = value.compression
   let metadata value = value.metadata
 end
@@ -243,6 +258,9 @@ module Error = struct
     | Config.Invalid_replicas value ->
         Format.fprintf ppf "key-value replicas must be between 1 and 5, got %d"
           value
+    | Config.Mirror_and_sources ->
+        Format.pp_print_string ppf
+          "a key-value bucket cannot configure both a mirror and sources"
     | Config.Invalid_limit { field; value } ->
         Format.fprintf ppf "invalid key-value %s limit %Ld" field value
 
@@ -319,6 +337,9 @@ module Status = struct
     storage : Config.storage;
     replicas : int;
     placement : Config.Placement.t option;
+    mirror : Config.Source.t option;
+    sources : Config.Source.t list;
+    republish : Config.Republish.t option;
     compression : Config.compression;
     metadata : (string * string) list;
   }
@@ -337,6 +358,9 @@ module Status = struct
   let storage value = value.storage
   let replicas value = value.replicas
   let placement value = value.placement
+  let mirror value = value.mirror
+  let sources value = value.sources
+  let republish value = value.republish
   let compression value = value.compression
   let metadata value = value.metadata
 end
@@ -363,13 +387,16 @@ let key_subject value key =
   Nats.Subject.literal ("$KV." ^ value.bucket ^ "." ^ Key.to_string key)
 
 let stream_for_config config jetstream =
-  let subject =
-    Nats.Subject.Filter.literal ("$KV." ^ Config.bucket config ^ ".>")
+  let subjects =
+    match Config.mirror config with
+    | Some _ -> []
+    | None ->
+        [ Nats.Subject.Filter.literal ("$KV." ^ Config.bucket config ^ ".>") ]
   in
   match
     Jetstream.Stream.Config.v
       ~name:(stream_name (Config.bucket config))
-      ~subjects:[ subject ]
+      ~subjects
       ?description:(Config.description config)
       ~storage:
         (match Config.storage config with
@@ -379,6 +406,9 @@ let stream_for_config config jetstream =
       ~discard:Jetstream.Stream.Config.New
       ~replicas:(Config.replicas config)
       ?placement:(Config.placement config)
+      ?mirror:(Config.mirror config)
+      ~sources:(Config.sources config)
+      ?republish:(Config.republish config)
       ~compression:(Config.compression config)
       ~metadata:(Config.metadata config)
       ~max_msgs_per_subject:(Int64.of_int (Config.history config))
@@ -443,6 +473,9 @@ let status_of_info (value : t) info =
     storage;
     replicas = Jetstream.Stream.Config.replicas config;
     placement = Jetstream.Stream.Config.placement config;
+    mirror = Jetstream.Stream.Config.mirror config;
+    sources = Jetstream.Stream.Config.sources config;
+    republish = Jetstream.Stream.Config.republish config;
     compression = Jetstream.Stream.Config.compression config;
     metadata = Jetstream.Stream.Config.metadata config;
   }

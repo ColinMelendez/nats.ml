@@ -397,6 +397,57 @@ let () =
               fail "key-value config lost compression");
           equal (list (pair string string)) [ ("owner", "kv-test") ]
             (Nats_eio.Key_value.Config.metadata advanced);
+          let source =
+            match
+              Nats_eio.Key_value.Config.Source.v ~name:"KV_source" ()
+            with
+            | Ok value -> value
+            | Error error ->
+                fail
+                  (Format.asprintf "%a"
+                     Nats_eio.Jetstream.Error.pp_config error)
+          in
+          let republish =
+            match
+              Nats_eio.Key_value.Config.Republish.v
+                ~source:(Nats.Subject.Filter.literal "$KV.advanced.>")
+                ~destination:"audit.advanced" ()
+            with
+            | Ok value -> value
+            | Error error ->
+                fail
+                  (Format.asprintf "%a"
+                     Nats_eio.Jetstream.Error.pp_config error)
+          in
+          let composed =
+            match
+              Nats_eio.Key_value.Config.v ~bucket:"composed" ~mirror:source
+                ~republish ()
+            with
+            | Ok value -> value
+            | Error error ->
+                fail
+                  (Format.asprintf "%a" Nats_eio.Key_value.Error.pp_config
+                     error)
+          in
+          equal (option string) (Some "KV_source")
+            (Option.map Nats_eio.Key_value.Config.Source.name
+               (Nats_eio.Key_value.Config.mirror composed));
+          equal int 0
+            (List.length (Nats_eio.Key_value.Config.sources composed));
+          equal (option string) (Some "audit.advanced")
+            (Option.map Nats_eio.Key_value.Config.Republish.destination
+               (Nats_eio.Key_value.Config.republish composed));
+          (match
+             Nats_eio.Key_value.Config.v ~bucket:"invalid-composition"
+               ~mirror:source ~sources:[ source ] ()
+           with
+          | Ok _ -> fail "key-value config accepted mirror and sources"
+          | Error Nats_eio.Key_value.Config.Mirror_and_sources -> ()
+          | Error error ->
+              fail
+                (Format.asprintf "unexpected composition error: %a"
+                   Nats_eio.Key_value.Error.pp_config error));
           (match Nats_eio.Key_value.Config.v ~bucket:"users" ~history:5 () with
           | Ok config ->
               equal string "users" (Nats_eio.Key_value.Config.bucket config);

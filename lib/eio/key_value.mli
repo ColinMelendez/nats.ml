@@ -11,6 +11,8 @@ module Config : sig
   type storage = Memory | File  (** The storage backend used by the bucket. *)
 
   module Placement = Jetstream.Stream.Config.Placement
+  module Source = Jetstream.Stream.Config.Source
+  module Republish = Jetstream.Stream.Config.Republish
 
   type compression = Jetstream.Stream.Config.compression =
     | Uncompressed
@@ -26,6 +28,7 @@ module Config : sig
     | Invalid_ttl
     | Invalid_limit_marker_ttl
     | Invalid_replicas of int
+    | Mirror_and_sources
     | Invalid_limit of { field : string; value : int64 }
         (** Errors produced while validating a bucket configuration. *)
 
@@ -42,6 +45,9 @@ module Config : sig
     ?storage:storage ->
     ?replicas:int ->
     ?placement:Placement.t ->
+    ?mirror:Source.t ->
+    ?sources:Source.t list ->
+    ?republish:Republish.t ->
     ?compression:compression ->
     ?metadata:(string * string) list ->
     unit ->
@@ -55,7 +61,11 @@ module Config : sig
       unlimited value and accept [-1] when supplied for direct JetStream
       correspondence; supplied [-1] is normalized to [None]. [storage] defaults
       to {!File}, [replicas] to [1], and [compression] to {!Uncompressed}.
-      Placement and metadata are projected to the backing stream. *)
+      Placement, mirror/source composition, republish, and metadata are
+      projected to the backing stream. A mirror is read-only and cannot be
+      combined with [sources]. Sources use the stream names and transforms
+      supplied in {!Source.t}; use the [KV_] backing-stream name when referring
+      to another bucket. *)
 
   (** {1:queries Queries} *)
 
@@ -65,6 +75,9 @@ module Config : sig
   val description : t -> string option
   val replicas : t -> int
   val placement : t -> Placement.t option
+  val mirror : t -> Source.t option
+  val sources : t -> Source.t list
+  val republish : t -> Republish.t option
   val compression : t -> compression
   val metadata : t -> (string * string) list
 
@@ -206,6 +219,9 @@ module Status : sig
   val storage : t -> Config.storage
   val replicas : t -> int
   val placement : t -> Config.Placement.t option
+  val mirror : t -> Config.Source.t option
+  val sources : t -> Config.Source.t list
+  val republish : t -> Config.Republish.t option
   val compression : t -> Config.compression
   val metadata : t -> (string * string) list
 end
