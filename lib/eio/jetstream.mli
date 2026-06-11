@@ -777,8 +777,7 @@ module Consumer : sig
     (** [pause_until config] is the server-side pause deadline, when set. *)
 
     val priority_groups : t -> string list
-    (** [priority_groups config] returns the configured priority group names. A
-        priority consumer currently requires exactly one name. *)
+    (** [priority_groups config] returns the configured priority group names. *)
 
     val priority_policy : t -> priority_policy option
     (** [priority_policy config] is the pull-consumer priority policy, when
@@ -872,9 +871,8 @@ module Consumer : sig
 
     val with_priority_groups : t -> string list -> (t, error) result
     (** [with_priority_groups config groups] replaces the priority group names.
-        Priority groups are pull-only; the current implementation accepts one
-        name of at most sixteen ASCII letters, digits, [/], [_], [-], or [=]
-        characters. *)
+        Priority groups are pull-only; each name is at most sixteen ASCII
+        letters, digits, [/], [_], [-], or [=] characters. *)
 
     val with_priority_policy : t -> priority_policy option -> (t, error) result
     (** [with_priority_policy config policy] replaces the priority policy. A

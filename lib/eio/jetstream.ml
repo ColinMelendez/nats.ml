@@ -3449,16 +3449,14 @@ module Consumer = struct
         else Ok ()
 
     let validate_priority_groups groups =
-      match groups with
-      | [] -> Ok ()
-      | [ group ] -> validate_priority_group group
-      | _ :: _ :: _ ->
-          Error
-            (Error.Invalid_consumer_policy
-               {
-                 field = "priority_groups";
-                 value = "only one group is currently supported";
-               })
+      let result = ref (Ok ()) in
+      List.iter
+        (fun group ->
+          match !result with
+          | Error _ -> ()
+          | Ok () -> result := validate_priority_group group)
+        groups;
+      !result
 
     let v ?name ?durable_name ?description ?deliver_subject ?deliver_group
         ?idle_heartbeat ?flow_control ?(deliver_policy = All)

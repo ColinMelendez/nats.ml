@@ -1413,14 +1413,13 @@ let () =
                ~priority_policy:Nats_eio.Jetstream.Consumer.Config.Pinned_client
                ()
            with
-          | Error
-              (Nats_eio.Jetstream.Error.Invalid_consumer_policy
-                 {
-                   field = "priority_groups";
-                   value = "only one group is currently supported";
-                 }) ->
-              ()
-          | _ -> fail "priority config accepted multiple groups");
+          | Ok config ->
+              equal (list string) [ "blue"; "green" ]
+                (Nats_eio.Jetstream.Consumer.Config.priority_groups config)
+          | Error error ->
+              fail
+                (Format.asprintf "priority config rejected multiple groups: %a"
+                   Nats_eio.Jetstream.Error.pp_config error));
           (match
              Nats_eio.Jetstream.Consumer.Config.v
                ~priority_groups:[ "bad.group" ]
