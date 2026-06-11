@@ -3196,6 +3196,30 @@ let () =
                 | _ -> false);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "fetch no-wait sends the no-wait pull shape" (fun () ->
+          let response, response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await response; `Await hold ]
+            (fun ~sw ~trace connection ->
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Consumer.fetch_no_wait
+                       (consumer connection) ~batch:3));
+              yield_n 5;
+              let request_wire = Buffer.contents trace in
+              if
+                not (contains_substring ~needle:"no_wait\\\":true" request_wire)
+              then fail "no-wait pull did not set no_wait";
+              if contains_substring ~needle:"expires\\\":" request_wire then
+                fail "no-wait pull unexpectedly set expires";
+              Eio.Promise.resolve response_u
+                (Ok (status_wire ~code:404 ~description:"No Messages"));
+              equal int 0
+                (List.length (expect_jetstream_ok (Eio.Promise.await result)));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "push config retains its delivery subject and queue group" (fun () ->
           let subject = Nats.Subject.literal "orders.push" in
           let group = Nats.Queue_group.literal "workers" in

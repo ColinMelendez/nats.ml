@@ -1071,6 +1071,12 @@ module Consumer : sig
       the handle retains the [Nats-Pin-Id] from a delivery for later fetches and
       retries a 423 pin mismatch without the stale id. *)
 
+  val fetch_no_wait : t -> batch:int -> (Msg.t list, Error.t) result
+  (** [fetch_no_wait consumer ~batch] requests up to [batch] messages that are
+      available when the request reaches the server. It returns an empty or
+      partial list without waiting for future messages. [batch] has the same
+      validation as {!fetch}. *)
+
   module Pull : sig
     type consumer = t
     type t

@@ -5245,7 +5245,7 @@ module Consumer = struct
           String_map.add group pin !(consumer.priority_pins)
 
   type next_request = {
-    expires : int64;
+    expires : int64 option;
     batch : int;
     max_bytes : int option;
     idle_heartbeat : int64 option;
@@ -5254,6 +5254,7 @@ module Consumer = struct
     min_ack_pending : int64 option;
     id : string option;
     priority : int option;
+    no_wait : bool option;
   }
 
   let next_request_codec =
@@ -5268,6 +5269,7 @@ module Consumer = struct
         min_ack_pending
         id
         priority
+        no_wait
       ->
         {
           expires;
@@ -5279,8 +5281,10 @@ module Consumer = struct
           min_ack_pending;
           id;
           priority;
+          no_wait;
         })
-    |> Jsont.Object.mem "expires" Jsont.int64 ~enc:(fun value -> value.expires)
+    |> Jsont.Object.opt_mem "expires" Jsont.int64 ~enc:(fun value ->
+        value.expires)
     |> Jsont.Object.mem "batch" Jsont.int ~enc:(fun value -> value.batch)
     |> Jsont.Object.opt_mem "max_bytes" Jsont.int ~enc:(fun value ->
         value.max_bytes)
@@ -5294,6 +5298,8 @@ module Consumer = struct
     |> Jsont.Object.opt_mem "id" Jsont.string ~enc:(fun value -> value.id)
     |> Jsont.Object.opt_mem "priority" Jsont.int ~enc:(fun value ->
         value.priority)
+    |> Jsont.Object.opt_mem "no_wait" Jsont.bool ~enc:(fun value ->
+        value.no_wait)
     |> Jsont.Object.finish
 
   let default_fetch_expires = Mtime.Span.(5 * s)
@@ -5418,6 +5424,7 @@ module Consumer = struct
     | Status_request_expired
     | Status_batch_completed
     | Status_max_bytes
+    | Status_no_messages
     | Status_pin_lost
     | Status_consumer_deleted
     | Status_conflict
@@ -5436,6 +5443,7 @@ module Consumer = struct
       && (contains ~needle:"flowcontrol" normalized
          || contains ~needle:"flow control" normalized)
     then Status_flow_control
+    else if Int.equal code 404 then Status_no_messages
     else if Int.equal code 408 then Status_request_expired
     else if Int.equal code 423 then Status_pin_lost
     else if
@@ -5451,7 +5459,8 @@ module Consumer = struct
     let code = status.Nats.Op.code in
     let description = status.Nats.Op.description in
     match classify_status status with
-    | Status_request_expired | Status_batch_completed | Status_max_bytes ->
+    | Status_request_expired | Status_batch_completed | Status_max_bytes
+    | Status_no_messages ->
         Ok ()
     | Status_consumer_deleted -> Error Error.Consumer_deleted
     | Status_pin_lost | Status_conflict ->
@@ -5465,7 +5474,8 @@ module Consumer = struct
     if Int.equal code 503 then Error (Error.Connection Core_error.No_responders)
     else
       match classify_status status with
-      | Status_request_expired | Status_batch_completed -> Ok ()
+      | Status_request_expired | Status_batch_completed | Status_no_messages ->
+          Ok ()
       | Status_max_bytes | Status_pin_lost | Status_conflict ->
           Error (Error.Conflict { code; description })
       | Status_consumer_deleted -> Error Error.Consumer_deleted
@@ -5480,7 +5490,7 @@ module Consumer = struct
     | Status_max_bytes | Status_pin_lost | Status_conflict ->
         Error.Conflict { code; description }
     | Status_idle_heartbeat | Status_flow_control | Status_request_expired
-    | Status_batch_completed | Status_unexpected ->
+    | Status_batch_completed | Status_no_messages | Status_unexpected ->
         Error.Unexpected_status { code; description }
 
   let release_subscription subscription =
@@ -5512,8 +5522,8 @@ module Consumer = struct
             Ok value
         | Error error, _ -> Error error)
 
-  let fetch ?expires ?idle_heartbeat ?max_bytes ?group ?min_pending
-      ?min_ack_pending ?priority consumer ~batch =
+  let fetch_internal ~no_wait ?expires ?idle_heartbeat ?max_bytes ?group
+      ?min_pending ?min_ack_pending ?priority consumer ~batch =
     let expires = Option.value expires ~default:default_fetch_expires in
     match
       validate_fetch ~batch ~expires ~max_bytes ~idle_heartbeat ~group
@@ -5523,7 +5533,9 @@ module Consumer = struct
     | Ok () ->
         let base_request =
           {
-            expires = Mtime.Span.to_uint64_ns expires;
+            expires =
+              if no_wait then None
+              else Some (Mtime.Span.to_uint64_ns expires);
             batch;
             max_bytes;
             idle_heartbeat = Option.map Mtime.Span.to_uint64_ns idle_heartbeat;
@@ -5532,6 +5544,7 @@ module Consumer = struct
             min_ack_pending;
             id = None;
             priority;
+            no_wait = if no_wait then Some true else None;
           }
         in
         with_fetch_subscription consumer (fun ~inbox subscription ->
@@ -5667,6 +5680,14 @@ module Consumer = struct
                 match !terminal with
                 | Some result -> result
                 | None -> Ok (List.rev !messages)))
+
+  let fetch ?expires ?idle_heartbeat ?max_bytes ?group ?min_pending
+      ?min_ack_pending ?priority consumer ~batch =
+    fetch_internal ~no_wait:false ?expires ?idle_heartbeat ?max_bytes ?group
+      ?min_pending ?min_ack_pending ?priority consumer ~batch
+
+  let fetch_no_wait consumer ~batch =
+    fetch_internal ~no_wait:true consumer ~batch
 
   module Pull = struct
     type consumer = t
@@ -5887,7 +5908,7 @@ module Consumer = struct
       | Ok () -> (
           let request =
             {
-              expires = Mtime.Span.to_uint64_ns expires;
+              expires = Some (Mtime.Span.to_uint64_ns expires);
               batch;
               max_bytes;
               idle_heartbeat = Option.map Mtime.Span.to_uint64_ns idle_heartbeat;
@@ -5896,6 +5917,7 @@ module Consumer = struct
               min_ack_pending;
               id = None;
               priority;
+              no_wait = None;
             }
           in
           let connection = consumer.jetstream.connection in
