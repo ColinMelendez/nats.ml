@@ -1,219 +1,208 @@
 # Go SDK capability parity audit
 
-This audit compares the Eio SDK in this repository with the current official Go
-SDK pinned by the interop peer: `github.com/nats-io/nats.go v1.52.0`. The Go
-version is deliberately pinned so that a later server or SDK release does not
-silently change the scope of this document. The comparison is about user-visible
-capabilities, not a one-for-one translation of Go method names. Eio's direct
-style, switch-owned lifetimes, and typed OCaml values are intentional API
-differences.
+This audit compares the Eio SDK in this repository with the official Go SDK
+pinned by the interop peer: `github.com/nats-io/nats.go v1.52.0`. Pinning the
+reference makes the scope reproducible; a later server or SDK release must be
+audited separately. The comparison is about user-visible capabilities, not a
+one-for-one translation of Go method names. Eio's direct style, switch-owned
+lifetimes, and typed OCaml values are intentional API differences.
 
-The primary Go references are the [nats.go repository](https://github.com/nats-io/nats.go),
-its current [JetStream package](https://github.com/nats-io/nats.go/tree/v1.52.0/jetstream),
+The primary references are the [nats.go repository](https://github.com/nats-io/nats.go),
+its [JetStream package](https://github.com/nats-io/nats.go/tree/v1.52.0/jetstream),
 and its [Services package](https://github.com/nats-io/nats.go/tree/v1.52.0/micro).
-The repository's existing interop runners provide the behavioral evidence for
-the capabilities marked as covered.
+The repository's interop runners provide behavioral evidence for the rows
+marked as covered.
 
-## Summary
+## Status at a glance
 
-| Area | Current position | Material gaps |
+| Area | Current position | Material gaps or deliberate differences |
 | --- | --- | --- |
-| Core NATS | Covered for the Eio model | Some Go-specific diagnostics/options; alternative transports are intentionally out of scope |
-| Authentication and TLS | Covered | Dynamic callback and transport-option breadth is narrower |
-| Reconnect, discovery, drain | Covered | Go-style callback hooks and connection statistics are not mirrored |
-| JetStream management | Account info, stream/consumer lookup, upsert, names, reset, detailed lists | Message-counter and newer persistence fields; broader system-level administration |
-| JetStream publishing | Synchronous and switch-owned asynchronous acknowledgements; expectation/retry/TTL/schedule options; atomic and fast batch wire paths | Shared async reply multiplexing and a few newer server-only publish controls |
-| JetStream consumption | Pull, push, ordered, heartbeats, flow control, priority, consumer reset | Ack-flow-control policy, some ordered options, and Go's continuous batching controls |
-| Key-Value | CRUD, CAS, history, finite keys, watches, per-key/marker TTL, purge-delete cleanup, resumable/multi-filter watches, listers | Bucket manager/listers |
-| Object Store | Streaming CRUD, links, metadata, watches, list, seal, and Go interop | Bucket manager/listers and file helpers |
-| Services | Registration, groups, requests, errors, discovery, stats, reset, stopped state, pending limits, custom lifecycle/stat callbacks, bidirectional Go interop across the pinned server matrix, cross-SDK failover recovery, controlled subscription-failure recovery, and parent-connection closure cleanup | Future server/SDK versions |
+| Core NATS | Covered for the Eio model | Go-specific dialers, proxy knobs, diagnostics, and alternative transports are not part of the Eio surface |
+| Authentication and TLS | Covered | The callback/dialer breadth is narrower because credentials and TLS flows are explicit values |
+| Reconnect, discovery, drain | Covered | Lifecycle callbacks and connection statistics use Eio events/results rather than Go callback/stat APIs |
+| JetStream management | Covered for the material v1.52.0 surface | No material protocol gap; future server-only fields remain an acceptance concern |
+| JetStream publishing | Covered, including async futures, retries, TTL/schedule headers, atomic and fast batches | Shared async acknowledgement multiplexing is a throughput optimization, not a capability gap |
+| JetStream consumption | Covered: pull, push, ordered, fetch, no-wait, heartbeats, flow control, priority, and continuous consumption | Go callback/channel receive shapes and threshold/error-handler tuning are represented by direct Eio iteration and structured results |
+| Key-Value | Covered: CRUD, CAS, history, watches, listers, managers, policy fields, composition, TTL, and purge-marker cleanup | Watch recovery intentionally does not claim ordered-consumer gap detection |
+| Object Store | Covered: streaming CRUD, links, metadata, watches, listing, sealing, managers, file helpers, and Go interop | No material data-plane gap; broader cluster failure matrices remain acceptance work |
+| Services | Covered for the pinned `micro` surface and lifecycle matrices | Future server/SDK versions and transport-specific integration hooks remain separate work |
 
-## Core and transport
+## Core, authentication, and transport
 
 The following Go capabilities have equivalent OCaml behavior, although the
 ownership and receive APIs differ:
 
 - Core publish, headers, request/reply, no-responders, queue groups, flush,
-  unsubscribe, auto-unsubscribe, drain, and close.
-- Ordered configured and discovered server candidates, reconnect backoff and
+  unsubscribe, auto-unsubscribe, drain, and close;
+- ordered configured and discovered server candidates, reconnect backoff and
   jitter, subscription replay, reconnect lifecycle events, and bounded pending
-  resources.
-- Token, username/password, NKey, JWT/NKey, TLS, server-required TLS, and mTLS
+  resources; and
+- token, username/password, NKey, JWT/NKey, TLS, server-required TLS, and mTLS
   authentication paths.
 
-Go exposes synchronous subscriptions, callbacks, and channels because those are
-natural Go concurrency forms. The OCaml surface uses `Subscription.next`,
-`iter`, and Eio switches instead; this is an intentional runtime adaptation,
-not a missing capability.
+Go exposes synchronous subscriptions, callbacks, and channels because those
+are natural Go concurrency forms. The OCaml surface uses `Subscription.next`,
+`iter`, and Eio switches instead. This is a runtime adaptation, not a missing
+wire capability.
 
-The remaining transport/diagnostic gaps are deliberately narrow. Alternative
-transports, including WebSocket, are out of scope for the current Eio-only SDK;
-the protocol core remains transport-neutral so a future transport can be added
-without changing these semantics. Go-specific custom dialers, in-process
-servers, proxy headers, ping/stale-connection tuning, connection statistics,
-and server-introspection methods are also not mirrored yet; most are adapter-
-specific or observability conveniences.
+Alternative transports, including WebSocket, are intentionally out of scope
+for the current Eio-only SDK. The protocol core remains transport-neutral so a
+future adapter can be added without changing the protocol semantics. Go-only
+custom dialers, in-process servers, proxy headers, stale-connection tuning,
+connection statistics, and server-introspection helpers are also not mirrored;
+they are adapter or observability conveniences rather than required NATS wire
+operations.
 
-## JetStream management and publishing
+## JetStream management
 
-### Covered
+The OCaml client covers the material management surface exposed by the pinned
+Go JetStream package:
 
-The OCaml client already covers synchronous publish acknowledgements, message
-IDs, stream create/bind/update/list/info/delete, direct message reads by
-sequence and subject, subject-filtered purge, consumer create/bind/update/list/
-info/delete, pull and push consumers, ordered consumers, explicit/all/no-ack
-acknowledgements, redelivery, backoff, filters, replay, idle heartbeats, flow
-control, priority groups, pause/resume, and consumer recovery. These are backed
-by the current Core request/reply and subscription primitives.
+- account information and domain-tier usage;
+- stream create, bind, lookup, create-or-update, update, list, name listing,
+  subject lookup, direct message reads, purge, ordinary and secure message
+  deletion, and delete;
+- consumer create, bind, lookup, create-or-update, update, list, name listing,
+  pause/resume, reset, reset-to-sequence, and delete; and
+- read-modify-write preservation of unknown fields in stream, source,
+  transform, republish, external, and consumer configuration objects.
 
-### Partial or missing stream capabilities
+The typed stream configuration includes mirrors, sources and transforms,
+republish, placement, compression, per-subject limits, consumer limits,
+message TTL and counters, persistence mode, atomic and scheduled publishing,
+fast batch publishing, direct reads, rollup, deletion policy, initial
+sequence, and the other material v1.52.0 stream fields. Configuration
+constructors enforce the local invariants before a request is sent.
 
-The OCaml projection now also covers maximum consumers, discard-new-per-subject,
-no-ack streams, duplicate windows, deny-purge, initial sequence, and stream-level
-consumer limits. Their constructors validate the server's local invariants, and
-the stream wire tests cover create, response decoding, update preservation, and
-boundary failures.
+This is a capability over Core NATS request/reply, not a second transport.
+Name listers collect paged responses into ordered OCaml lists; callers that
+already know a resource can use `bind` without an existence request.
 
-The current API already models placement constraints, per-message TTL,
-scheduled messages, atomic publishing, and fast batch publishing. The remaining
-`jetstream.StreamConfig` gaps are message-counter support and newer persistence
-or placement fields introduced after the modeled server surface.
+## JetStream publishing
 
-The OCaml projection now also configures mirrors, sources, source filters and
-subject transforms, input subject transforms, republish rules, cross-account
-external prefixes, and mirror-direct reads. Source start points are typed as a
-sequence or RFC3339 time, and constructors reject mirror/source combinations
-that the server rejects. Unknown members are retained at the outer config and
-the nested source, external, transform, and republish levels during
-read-modify-write updates. Ordinary and secure stream message deletion are now
-implemented and covered against the Go peer; the remaining management gaps are
-the newer configuration capabilities and manager-level operations listed
-above.
-
-The Go SDK also exposes manager-level create/update/upsert operations, stream
-and stream-name listers, account information, and consumer reset operations.
-The OCaml surface now exposes those operations compositionally through the
-JetStream capability and typed stream/consumer handles. Name listers eagerly
-collect the server's paged responses into ordered lists, while `bind` remains
-the explicit local-handle operation for callers that already know a resource
-exists. The remaining management work is the newer configuration surface and
-system-level administration described above.
-
-### Publishing
-
-The OCaml publisher exposes both synchronous acknowledgements and a
-switch-owned asynchronous `Publisher` with bounded pending state, per-future
-await/cancel operations, completion waiting, no-responder retries, and stall
-timeouts. `Publish_options` covers message IDs, optimistic-concurrency
-expectations, retry policy, per-message TTL, and scheduled-message headers.
-Publish acknowledgements retain the server stream, sequence, duplicate,
-domain, batch, and count fields.
+The publisher exposes synchronous acknowledgements and a switch-owned
+asynchronous publisher with bounded pending state, per-future await/cancel,
+completion waiting, no-responder retries, and stall timeouts. Publish options
+cover message IDs, optimistic-concurrency expectations, retry policy,
+per-message TTL, and scheduled-message headers. Acknowledgements retain the
+server stream, sequence, duplicate, domain, batch, and count fields.
 
 The server-side atomic and fast batch protocols are exposed as separate
 `Atomic_batch` and `Batch` operations. They validate reserved control headers,
 use the exact `Nats-Batch-*` headers and `$FI` reply grammar, consume fast-batch
-flow acknowledgements/gaps/errors, and preserve batch/count metadata. The
-stream configuration projection also models `allow_atomic`,
-`allow_msg_schedules`, and `allow_batched`.
+flow acknowledgements/gaps/errors, and preserve batch/count metadata.
 
-The remaining publishing optimization is to replace the current per-future
-private request subscriptions with a shared wildcard acknowledgement
-subscription. That is an allocation/throughput improvement, not a wire
-capability gap; the current implementation retains explicit request ownership
-and cancellation semantics. A few server controls may also be added as the
-message-counter and newer persistence features become available.
+The current implementation gives each asynchronous publish future explicit
+request ownership. Replacing those private reply subscriptions with one
+shared wildcard acknowledgement subscription could reduce allocation and
+subscription churn, but would not add a user-visible NATS capability.
 
-### Consumption gaps
+## JetStream consumption
 
-The normal pull/push/ordered workflows are present. The remaining Go-level gaps
-are:
+The normal delivery forms are covered:
 
-- `AckFlowControlPolicy` and the corresponding acknowledgement semantics;
-- the separate consumer name field, where it is distinct from a durable name;
-- ordered-consumer multi-subject filters, metadata, headers-only mode, inactive
-  threshold, reset-attempt limit, and custom name prefix;
-- Go's fetch-by-bytes/no-wait and continuously overlapping `Messages`/`Consume`
-  helpers. OCaml `fetch` and `iter` cover the basic workflows, but not every
-  throughput/control option exposed by Go.
+- one-shot pull fetches, including max-bytes and no-wait requests;
+- persistent pull sessions with bounded fetches, expiry, idle heartbeats,
+  flow control, priority-group controls, timeout/resumption, and explicit
+  cleanup;
+- push sessions with queue groups, acknowledgements, heartbeats, flow-control
+  responses, timeout/resumption, and reconnect restoration; and
+- ordered sessions with client-managed ephemeral consumers, filters,
+  headers-only delivery, reset limits, metadata/name-prefix controls, sequence
+  validation, and recovery from gaps, liveness loss, deletion, or disconnect.
+
+`Consumer.Consume` provides the continuous pull workflow as a switch-owned,
+bounded queue with `next`, `iter`, `stop`, `drain`, and `close`. It accepts
+message/byte bounds and a stop-after count while applying Eio backpressure.
+That direct result/iteration shape replaces Go's callback and channel
+variants. Go's `ThresholdMessages`, `ThresholdBytes`, and asynchronous error
+handler are intentionally not copied as separate protocol abstractions:
+queue capacity and the result returned by `next`/`iter` provide the same
+backpressure and error ownership without hiding failures in a callback.
+
+The acknowledgement policy includes flow control, and push/pull sessions
+implement the corresponding control traffic. There is therefore no remaining
+ack-flow-control capability gap; the difference is only the shape of the
+consumer handle and error path.
 
 ## Key-Value
 
-The OCaml module covers bucket configuration, revisioned get/put/create/update,
-compare-and-set delete/purge, exact revision reads, finite key scans, history,
-and switch-owned watches with initial markers, delivery policies, delete
-filtering, metadata-only delivery, multiple filters, and revision resumption.
-It also exposes per-key and purge-marker TTLs, marker age cleanup, and a
-switch-owned streaming key lister. The local black-box suite covers the wire
-contracts, while the KV interop runner exchanges TTL-bearing values and purge
-markers with the pinned Go SDK and validates marker cleanup across SDKs.
+The OCaml module covers revisioned get/put/create/update, compare-and-set
+delete/purge, exact revision reads, finite key scans, history, purge-marker
+cleanup, and switch-owned watches with initial markers, delivery policies,
+delete filtering, metadata-only delivery, multiple filters, and revision
+resumption. Per-key and purge-marker TTLs are represented explicitly.
 
-The remaining Go KV capability gap is the bucket manager surface: create,
-update/upsert, and name/status listers. Go's ordered watcher recovery is also
-stronger than the current OCaml watch's ordinary ephemeral-consumer recovery;
-the OCaml API documents that distinction rather than presenting a resumable
-watch as an ordered consumer.
+`Key_value.Manager` covers account-wide create, update, create-or-update,
+open, delete, name listing, and status listing. `Config` and `Status` project
+description, history, limits, storage, replicas, placement, compression,
+metadata, republish, mirrors, and sources onto the backing stream. The
+existing typed JetStream source/republish codecs remain the single owner of
+their wire representation; a KV mirror is represented with no local capture
+subjects, and mirror/source combinations are rejected at the bucket boundary.
+
+Go's convenience layer accepts bare bucket names when constructing mirror and
+source relationships. The OCaml source value accepts an explicit backing
+stream name and preserves caller-supplied transforms, so another bucket is
+referenced as its `KV_` stream name. This is an intentional precision tradeoff
+in favor of preserving the underlying JetStream composition model.
+
+The OCaml watch documents that ordinary ephemeral-consumer recovery does not
+provide the stronger ordered-consumer gap detection of Go's ordered watcher.
+Callers that require that invariant should use `Consumer.Ordered` directly or
+resume a watch from an application-owned revision checkpoint.
+
+The pinned Go interop runner covers revisions, stale CAS, tombstones, watches,
+purge markers, and cleanup across the supported single-server matrix.
 
 ## Object Store
 
-The OCaml module already has the important data-plane shape: incremental
+The OCaml module has the complete material data-plane shape: incremental
 Bytesrw put/get, digest and chunk verification, metadata updates, ordinary and
-bucket links, listing, tombstones, watches, deletion cleanup, status, and
-sealing. Its typed link representation is equivalent to the Go split between
-`AddLink` and `AddBucketLink`.
+bucket links, listing, tombstones, watches, deletion cleanup, status, sealing,
+and bucket policy updates with read-modify-write preservation.
 
-The remaining API gaps are bucket-level create/update/create-or-update
-distinctions, bucket-name/status listers, and file convenience helpers. The
-cross-SDK data-plane contract is now exercised by
-`scripts/runtest-interop-object-store.sh` against the pinned Go peer: both SDKs
-exchange content and metadata, observe updates, resolve links, inspect list and
-tombstone behavior, and validate sealing. The manager and convenience gaps do
-not block the data-plane feature set.
+`Object_store.Manager` adds account-wide create, update, create-or-update,
+open, delete, name listing, and status listing. `put_file` and `get_file`
+provide the file conveniences while retaining incremental transfer and
+structured filesystem errors.
+
+The `scripts/runtest-interop-object-store.sh` runner exercises the pinned Go
+peer for content and metadata exchange, updates, links, listing, tombstone
+behavior, and sealing. Additional cluster/failure-injection coverage belongs
+to the acceptance program, not to an unimplemented Object Store API.
 
 ## Services
 
-The OCaml service module covers typed identity/configuration, endpoint and group
-composition, queue and metadata declarations, successful and error replies,
-monitoring discovery, statistics, service-local stopping, statistics reset,
-stopped-state inspection, endpoint pending message/byte limits, custom endpoint
-statistics data, and service error/done callbacks. The callbacks are configured
-as immutable service options: statistics callbacks receive immutable endpoint
-snapshots, while error and done callbacks are serialized by a service-owned Eio
-dispatcher outside the service mutex. This matches the Go capability without
-turning callbacks into a global mutable registry.
+The OCaml service module covers typed identity/configuration, endpoint and
+group composition, queue and metadata declarations, successful and error
+replies, monitoring discovery, statistics, reset, stopped-state inspection,
+pending message/byte limits, custom lifecycle/stat callbacks, and bidirectional
+Go interop. The callbacks are immutable service options and are dispatched by
+the service-owned Eio lifecycle; they are local API behavior and do not appear
+on the NATS service wire.
 
-The dedicated Service interop runner checks custom endpoint statistics data in
-both directions against the pinned Go `micro` peer. Its matrix repeats the
-wire contract across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` under
-anonymous, token, username/password, NKey, JWT, mTLS, and their supported TLS
-variants. Lifecycle callback execution remains a local API contract because
-callbacks are not encoded on the NATS service wire. The same matrix runner can
-select the controlled subscription-failure and parent-close scenarios; both
-focused lifecycle scenarios pass all 33 version/authentication cells.
+The dedicated Service matrix covers the pinned server releases and the
+anonymous, token, username/password, NKey, JWT, mTLS, and supported TLS
+variants. Focused runners also cover reconnect, controlled subscription
+failure, and parent-connection closure. Future server and SDK versions remain
+acceptance work.
 
-The Service reconnect runner reuses the three-node cross-SDK failover harness.
-It performs bidirectional endpoint requests before each server kill, gates the
-kill on a round barrier after both peers have validated their counters, waits
-for both clients to reconnect, and then verifies endpoint replay plus named
-INFO/STATS monitoring on the surviving servers. Explicit subscription-failure
-injection is covered separately by a single-server runner that uses the Go
-client to fill a bounded OCaml endpoint queue, validates the structured
-slow-consumer error and failed Service state, and proves the parent connection
-still serves an ordinary request. The parent-close runner then closes the
-parent connection, waits for a marker written after the close completes, and
-proves that the endpoint has no stale responder before explicitly stopping the
-Service.
+## Remaining work
 
-## Prioritized follow-up
+The material Go parity gaps identified by the original audit are closed. The
+remaining work is operational confidence and intentionally separate adapter
+surface:
 
-1. **Close the remaining pinned-SDK surface.** Add message-counter and newer
-   persistence fields, the missing consumer options and continuous pull
-   controls, and the KV/Object Store managers and convenience operations. Keep
-   alternative transports such as WebSocket separate from this work.
+1. Extend the established live-server and Go-peer matrices to more cluster
+   failure topologies and newer server/SDK releases.
+2. Add observability or dialer conveniences only when a concrete application
+   requires them; keep them outside the protocol waist.
+3. Re-audit future JetStream fields and server feature gates without silently
+   changing the pinned parity claim.
+4. Keep alternative transports such as WebSocket out of this project scope
+   unless that goal is explicitly changed.
 
-2. **Future SDK/server versions and additional failure topologies.** Repeat
-   the established Service matrix against newer releases and add cluster-level
-   lifecycle cases as useful.
-
-This ordering keeps the narrow protocol waist intact, gives each addition a
-behavioral test target, and avoids claiming parity merely because unknown JSON
-fields survive a read-modify-write operation.
+These are acceptance and product-scope decisions, not unimplemented Core,
+JetStream, KV, Object Store, or Services wire capabilities in the current
+Eio surface.

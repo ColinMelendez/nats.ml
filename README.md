@@ -51,6 +51,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-interop-jetstream-matrix.sh
 ./scripts/runtest-interop-key-value.sh
 ./scripts/runtest-interop-key-value-matrix.sh
+./scripts/runtest-interop-object-store.sh
 ./scripts/runtest-interop-jetstream-reconnect.sh
 ./scripts/runtest-interop-auth-jetstream-reconnect-matrix.sh
 ./scripts/runtest-interop-jetstream-cluster.sh
@@ -210,9 +211,11 @@ The dedicated Key-Value interop runner uses the official Go `nats.go`
 updates, stale CAS validation, tombstones, watches, purge markers, and cleanup
 between Go and OCaml. Its matrix covers the same six anonymous/authenticated
 plaintext/TLS modes across all three pinned releases; all 18 baseline cases
-pass. Cluster/reconnect, NKey/JWT, mTLS, and Object Store cross-SDK coverage
-remain separate acceptance work; the dedicated auth matrix covers those
-authentication and TLS contracts for Core traffic.
+pass. The Object Store interop runner uses the same official Go peer to
+exchange chunked content and metadata, updates, links, listing, tombstones,
+and sealing. KV cluster/reconnect and broader authenticated or failure
+topologies remain separate acceptance work; the dedicated auth matrix covers
+the corresponding Core authentication and TLS contracts.
 The separate JetStream reconnect runner uses a file-backed stream and durable
 Push consumers on one persistent server container, kills and restarts that
 container, and verifies both the OCaml and Go Push legs recover and exchange
@@ -235,8 +238,8 @@ sequentially; set `NATS_SERVER_IMAGES` to a comma-separated image list or
 authentication; set the token or username/password variables described above
 to repeat the selected matrix with that authentication mode. It does not
 claim full server conformance: broader failure-injection matrices, KV
-cluster/reconnect, Object Store cross-SDK behavior, and
-the wider Services cross-SDK/version matrix remain separate acceptance work.
+cluster/reconnect, and the wider Services cross-SDK/version matrix remain
+separate acceptance work.
 The cross-SDK reconnect runner
 starts three independent NATS servers, kills the first and then the second
 after flushed exchanges, and checks that the Go and OCaml clients recover twice,
@@ -277,29 +280,34 @@ stream and consumer configuration and management, including consumer metadata,
 sampling, push rate limits, replica inheritance, singular and multi-subject
 filters, redelivery backoff schedules, typed pause/resume control, and
 read-modify-write updates that preserve unknown server fields, direct
-stored-message
-reads, one-shot fetch, durable publish and message acknowledgements, and
-switch-owned Eio pull/push sessions over ordinary Core NATS request/reply. Push
-sessions consume idle heartbeats, answer flow-control requests including
+stored-message reads, one-shot and continuous pull fetch, durable publish and
+message acknowledgements, and switch-owned Eio pull/push/ordered sessions over
+ordinary Core NATS request/reply. The continuous pull handle is bounded and
+switch-owned, with explicit stop and drain controls. Push sessions consume
+idle heartbeats, answer flow-control requests including
 stalled-heartbeat replies, and restore replayable delivery subscriptions across
 reconnects. Ordered sessions use client-managed ephemeral pull consumers,
 validate consecutive consumer sequences, and resume from the next stream
-sequence after recovery. `Nats_eio.Object_store` now provides validated
-buckets, direct metadata, incremental Bytesrw put/get, digest verification,
-metadata updates and links, snapshot/live watches, listing, deletion,
-replacement cleanup, sealing, and bucket policy updates for replicas, placement,
-compression, and stream metadata. `Nats_eio.Key_value` provides revisioned
-values, compare-and-set mutations, finite scans, history, and cancellable
-watches, while the dedicated Key-Value interop runner cross-checks revision,
-CAS, tombstone, watch, purge, and cleanup behavior against the official Go
-`nats.go` API. `Nats_eio.Service` provides typed endpoint workers, queue groups,
+sequence after recovery. Both KV and Object Store expose account-wide managers,
+name/status listers, and read-modify-write policy projections; Object Store
+also provides file transfer helpers and cross-SDK data-plane coverage.
+`Nats_eio.Object_store` provides validated buckets, direct metadata,
+incremental Bytesrw put/get, digest verification, metadata updates and links,
+snapshot/live watches, listing, deletion, replacement cleanup, sealing, and
+bucket policy updates for replicas, placement, compression, and stream
+metadata. `Nats_eio.Key_value` provides revisioned values, compare-and-set
+mutations, finite scans, history, cancellable watches, TTL/marker policy, and
+KV stream composition, while the dedicated Key-Value interop runner
+cross-checks revision, CAS, tombstone, watch, purge, and cleanup behavior
+against the official Go `nats.go` API. `Nats_eio.Service` provides typed
+endpoint workers, queue groups,
 `$SRV.*` monitoring and fan-out discovery, request/service-error replies,
 statistics, replayable subscriptions, and service-local draining. The
 dedicated JetStream cluster slice is intentionally narrower than a full
-failure matrix; advanced cluster scenarios and cross-SDK interoperability
-coverage remain in the final acceptance phase. The Ordered reconnect cluster
-slice passes anonymous plaintext seed-node failure, JetStream-leader failure,
-and durable seed restart on all three pinned server releases.
+failure matrix; advanced cluster scenarios remain in the final acceptance
+phase. The Ordered reconnect cluster slice passes anonymous plaintext seed-node
+failure, JetStream-leader failure, and durable seed restart on all three pinned
+server releases.
 
 The project uses Dune package management. No compatibility layer for NATS
 Streaming is planned.

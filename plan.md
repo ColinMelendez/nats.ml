@@ -98,17 +98,24 @@ after gaps, liveness loss, deletion, or non-replayed disconnects while resuming
 from the next stream sequence. Reconnection waits for the connection replay
 barrier and retries transient JetStream availability failures without repeating
 stale-consumer cleanup. Key-Value now provides typed bucket management,
-compare-and-set mutations, finite scans, history, and cancellable watches. The
-opt-in single-server runner now exercises these behaviors against a live
-JetStream bucket as well.
+compare-and-set mutations, finite scans, history, cancellable watches,
+per-key/marker TTL, account-wide managers, policy projection, and composed
+mirror/source/republish configuration. The opt-in single-server runner now
+exercises these behaviors against a live JetStream bucket as well. Continuous
+pull consumption is available through a bounded switch-owned
+`Consumer.Consume` session with explicit stop, drain, and cleanup controls.
+Priority consumers support multiple configured groups and preserve per-group
+pin state.
 Services now provide typed endpoint/group values, queue-backed workers,
 request/service-error replies, `$SRV.*` monitoring and fan-out discovery,
 statistics, statistics reset, stopped-state inspection, endpoint pending
 message/byte limits, replayable subscriptions, and service-local draining.
-Object Store now has a first Eio slice with validated bucket management, direct
-metadata reads, incremental Bytesrw transfers, digest/size/chunk verification,
-deletion, replacement cleanup, bucket policy projection and updates, and
-structured timeout and cleanup errors. The opt-in single-server runner now
+Object Store now has a complete Eio data-plane slice with validated bucket
+management, direct metadata reads, incremental Bytesrw transfers,
+digest/size/chunk verification, deletion, replacement cleanup, bucket policy
+projection and updates, account-wide managers, name/status listers, file
+helpers, and structured timeout and cleanup errors. The opt-in single-server
+runner now
 exercises single-service monitoring, endpoint/group requests, service errors,
 failure isolation, statistics, and service-local draining. It also exercises
 two-instance queue-group routing and aggregate worker statistics, verifies
@@ -127,11 +134,10 @@ in the final acceptance phase. Current consumer confidence combines local mock
 transport and pure-boundary tests with the passing single-server and
 authenticated cluster acceptance slices. Priority-group pull consumers are
 now modeled locally:
-validated single-group policy configuration, per-request thresholds and
-priorities, INFO pin state, explicit unpin, pinned-client request echoing, and
-423 retry behavior are covered by the Eio mock transport. Future multi-group
-consumer support and real priority-group interoperability remain acceptance
-work.
+validated policy configuration with multiple groups, per-request thresholds
+and priorities, INFO pin state, explicit unpin, pinned-client request echoing,
+and 423 retry behavior are covered by the Eio mock transport. Real multi-group
+priority interoperability remains acceptance work.
 An additional opt-in `scripts/runtest-jetstream-cluster.sh` harness passes on
 the pinned `nats:2.10.22` image: it forms a full three-node route mesh, creates
 file-backed three-replica stream and durable explicit-ack Push consumer state,
@@ -147,6 +153,19 @@ connection seam; replays INFO/TLS/CONNECT and subscriptions; emits
 non-terminal `Disconnected`/`Reconnected` events; and defers unsubscribe
 commands until the replacement session is ready. It does not replay
 arbitrary publishes or pending requests.
+
+### Go parity checkpoint
+
+Against the pinned official Go `nats.go v1.52.0` surface, the material Eio
+capabilities are now implemented: JetStream account and resource management,
+stream persistence/message-counter and publish controls, pull/push/ordered and
+continuous consumption, multiple priority groups, KV managers and composed
+bucket policies, and Object Store managers, file helpers, and data-plane
+interop. The remaining differences are deliberate runtime or product-scope
+choices: direct Eio iteration instead of Go callbacks/channels, ordinary KV
+watch recovery instead of ordered-consumer gap detection, adapter-specific
+diagnostics/dialer conveniences, broader failure matrices, and alternative
+transports.
 
 ### Production-readiness acceptance program
 
@@ -244,11 +263,11 @@ wire-behavior differences against the Go peer, and an outside review of the
 staged boundary and evidence.
 
 Implementation order is deliberately incremental: (1) harness diagnostics and
-ownership, (2) single-server KV/Object Store/Services acceptance, (3) the
-baseline single-server KV cross-SDK role reversal, (4) missing cluster
-failures, (5) remaining durable-feature cross-SDK coverage, and (6) release
-automation and final evidence. The single-server NKey/JWT/mTLS slice is now
-complete. Each slice lands as a small semantic commit and is reviewed
+ownership, (2) broader single-server and Go-peer feature-family acceptance,
+(3) missing cluster failures and reconnect topologies, (4) newer server/SDK
+feature gates, and (5) release automation and final evidence. The single-server
+NKey/JWT/mTLS slice and the material pinned Go capability slices are complete.
+Each remaining slice lands as a small semantic commit and is reviewed
 independently.
 
 ## Working principles
@@ -719,11 +738,11 @@ request/reply and subscription primitives.
   source configuration preserves unknown JSON members through the
   INFO/read-modify-write path, and local tests cover the wire shapes and
   constructor invariants.
-- Completed locally: model JetStream priority-group consumer policies and one
-  validated group name, including the pull-only and explicit-ack invariants;
-  encode policy, groups, and pinned-client timeouts through consumer create and
-  update requests; project server pin state through `Consumer.Info`; and expose
-  `Consumer.unpin`.
+- Completed locally: model JetStream priority-group consumer policies and
+  validated group names, including the pull-only and explicit-ack invariants;
+  encode policy, multiple groups, and pinned-client timeouts through consumer
+  create and update requests; project per-group pin state through
+  `Consumer.Info`; and expose `Consumer.unpin`.
 - Completed locally: model consumer pause state with `Ptime.t` deadlines,
   project paused/remaining state through INFO, and expose dedicated pause and
   resume operations through `CONSUMER.PAUSE`. Consumer updates preserve the
@@ -781,13 +800,17 @@ request/reply and subscription primitives.
   continuity rather than stream sequence continuity, resumes at the next
   stream sequence after recovery, and preserves absolute caller deadlines
   across recovery attempts.
+- Completed locally: add `Consumer.Consume` as a bounded, switch-owned
+  continuous pull session. It keeps a background pull loop behind an Eio
+  queue, exposes `next`/`iter`, supports message/byte bounds and stop-after,
+  and distinguishes stop (discard buffered messages) from drain (preserve
+  them).
 - Completed locally: extend one-shot and persistent pull requests with
   priority groups, overflow thresholds, and prioritized levels. Consumer
   handles retain server-issued `Nats-Pin-Id` values per group, so both
   persistent sessions and subsequent one-shot fetches echo them privately;
   both paths clear stale identity on 423 pin mismatch and retry. Multiple
-  configured groups are rejected until the server-side multi-group design is
-  available.
+  configured groups are validated, encoded, and tracked independently.
 
 ### Acceptance tests
 
@@ -914,8 +937,10 @@ semantics before calling the feature complete.
   recursive link reads, deletion, replacement cleanup, snapshot/live watches,
   listing, sealing, typed bucket policy configuration and read-modify-write
   updates, and structured operation deadlines.
-- Remaining: cross-SDK acceptance and the wider authenticated, TLS, and
-  cluster-failure matrix.
+- Completed cross-SDK data-plane slice: the dedicated Go peer runner exchanges
+  chunked content and metadata, applies updates, resolves object and bucket
+  links, checks listing and tombstones, and validates sealing. The wider
+  authenticated, TLS, and cluster-failure matrix remains acceptance work.
 - Keep transfer chunks incremental; never require a whole object as one
   `string`.
 - Preserve the metadata rollup as the commit point and define cancellation,
@@ -933,14 +958,13 @@ semantics before calling the feature complete.
 - The dedicated cross-SDK runner covers Go/OCaml revision ownership, stale CAS,
   delete and purge tombstones, watch ordering, and cleanup across the pinned
   single-server authentication/TLS matrix.
-- The same runner covers Object Store chunked content, metadata, links,
-  listing, deletion and tombstones, watches, sealing, and cleanup against
-  nats-server.
+- The Object Store interop runner covers chunked content, metadata, links,
+  listing, deletion and tombstones, updates, sealing, and cleanup against the
+  official Go peer.
 - Large Object Store transfer, metadata, replacement/deletion ordering,
   interrupted-transfer cleanup, listing/watch boundaries, links, rename,
-  sealing, and bucket configuration updates are covered locally; cross-SDK
-  interoperability and the wider authenticated, TLS, and cluster-failure
-  matrix remain acceptance work.
+  sealing, and bucket configuration updates are covered locally; the wider
+  authenticated, TLS, and cluster-failure matrix remains acceptance work.
 - No direct dependence by these modules on a private socket or private
   connection lifecycle.
 

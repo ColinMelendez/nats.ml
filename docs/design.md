@@ -248,10 +248,9 @@ causes the outstanding pull or fetch request to retry without it; the explicit
 projections expose the group's configured name, pinned client id, and pin
 timestamp. Priority policy and group identity are preserved across consumer
 updates; changing that identity through the typed update API fails rather than
-silently changing failover semantics. The initial implementation follows
-ADR-42 and rejects multi-group configurations; future server-side multi-group
-consumers and transparent priority-pull restoration after transport recovery
-remain outside this slice.
+silently changing failover semantics. Multiple priority groups are represented
+and tracked independently, while transparent priority-pull restoration after
+transport recovery remains outside this slice.
 
 The wire behavior is based on the [NATS priority groups
 documentation](https://docs.nats.io/learn/jetstream/priority-groups) and
@@ -723,8 +722,9 @@ These modules should be layered over `Connection.request` and
 - `Nats_eio.Jetstream` provides a connection capability, typed API request and
   response models, stream/consumer management (including typed update and
   inventory operations), publish acknowledgements, consumer handles, one-shot
-  fetch, a persistent `Consumer.Pull` session, and a switch-owned
-  `Consumer.Push` session, and a client-managed `Consumer.Ordered` session.
+  fetch, a persistent `Consumer.Pull` session, a switch-owned
+  `Consumer.Push` session, a client-managed `Consumer.Ordered` session, and a
+  bounded continuous `Consumer.Consume` session.
   Delivered `Msg.t` values carry the stream/consumer metadata needed for
   explicit `ack`, `nak`, `term`, and `in_progress` operations. Push sessions
   consume idle-heartbeat status frames, answer flow-control requests (including
@@ -733,21 +733,22 @@ These modules should be layered over `Connection.request` and
   the next stream sequence after recovery. Push sessions restore replayable
   delivery subscriptions after reconnect, recheck durable consumers, and
   recreate ephemeral consumers when the server reports consumer-not-found.
-  Other advanced consumer behavior remains a planned extension.
 - `Nats_eio.Object_store` provides the local streaming lifecycle over the same
   connection: validated bucket capabilities, direct metadata reads,
   incremental Bytesrw transfers, digest/size/chunk verification, metadata
   updates and links, snapshot/live watches, listing, deletion, replacement
-  cleanup, sealing, typed bucket policy, read-modify-write updates, and
-  structured operation deadlines. The opt-in live-server runner covers
+  cleanup, sealing, typed bucket policy, read-modify-write updates, account-
+  wide managers and name/status listers, file transfer helpers, and structured
+  operation deadlines. The opt-in live-server and Go interop runners cover
   chunked content, metadata, links, listing, deletion and tombstones, watches,
   sealing, and cleanup.
 - `Nats_eio.Key_value` provides revisioned values, compare-and-set mutations,
-  finite scans, history, and cancellable watches over the same connection. The
-  opt-in live-server runner covers bucket status, direct reads, CAS failures,
-  history, tombstones, filtered keys, and a live watch. A dedicated
-  cross-SDK runner also alternates these operations with the official Go
-  `nats.go` `jetstream.KeyValue` API, including purge markers and cleanup.
+  finite scans, history, cancellable watches, account-wide managers, policy
+  projection, TTL/marker controls, and KV stream composition over the same
+  connection. The opt-in live-server runner covers bucket status, direct reads,
+  CAS failures, history, tombstones, filtered keys, and a live watch. A
+  dedicated cross-SDK runner also alternates these operations with the official
+  Go `nats.go` `jetstream.KeyValue` API, including purge markers and cleanup.
 - `Nats_eio.Service` provides typed service identity, endpoint/group values,
   queue-backed workers, request and service-error replies, `$SRV.PING`,
   `$SRV.INFO`, and `$SRV.STATS` monitoring, replayable subscriptions, service
@@ -789,15 +790,15 @@ create/bind/update/list/info/delete and direct message reads through
 `Stream.Message`, `get`, and `get_last`, consumer
 create/bind/info/list/delete/update with typed configuration combinators,
 durable publish acknowledgements, message acknowledgement verbs, one-shot
-fetch, and persistent pull sessions. Stream and consumer updates preserve
-unknown server configuration through an INFO/read-modify-write cycle; list
-operations consume server pagination and fail explicitly on an incomplete
-page. The management prefix is configurable for JetStream domains,
-while application subjects remain ordinary Core NATS subjects. KV, Object
-Store, and Services now compose over the same connection; their local
-discovery, lifecycle, and data-path behavior is implemented, while their wider
-real-server and cross-SDK matrices remain later stability work beyond the
-baseline Service and Key-Value interop slices described above.
+fetch, persistent pull/push/ordered sessions, and continuous bounded pull
+consumption. Stream and consumer updates preserve unknown server
+configuration through an INFO/read-modify-write cycle; list operations
+consume server pagination and fail explicitly on an incomplete page. The
+management prefix is configurable for JetStream domains, while application
+subjects remain ordinary Core NATS subjects. KV, Object Store, and Services
+compose over the same connection; the local suites and dedicated Go-peer
+runners cover their current material data-plane contracts, with broader
+cluster/failure matrices remaining acceptance work.
 
 ## 6. Testing and interoperability
 
@@ -839,8 +840,9 @@ through individual helper functions:
   the dedicated Ordered reconnect runner also checks cross-SDK stream and
   consumer recovery under seed loss, elected-leader loss, and durable seed
   restart for five authenticated or TLS modes across all three pinned
-  releases. Broader cluster/reconnect and Object Store cross-SDK matrices
-  remain later work. The dedicated Push
+  releases. Broader cluster/reconnect and authenticated Object Store matrices
+  remain later work; the dedicated Object Store interop runner covers its
+  single-server Go-peer contract. The dedicated Push
   reconnect runner checks durable consumer recovery across a persistent server
   restart for the same five modes and all three pinned releases.
 - cross-check observable behavior with NATS by Example and at least one
