@@ -57,7 +57,7 @@ let stream_config_response ~sid ~bucket ~history =
 let stream_info_response ~sid ~bucket ~history =
   let payload =
     Format.asprintf
-      {|{"config":{"name":"KV_%s","subjects":["$KV.%s.>"],"storage":"file","retention":"limits","discard":"new","max_msgs":-1,"max_msgs_per_subject":%d,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":true,"allow_direct":true,"deny_delete":true},"state":{"messages":3,"bytes":42,"first_seq":1,"last_seq":7,"consumer_count":0}}|}
+      {|{"config":{"name":"KV_%s","description":"user buckets","subjects":["$KV.%s.>"],"storage":"file","retention":"limits","discard":"new","max_msgs":-1,"max_msgs_per_subject":%d,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":true,"allow_direct":true,"deny_delete":true,"num_replicas":3,"placement":{"cluster":"kv","tags":["ssd"]},"compression":"s2","metadata":{"owner":"kv-test"}},"state":{"messages":3,"bytes":42,"first_seq":1,"last_seq":7,"consumer_count":0}}|}
       bucket bucket history
   in
   response_wire_with_sid ~sid payload
@@ -65,7 +65,7 @@ let stream_info_response ~sid ~bucket ~history =
 let stream_list_response ~sid ~bucket ~history =
   let payload =
     Format.asprintf
-      {|{"total":1,"offset":0,"limit":1,"streams":[{"config":{"name":"KV_%s","subjects":["$KV.%s.>"],"storage":"file","retention":"limits","discard":"new","max_msgs":-1,"max_msgs_per_subject":%d,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":true,"allow_direct":true,"deny_delete":true},"state":{"messages":3,"bytes":42,"first_seq":1,"last_seq":7,"consumer_count":0}}]}|}
+      {|{"total":1,"offset":0,"limit":1,"streams":[{"config":{"name":"KV_%s","description":"user buckets","subjects":["$KV.%s.>"],"storage":"file","retention":"limits","discard":"new","max_msgs":-1,"max_msgs_per_subject":%d,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":true,"allow_direct":true,"deny_delete":true,"num_replicas":3,"placement":{"cluster":"kv","tags":["ssd"]},"compression":"s2","metadata":{"owner":"kv-test"}},"state":{"messages":3,"bytes":42,"first_seq":1,"last_seq":7,"consumer_count":0}}]}|}
       bucket bucket history
   in
   response_wire_with_sid ~sid payload
@@ -361,6 +361,42 @@ let () =
   run "nats-eio-key-value"
     [
       test "configuration and keys reject invalid external names" (fun () ->
+          let placement =
+            match
+              Nats_eio.Key_value.Config.Placement.v ~cluster:"kv"
+                ~tags:[ "ssd" ] ()
+            with
+            | Ok value -> value
+            | Error error ->
+                fail
+                  (Format.asprintf "%a"
+                     Nats_eio.Jetstream.Error.pp_config error)
+          in
+          let advanced =
+            match
+              Nats_eio.Key_value.Config.v ~bucket:"advanced"
+                ~description:"user buckets" ~history:3 ~replicas:3 ~placement
+                ~compression:Nats_eio.Key_value.Config.S2
+                ~metadata:[ ("owner", "kv-test") ] ()
+            with
+            | Ok value -> value
+            | Error error ->
+                fail
+                  (Format.asprintf "%a" Nats_eio.Key_value.Error.pp_config
+                     error)
+          in
+          equal (option string) (Some "user buckets")
+            (Nats_eio.Key_value.Config.description advanced);
+          equal int 3 (Nats_eio.Key_value.Config.replicas advanced);
+          equal (option string) (Some "kv")
+            (Nats_eio.Key_value.Config.Placement.cluster
+               (Option.get (Nats_eio.Key_value.Config.placement advanced)));
+          (match Nats_eio.Key_value.Config.compression advanced with
+          | Nats_eio.Key_value.Config.S2 -> ()
+          | Nats_eio.Key_value.Config.Uncompressed ->
+              fail "key-value config lost compression");
+          equal (list (pair string string)) [ ("owner", "kv-test") ]
+            (Nats_eio.Key_value.Config.metadata advanced);
           (match Nats_eio.Key_value.Config.v ~bucket:"users" ~history:5 () with
           | Ok config ->
               equal string "users" (Nats_eio.Key_value.Config.bucket config);
@@ -462,12 +498,28 @@ let () =
               Eio.Promise.resolve status_response_u
                 (Ok (stream_info_response ~sid:2 ~bucket:"users" ~history:5));
               let status = expect_kv_ok (Eio.Promise.await status_result) in
+              equal (option string) (Some "user buckets")
+                (Nats_eio.Key_value.Status.description status);
               equal int64 3L (Nats_eio.Key_value.Status.values status);
               equal int64 42L (Nats_eio.Key_value.Status.bytes status);
               equal int64 5L
                 (Option.get (Nats_eio.Key_value.Status.history status));
               equal int64 1L (Nats_eio.Key_value.Status.first_revision status);
               equal int64 7L (Nats_eio.Key_value.Status.last_revision status);
+              equal int 3 (Nats_eio.Key_value.Status.replicas status);
+              (match Nats_eio.Key_value.Status.placement status with
+              | None -> fail "key-value status lost placement"
+              | Some placement ->
+                  equal (option string) (Some "kv")
+                    (Nats_eio.Key_value.Config.Placement.cluster placement);
+                  equal (list string) [ "ssd" ]
+                    (Nats_eio.Key_value.Config.Placement.tags placement));
+              (match Nats_eio.Key_value.Status.compression status with
+              | Nats_eio.Key_value.Config.S2 -> ()
+              | Nats_eio.Key_value.Config.Uncompressed ->
+                  fail "key-value status lost compression");
+              equal (list (pair string string)) [ ("owner", "kv-test") ]
+                (Nats_eio.Key_value.Status.metadata status);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "bucket managers list names and statuses" (fun () ->

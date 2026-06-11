@@ -10,6 +10,12 @@ module Config : sig
 
   type storage = Memory | File  (** The storage backend used by the bucket. *)
 
+  module Placement = Jetstream.Stream.Config.Placement
+
+  type compression = Jetstream.Stream.Config.compression =
+    | Uncompressed
+    | S2
+
   type t
   (** A validated bucket configuration. *)
 
@@ -19,6 +25,7 @@ module Config : sig
     | Invalid_history of int
     | Invalid_ttl
     | Invalid_limit_marker_ttl
+    | Invalid_replicas of int
     | Invalid_limit of { field : string; value : int64 }
         (** Errors produced while validating a bucket configuration. *)
 
@@ -26,12 +33,17 @@ module Config : sig
 
   val v :
     bucket:string ->
+    ?description:string ->
     ?history:int ->
     ?ttl:Mtime.Span.t ->
     ?limit_marker_ttl:Mtime.Span.t ->
     ?max_bytes:int64 ->
     ?max_value_size:int64 ->
     ?storage:storage ->
+    ?replicas:int ->
+    ?placement:Placement.t ->
+    ?compression:compression ->
+    ?metadata:(string * string) list ->
     unit ->
     (t, error) result
   (** [v ~bucket ()] validates a bucket configuration.
@@ -42,12 +54,19 @@ module Config : sig
       enables server-side per-message TTLs. Limit options use [None] for the
       unlimited value and accept [-1] when supplied for direct JetStream
       correspondence; supplied [-1] is normalized to [None]. [storage] defaults
-      to {!File}. *)
+      to {!File}, [replicas] to [1], and [compression] to {!Uncompressed}.
+      Placement and metadata are projected to the backing stream. *)
 
   (** {1:queries Queries} *)
 
   val bucket : t -> string
   (** [bucket config] is the bucket name. *)
+
+  val description : t -> string option
+  val replicas : t -> int
+  val placement : t -> Placement.t option
+  val compression : t -> compression
+  val metadata : t -> (string * string) list
 
   val history : t -> int
   (** [history config] is the number of retained revisions per key. *)
@@ -174,6 +193,7 @@ module Status : sig
   (** A status snapshot obtained from {!status}. *)
 
   val bucket : t -> string
+  val description : t -> string option
   val values : t -> int64
   val bytes : t -> int64
   val first_revision : t -> int64
@@ -184,6 +204,10 @@ module Status : sig
   val max_bytes : t -> int64 option
   val max_value_size : t -> int64 option
   val storage : t -> Config.storage
+  val replicas : t -> int
+  val placement : t -> Config.Placement.t option
+  val compression : t -> Config.compression
+  val metadata : t -> (string * string) list
 end
 
 type t

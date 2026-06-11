@@ -3,14 +3,25 @@ module Core_error = Error
 module Config = struct
   type storage = Memory | File
 
+  module Placement = Jetstream.Stream.Config.Placement
+
+  type compression = Jetstream.Stream.Config.compression =
+    | Uncompressed
+    | S2
+
   type t = {
     bucket : string;
+    description : string option;
     history : int;
     ttl : Mtime.Span.t option;
     limit_marker_ttl : Mtime.Span.t option;
     max_bytes : int64 option;
     max_value_size : int64 option;
     storage : storage;
+    replicas : int;
+    placement : Placement.t option;
+    compression : compression;
+    metadata : (string * string) list;
   }
 
   type error =
@@ -19,6 +30,7 @@ module Config = struct
     | Invalid_history of int
     | Invalid_ttl
     | Invalid_limit_marker_ttl
+    | Invalid_replicas of int
     | Invalid_limit of { field : string; value : int64 }
 
   let allowed_bucket_character character =
@@ -50,12 +62,15 @@ module Config = struct
 
   let normalize_limit = function Some -1L -> None | value -> value
 
-  let v ~bucket ?(history = 1) ?ttl ?limit_marker_ttl ?max_bytes ?max_value_size
-      ?(storage = File) () =
+  let v ~bucket ?description ?(history = 1) ?ttl ?limit_marker_ttl ?max_bytes
+      ?max_value_size ?(storage = File) ?(replicas = 1) ?placement
+      ?(compression = Uncompressed) ?(metadata = []) () =
     match validate_bucket bucket with
     | Error error -> Error error
     | Ok () when Int.compare history 1 < 0 || Int.compare history 64 > 0 ->
         Error (Invalid_history history)
+    | Ok () when Int.compare replicas 1 < 0 || Int.compare replicas 5 > 0 ->
+        Error (Invalid_replicas replicas)
     | Ok () -> (
         match ttl with
         | Some value when Mtime.Span.compare value Mtime.Span.zero < 0 ->
@@ -94,15 +109,25 @@ module Config = struct
                             max_bytes = normalize_limit max_bytes;
                             max_value_size = normalize_limit max_value_size;
                             storage;
+                            description;
+                            replicas;
+                            placement;
+                            compression;
+                            metadata;
                           }))))
 
   let bucket value = value.bucket
+  let description value = value.description
   let history value = value.history
   let ttl value = value.ttl
   let limit_marker_ttl value = value.limit_marker_ttl
   let max_bytes value = value.max_bytes
   let max_value_size value = value.max_value_size
   let storage value = value.storage
+  let replicas value = value.replicas
+  let placement value = value.placement
+  let compression value = value.compression
+  let metadata value = value.metadata
 end
 
 module Key = struct
@@ -215,6 +240,9 @@ module Error = struct
     | Config.Invalid_limit_marker_ttl ->
         Format.pp_print_string ppf
           "key-value limit marker TTL must not be negative"
+    | Config.Invalid_replicas value ->
+        Format.fprintf ppf "key-value replicas must be between 1 and 5, got %d"
+          value
     | Config.Invalid_limit { field; value } ->
         Format.fprintf ppf "invalid key-value %s limit %Ld" field value
 
@@ -278,6 +306,7 @@ end
 module Status = struct
   type t = {
     bucket : string;
+    description : string option;
     values : int64;
     bytes : int64;
     first_revision : int64;
@@ -288,9 +317,14 @@ module Status = struct
     max_bytes : int64 option;
     max_value_size : int64 option;
     storage : Config.storage;
+    replicas : int;
+    placement : Config.Placement.t option;
+    compression : Config.compression;
+    metadata : (string * string) list;
   }
 
   let bucket value = value.bucket
+  let description value = value.description
   let values value = value.values
   let bytes value = value.bytes
   let first_revision value = value.first_revision
@@ -301,6 +335,10 @@ module Status = struct
   let max_bytes value = value.max_bytes
   let max_value_size value = value.max_value_size
   let storage value = value.storage
+  let replicas value = value.replicas
+  let placement value = value.placement
+  let compression value = value.compression
+  let metadata value = value.metadata
 end
 
 type t = {
@@ -332,12 +370,17 @@ let stream_for_config config jetstream =
     Jetstream.Stream.Config.v
       ~name:(stream_name (Config.bucket config))
       ~subjects:[ subject ]
+      ?description:(Config.description config)
       ~storage:
         (match Config.storage config with
         | Config.Memory -> Jetstream.Stream.Config.Memory
         | Config.File -> Jetstream.Stream.Config.File)
       ~retention:Jetstream.Stream.Config.Limits
       ~discard:Jetstream.Stream.Config.New
+      ~replicas:(Config.replicas config)
+      ?placement:(Config.placement config)
+      ~compression:(Config.compression config)
+      ~metadata:(Config.metadata config)
       ~max_msgs_per_subject:(Int64.of_int (Config.history config))
       ?max_bytes:(Config.max_bytes config) ?max_age:(Config.ttl config)
       ?max_msg_size:(Config.max_value_size config)
@@ -387,6 +430,7 @@ let status_of_info (value : t) info =
   in
   {
     Status.bucket = value.bucket;
+    description = Jetstream.Stream.Config.description config;
     values = Jetstream.Stream.Info.messages info;
     bytes = Jetstream.Stream.Info.bytes info;
     first_revision = Jetstream.Stream.Info.first_sequence info;
@@ -397,6 +441,10 @@ let status_of_info (value : t) info =
     max_bytes = Jetstream.Stream.Config.max_bytes config;
     max_value_size = Jetstream.Stream.Config.max_msg_size config;
     storage;
+    replicas = Jetstream.Stream.Config.replicas config;
+    placement = Jetstream.Stream.Config.placement config;
+    compression = Jetstream.Stream.Config.compression config;
+    metadata = Jetstream.Stream.Config.metadata config;
   }
 
 let status value =
