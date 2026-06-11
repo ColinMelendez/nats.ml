@@ -1307,6 +1307,12 @@ module Consumer : sig
         the session; explicitly call [close] when the session is no longer
         needed. *)
 
+    val initial_pending : t -> int64 option
+    (** [initial_pending ordered] is the pending count reported when the
+        initial ephemeral consumer was created. [None] means that the server
+        did not include the count in its creation response. The value does not
+        change when the session recreates its consumer. *)
+
     val next_with_timeout : timeout:Mtime.Span.t -> t -> (Msg.t, Error.t) result
     (** [next_with_timeout ~timeout ordered] uses an absolute caller deadline
         across waiting and ordered-consumer recreation. A normal timeout leaves

@@ -230,7 +230,7 @@ type t
 (** A local capability for one bucket. *)
 
 type bucket = t
-(** The bucket capability consumed by {!Watch}. *)
+(** The bucket capability consumed by the watch modules. *)
 
 type purge_age =
   | Default
@@ -295,6 +295,79 @@ module Watch : sig
   val close : t -> (unit, Error.t) result
   (** [close watch] stops delivery, deletes the owned consumer, and is
       idempotent. *)
+end
+
+module Ordered_watch : sig
+  (** Ordered, recovery-capable watches over a bucket's JetStream stream.
+
+      [Ordered_watch] keeps the ordinary {!Watch} contract separate from the
+      stronger ordered-consumer contract. It recreates its ephemeral consumer
+      after a consumer-sequence gap, missing heartbeat, deletion, or transport
+      recovery and resumes at the next stream revision. *)
+
+  type delivery = New | Last_per_subject | All
+  (** The retained-message policy used before {!Initial_done}. *)
+
+  type event = Initial_done | Entry of Entry.t
+  (** An ordered watch event. [Initial_done] is emitted once after the retained
+      snapshot selected by [delivery]. *)
+
+  type t
+  (** An owned, cancellable ordered key-value watch. Calls to [next] are
+      single-owner; do not call [next] or [next_with_timeout] concurrently. *)
+
+  val v :
+    sw:Eio.Switch.t ->
+    ?key:string ->
+    ?keys:string list ->
+    ?delivery:delivery ->
+    ?ignore_deletes:bool ->
+    ?meta_only:bool ->
+    ?resume_from_revision:int64 ->
+    ?batch:int ->
+    ?expires:Mtime.Span.t ->
+    ?idle_heartbeat:Mtime.Span.t ->
+    ?max_bytes:int ->
+    ?replay_policy:Jetstream.Consumer.Config.replay_policy ->
+    ?inactive_threshold:Mtime.Span.t ->
+    ?max_reset_attempts:int ->
+    ?metadata:(string * string) list ->
+    ?name_prefix:string ->
+    bucket ->
+    (t, Error.t) result
+  (** [v ~sw ?key ?keys ?delivery ?ignore_deletes ?meta_only
+       ?resume_from_revision value] creates an ordered watch over bucket keys.
+
+      [key] is a shorthand for one filter; [keys] supplies multiple filters
+      and cannot be supplied with [key]. [delivery] defaults to
+      [Last_per_subject]. [resume_from_revision] starts at the supplied
+      positive stream revision and takes precedence over [delivery]. Delete
+      and purge entries are delivered unless [ignore_deletes] is [true].
+      [meta_only] suppresses values while retaining entry metadata.
+
+      [batch], [expires], [idle_heartbeat], [max_bytes], [replay_policy],
+      [inactive_threshold], [max_reset_attempts], [metadata], and [name_prefix]
+      are passed to the underlying ordered consumer. A zero
+      [max_reset_attempts] means unlimited recovery attempts. The watch owns
+      its ephemeral consumers and deletes the current generation when [sw]
+      releases. If the server omits the creation pending count, completion can
+      only be inferred from a delivered message; an empty snapshot cannot be
+      distinguished from an idle stream and may wait for a first delivery. *)
+
+  val next : t -> (event, Error.t) result
+  (** [next watch] returns the next ordered watch event. A call may recreate
+      the underlying consumer before returning. *)
+
+  val next_with_timeout : timeout:Mtime.Span.t -> t -> (event, Error.t) result
+  (** [next_with_timeout ~timeout watch] bounds the wait across delivery and
+      ordered-consumer recovery. A timeout leaves the watch open. *)
+
+  val iter : t -> f:(event -> unit) -> (unit, Error.t) result
+  (** [iter watch ~f] invokes [f] until the watch is closed or fails. *)
+
+  val close : t -> (unit, Error.t) result
+  (** [close watch] stops delivery, deletes the current ephemeral consumer,
+      and is idempotent. *)
 end
 
 module Key_lister : sig

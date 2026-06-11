@@ -1256,6 +1256,279 @@ let () =
               expect_kv_ok (Eio.Promise.await close_result);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "ordered watch emits retained entries, marker, and live updates"
+        (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let first_delivery, first_delivery_u = Eio.Promise.create () in
+          let second_delivery, second_delivery_u = Eio.Promise.create () in
+          let live_delivery, live_delivery_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await first_delivery;
+                `Await second_delivery;
+                `Await live_delivery;
+                `Await delete_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let value =
+                expect_kv_ok (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+              in
+              let watch_result, watch_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve watch_result_u
+                    (Nats_eio.Key_value.Ordered_watch.v ~sw ~key:"alice"
+                       ~batch:1 ~meta_only:true ~name_prefix:"kv-ordered"
+                       ~metadata:[ ("owner", "ordered-watch") ] value));
+              yield_n 5;
+              require_trace ~trace
+                ~needle:"deliver_policy\\\":\\\"last_per_subject";
+              require_trace ~trace
+                ~needle:"filter_subjects\\\":[\\\"$KV.users.alice";
+              require_trace ~trace
+                ~needle:"name\\\":\\\"kv-ordered_1";
+              require_trace ~trace ~needle:"headers_only\\\":true";
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (consumer_response_named_with_opt_start_seq ~sid:1
+                      ~policy:"last_per_subject" ~headers_only:true
+                      ~pending:(Some 2L) ~opt_start_seq:None
+                      ~name:"kv-ordered_1" ~deliver_subject:""));
+              let watch = expect_kv_ok (Eio.Promise.await watch_result) in
+              let first_result, first_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_result_u
+                    (Nats_eio.Key_value.Ordered_watch.next watch));
+              yield_n 5;
+              Eio.Promise.resolve first_delivery_u
+                (Ok
+                   (consumer_delivery_wire ~sid:2 ~consumer:"kv-ordered_1"
+                      ~key:"alice" ~stream_sequence:10L
+                      ~consumer_sequence:1L ~pending:1L ""));
+              let first =
+                match expect_kv_ok (Eio.Promise.await first_result) with
+                | Nats_eio.Key_value.Ordered_watch.Entry entry -> entry
+                | Nats_eio.Key_value.Ordered_watch.Initial_done ->
+                    fail "ordered watch emitted its marker before retained data"
+              in
+              equal string "" (Nats_eio.Key_value.Entry.value first);
+              let second_result, second_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve second_result_u
+                    (Nats_eio.Key_value.Ordered_watch.next watch));
+              yield_n 5;
+              Eio.Promise.resolve second_delivery_u
+                (Ok
+                   (consumer_delivery_wire ~sid:2 ~consumer:"kv-ordered_1"
+                      ~key:"alice" ~stream_sequence:11L
+                      ~consumer_sequence:2L ~pending:0L ~operation:"DEL" ""));
+              let second =
+                match expect_kv_ok (Eio.Promise.await second_result) with
+                | Nats_eio.Key_value.Ordered_watch.Entry entry -> entry
+                | Nats_eio.Key_value.Ordered_watch.Initial_done ->
+                    fail "ordered watch omitted a retained tombstone"
+              in
+              (match Nats_eio.Key_value.Entry.operation second with
+              | Nats_eio.Key_value.Entry.Delete -> ()
+              | _ -> fail "ordered watch returned the wrong tombstone");
+              (match expect_kv_ok (Nats_eio.Key_value.Ordered_watch.next watch) with
+              | Nats_eio.Key_value.Ordered_watch.Initial_done -> ()
+              | Nats_eio.Key_value.Ordered_watch.Entry _ ->
+                  fail "ordered watch omitted its initial marker");
+              let live_result, live_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve live_result_u
+                    (Nats_eio.Key_value.Ordered_watch.next watch));
+              yield_n 5;
+              Eio.Promise.resolve live_delivery_u
+                (Ok
+                   (consumer_delivery_wire ~sid:2 ~consumer:"kv-ordered_1"
+                      ~key:"alice" ~stream_sequence:12L
+                      ~consumer_sequence:3L ~pending:0L ""));
+              let live =
+                match expect_kv_ok (Eio.Promise.await live_result) with
+                | Nats_eio.Key_value.Ordered_watch.Entry entry -> entry
+                | Nats_eio.Key_value.Ordered_watch.Initial_done ->
+                    fail "ordered watch emitted a second initial marker"
+              in
+              equal string "" (Nats_eio.Key_value.Entry.value live);
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Key_value.Ordered_watch.close watch));
+              wait_for_trace ~trace
+                ~needle:"PUB $JS.API.CONSUMER.DELETE.KV_users.kv-ordered_1";
+              Eio.Promise.resolve delete_response_u (Ok (api_ok_wire ~sid:3));
+              expect_kv_ok (Eio.Promise.await close_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "ordered watch emits a marker for an empty retained snapshot"
+        (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await delete_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let value =
+                expect_kv_ok (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+              in
+              let watch_result, watch_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve watch_result_u
+                    (Nats_eio.Key_value.Ordered_watch.v ~sw ~key:"alice"
+                       value));
+              yield_n 5;
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (consumer_response_named_with_opt_start_seq ~sid:1
+                      ~policy:"last_per_subject" ~headers_only:false
+                      ~pending:(Some 0L) ~opt_start_seq:None
+                      ~name:"ordered-empty" ~deliver_subject:""));
+              let watch = expect_kv_ok (Eio.Promise.await watch_result) in
+              (match expect_kv_ok (Nats_eio.Key_value.Ordered_watch.next watch) with
+              | Nats_eio.Key_value.Ordered_watch.Initial_done -> ()
+              | Nats_eio.Key_value.Ordered_watch.Entry _ ->
+                  fail "empty ordered watch returned an entry");
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Key_value.Ordered_watch.close watch));
+              wait_for_trace ~trace
+                ~needle:"PUB $JS.API.CONSUMER.DELETE.KV_users.ordered-empty";
+              Eio.Promise.resolve delete_response_u (Ok (api_ok_wire ~sid:3));
+              expect_kv_ok (Eio.Promise.await close_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "ordered watch recreates after a consumer sequence gap" (fun () ->
+          let first_create, first_create_u = Eio.Promise.create () in
+          let first_delivery, first_delivery_u = Eio.Promise.create () in
+          let gap_delivery, gap_delivery_u = Eio.Promise.create () in
+          let first_delete, first_delete_u = Eio.Promise.create () in
+          let second_create, second_create_u = Eio.Promise.create () in
+          let replay_delivery, replay_delivery_u = Eio.Promise.create () in
+          let second_delete, second_delete_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await first_create;
+                `Await first_delivery;
+                `Await gap_delivery;
+                `Await first_delete;
+                `Await second_create;
+                `Await replay_delivery;
+                `Await second_delete;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let value =
+                expect_kv_ok (Nats_eio.Key_value.bind jetstream ~bucket:"users")
+              in
+              let watch_result, watch_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve watch_result_u
+                    (Nats_eio.Key_value.Ordered_watch.v ~sw ~key:"alice"
+                       ~delivery:Nats_eio.Key_value.Ordered_watch.New ~batch:1
+                       ~max_reset_attempts:3 ~name_prefix:"kv-gap" value));
+              yield_n 5;
+              Eio.Promise.resolve first_create_u
+                (Ok
+                   (consumer_response_named_with_opt_start_seq ~sid:1
+                      ~policy:"new" ~headers_only:false ~pending:(Some 0L)
+                      ~opt_start_seq:None ~name:"kv-gap_1" ~deliver_subject:""));
+              let watch = expect_kv_ok (Eio.Promise.await watch_result) in
+              (match
+                 expect_kv_ok (Nats_eio.Key_value.Ordered_watch.next watch)
+               with
+              | Nats_eio.Key_value.Ordered_watch.Initial_done -> ()
+              | Nats_eio.Key_value.Ordered_watch.Entry _ ->
+                  fail "new ordered watch did not emit its marker");
+              let first_result, first_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_result_u
+                    (Nats_eio.Key_value.Ordered_watch.next watch));
+              yield_n 5;
+              Eio.Promise.resolve first_delivery_u
+                (Ok
+                   (consumer_delivery_wire ~sid:2 ~consumer:"kv-gap_1"
+                      ~key:"alice" ~stream_sequence:10L
+                      ~consumer_sequence:1L ~pending:0L "before-gap"));
+              let first =
+                match expect_kv_ok (Eio.Promise.await first_result) with
+                | Nats_eio.Key_value.Ordered_watch.Entry entry -> entry
+                | Nats_eio.Key_value.Ordered_watch.Initial_done ->
+                    fail "ordered watch emitted a second marker"
+              in
+              equal int64 10L (Nats_eio.Key_value.Entry.revision first);
+              let replay_result, replay_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve replay_result_u
+                    (Nats_eio.Key_value.Ordered_watch.next watch));
+              yield_n 5;
+              Eio.Promise.resolve gap_delivery_u
+                (Ok
+                   (consumer_delivery_wire ~sid:2 ~consumer:"kv-gap_1"
+                      ~key:"alice" ~stream_sequence:12L
+                      ~consumer_sequence:3L ~pending:0L "gap"));
+              wait_for_trace ~trace
+                ~needle:"PUB $JS.API.CONSUMER.DELETE.KV_users.kv-gap_1";
+              Eio.Promise.resolve first_delete_u (Ok (api_ok_wire ~sid:3));
+              wait_for_trace ~trace
+                ~needle:"PUB $JS.API.CONSUMER.CREATE.KV_users.kv-gap_2";
+              require_trace ~trace ~needle:"\\\"opt_start_seq\\\":11";
+              Eio.Promise.resolve second_create_u
+                (Ok
+                   (consumer_response_named_with_opt_start_seq ~sid:4
+                      ~policy:"by_start_sequence" ~headers_only:false
+                      ~pending:(Some 0L) ~opt_start_seq:(Some 11L) ~name:"kv-gap_2"
+                      ~deliver_subject:""));
+              yield_n 5;
+              Eio.Promise.resolve replay_delivery_u
+                (Ok
+                   (consumer_delivery_wire ~sid:5 ~consumer:"kv-gap_2"
+                      ~key:"alice" ~stream_sequence:11L
+                      ~consumer_sequence:1L ~pending:0L "replayed"));
+              let replayed =
+                match expect_kv_ok (Eio.Promise.await replay_result) with
+                | Nats_eio.Key_value.Ordered_watch.Entry entry -> entry
+                | Nats_eio.Key_value.Ordered_watch.Initial_done ->
+                    fail "ordered watch did not return the replayed entry"
+              in
+              equal int64 11L (Nats_eio.Key_value.Entry.revision replayed);
+              equal string "replayed"
+                (Nats_eio.Key_value.Entry.value replayed);
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Key_value.Ordered_watch.close watch));
+              wait_for_trace ~trace
+                ~needle:"PUB $JS.API.CONSUMER.DELETE.KV_users.kv-gap_2";
+              Eio.Promise.resolve second_delete_u (Ok (api_ok_wire ~sid:6));
+              expect_kv_ok (Eio.Promise.await close_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "key lister streams live keys and terminates at the marker"
         (fun () ->
           let create_response, create_response_u = Eio.Promise.create () in

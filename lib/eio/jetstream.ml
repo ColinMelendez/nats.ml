@@ -7148,6 +7148,8 @@ module Consumer = struct
       expires : Mtime.Span.t;
       idle_heartbeat : Mtime.Span.t;
       max_bytes : int option;
+      mutable initial_pending : int64 option;
+      mutable initial_pending_captured : bool;
       initial_deliver_policy : Config.deliver_policy;
       filter_subject : Nats.Subject.Filter.t option;
       filter_subjects : Nats.Subject.Filter.t list;
@@ -7292,6 +7294,9 @@ module Consumer = struct
                   | Error error -> Error error
                   | Ok consumer -> (
                       ordered.consumer <- Some consumer;
+                      if not ordered.initial_pending_captured then (
+                        ordered.initial_pending_captured <- true;
+                        ordered.initial_pending <- created_pending consumer);
                       match remaining_timeout ordered deadline with
                       | Error error ->
                           ordered.consumer <- None;
@@ -7522,6 +7527,8 @@ module Consumer = struct
               expires;
               idle_heartbeat;
               max_bytes;
+              initial_pending = None;
+              initial_pending_captured = false;
               initial_deliver_policy = deliver_policy;
               filter_subject;
               filter_subjects;
@@ -7549,6 +7556,8 @@ module Consumer = struct
               in
               ordered.hook <- Some hook;
               Ok ordered)
+
+    let initial_pending ordered = ordered.initial_pending
 
     let next ordered = next_loop ordered ~deadline:None
 
