@@ -11,6 +11,73 @@ The research and architecture proposal is in
 [`docs/design.md`](docs/design.md). The phased implementation roadmap is in
 [`plan.md`](plan.md).
 
+## Capability comparisons
+
+The comparison target is the user-visible capability of the official Go SDK,
+not a method-for-method translation of its API. Eio uses direct iteration,
+switch-owned lifetimes, and structured results where Go uses callbacks,
+channels, and mutable handles.
+
+| Comparison point | Current position |
+| --- | --- |
+| Core connection conveniences | Core protocol, authentication, TLS, discovery, reconnect, drain, and lifecycle events are covered. Go-specific custom dialers, proxy headers, stale-connection tuning, connection statistics, richer introspection, and dynamic callback hooks are not currently exposed. |
+| JetStream resource administration | Account information plus stream and consumer administration/configuration are covered, including placement, persistence mode, message counters, and the material pinned Go SDK fields. |
+| Server-wide administration | Not part of the JetStream API or current client surface. See below. |
+| JetStream consumption | Pull, push, ordered, fetch-by-bytes, no-wait fetch, flow control, priority groups, and bounded continuous consumption are covered. `Messages`/`Consume` threshold callbacks are represented by Eio backpressure and result ownership. |
+| Key-Value watches | Revision-resumable watches are covered. Strong ordered-consumer gap detection and automatic ordered recovery are not claimed by the ordinary watch API. |
+| Object Store | Streaming data access, links, metadata, watches, sealing, bucket managers/listers, and file helpers are covered. |
+
+### JetStream administration versus server administration
+
+`Nats_eio.Jetstream` administers JetStream resources through the `$JS.API.*`
+request/reply namespace. It covers account/domain usage, stream and consumer
+CRUD, listing, message operations, and configuration projection.
+
+General server-wide administration is a separate capability. NATS exposes
+privileged system-account services under subjects such as
+`$SYS.REQ.SERVER.<server-id>.*` and `$SYS.REQ.ACCOUNT.<account-id>.*`; these
+provide monitoring and operational control across servers and accounts. They
+require system-account permissions and have version-specific JSON schemas.
+They are distinct from JetStream administration and from the ordinary
+application client surface. See the [NATS system-account reference](https://github.com/nats-io/nats.docs/blob/master/running-a-nats-service/nats_admin/jwt.md).
+
+If server administration becomes a project requirement, it should be added as
+a separate, explicitly privileged module rather than folded into
+`Jetstream`. A useful first slice would define typed requests and responses
+for server/account monitoring endpoints such as `STATZ`, `VARZ`, `CONNZ`,
+`SUBSZ`, `ACCOUNTZ`, and `JSZ`, with selectors for server, cluster, host, and
+tags. Operational mutations such as lameduck, client kick, reload, and
+account-claims updates need a separate authorization and version-compatibility
+review.
+
+### Ordered recovery for Key-Value watches
+
+The current `Key_value.Watch` is a normal JetStream consumer with revision
+resumption. It can resume from an application-selected revision, but it does
+not promise the stronger ordered-consumer invariant: every accepted delivery
+must follow the preceding consumer sequence, and a missing heartbeat,
+consumer deletion, transport interruption, or sequence gap must trigger
+recovery.
+
+An ordered watch would need to:
+
+- retain the last accepted stream and consumer sequences and validate every
+  delivery against them;
+- detect missing heartbeats, deleted consumers, reconnects, and sequence gaps;
+- recreate its ephemeral consumer at the next expected stream sequence while
+  preserving filters, metadata, headers-only mode, heartbeat, and reset
+  policy;
+- define duplicate handling, stream truncation, retention races, cleanup,
+  cancellation, and a bounded reset-attempt/error policy; and
+- add live-server and Go-peer tests for filtered streams, consumer deletion,
+  reconnect, leader failure, and restart recovery.
+
+This should be a distinct ordered-watch mode or module, not an undocumented
+strengthening of `Watch`: ordered recovery changes duplicate, loss, and error
+semantics that existing callers may rely on. The lower-level
+`Nats_eio.Jetstream.Consumer.Ordered` already provides these recovery
+mechanics for callers that need ordered delivery directly.
+
 ## Development
 
 Enter the development shell and run the build or tests with Dune:

@@ -21,6 +21,7 @@ marked as covered.
 | Authentication and TLS | Covered | The callback/dialer breadth is narrower because credentials and TLS flows are explicit values |
 | Reconnect, discovery, drain | Covered | Lifecycle callbacks and connection statistics use Eio events/results rather than Go callback/stat APIs |
 | JetStream management | Covered for the material v1.52.0 surface | No material protocol gap; future server-only fields remain an acceptance concern |
+| Server-wide administration | Not exposed | The privileged `$SYS` system-account control and monitoring surface is separate from JetStream resource administration and requires its own typed API and authorization model |
 | JetStream publishing | Covered, including async futures, retries, TTL/schedule headers, atomic and fast batches | Shared async acknowledgement multiplexing is a throughput optimization, not a capability gap |
 | JetStream consumption | Covered: pull, push, ordered, fetch, no-wait, heartbeats, flow control, priority, and continuous consumption | Go callback/channel receive shapes and threshold/error-handler tuning are represented by direct Eio iteration and structured results |
 | Key-Value | Covered: CRUD, CAS, history, watches, listers, managers, policy fields, composition, TTL, and purge-marker cleanup | Watch recovery intentionally does not claim ordered-consumer gap detection |
@@ -77,6 +78,13 @@ constructors enforce the local invariants before a request is sent.
 This is a capability over Core NATS request/reply, not a second transport.
 Name listers collect paged responses into ordered OCaml lists; callers that
 already know a resource can use `bind` without an existence request.
+
+This resource-management surface is not general server administration. NATS
+server-wide monitoring and operational control use privileged system-account
+subjects such as `$SYS.REQ.SERVER.<server-id>.*` and
+`$SYS.REQ.ACCOUNT.<account-id>.*`, with separate versioned response schemas.
+They should be modeled as a separate module if this project adopts server
+operations as a goal; see the [NATS system-account reference](https://github.com/nats-io/nats.docs/blob/master/running-a-nats-service/nats_admin/jwt.md).
 
 ## JetStream publishing
 
@@ -152,6 +160,15 @@ provide the stronger ordered-consumer gap detection of Go's ordered watcher.
 Callers that require that invariant should use `Consumer.Ordered` directly or
 resume a watch from an application-owned revision checkpoint.
 
+Adding that guarantee to KV would require a distinct ordered-watch mode. It
+would validate consumer and stream sequences, detect missing heartbeats,
+deletions, disconnects, and gaps, recreate an ephemeral consumer at the next
+expected stream sequence, preserve the watch configuration, and define
+duplicate/truncation/reset limits. It also needs live-server and cross-SDK
+failure tests. The existing ordinary watch contract should not be strengthened
+implicitly because those recovery rules change its loss and duplicate
+semantics.
+
 The pinned Go interop runner covers revisions, stale CAS, tombstones, watches,
 purge markers, and cleanup across the supported single-server matrix.
 
@@ -206,3 +223,7 @@ surface:
 These are acceptance and product-scope decisions, not unimplemented Core,
 JetStream, KV, Object Store, or Services wire capabilities in the current
 Eio surface.
+
+Two intentionally separate extensions remain possible: a privileged
+system-account server-administration module, and an explicitly ordered KV
+watch. Neither is included in the pinned Go JetStream parity claim.
