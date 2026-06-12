@@ -1315,9 +1315,9 @@ module Consumer : sig
 
     val next_with_timeout : timeout:Mtime.Span.t -> t -> (Msg.t, Error.t) result
     (** [next_with_timeout ~timeout ordered] uses an absolute caller deadline
-        across waiting and ordered-consumer recreation. A normal timeout leaves
-        the current session open; a timeout after the old consumer has been torn
-        down fails the session. *)
+        across waiting and ordered-consumer recreation. A timeout leaves the
+        session open; if recovery was interrupted while deleting the previous
+        consumer, the deletion and recreation are retried by a later call. *)
 
     val iter : t -> f:(Msg.t -> unit) -> (unit, Error.t) result
     (** [iter ordered ~f] invokes [f] for each ordered message until the session
