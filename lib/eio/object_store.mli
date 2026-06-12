@@ -296,7 +296,9 @@ val get :
   (Info.t, Error.t) result
 (** [get bucket name writer] streams and verifies the object's chunks before
     writing end-of-data to [writer]. Object links are followed; bucket links are
-    rejected as byte sources. *)
+    rejected as byte sources. When [timeout] is supplied, it is one absolute
+    deadline covering metadata lookup, link resolution, chunk recovery, and
+    streaming; ordered-consumer cleanup is best effort and does not extend it. *)
 
 val get_string :
   ?timeout:Mtime.Span.t ->

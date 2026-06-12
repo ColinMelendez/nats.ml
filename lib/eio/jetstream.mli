@@ -1296,8 +1296,11 @@ module Consumer : sig
         subscription and recreates the ephemeral consumer after a
         consumer-sequence gap, a missing heartbeat, consumer deletion, or a
         non-replayed transport disconnect. Recreated consumers resume at the
-        next stream sequence. The consumer identity is not preserved across
-        every recovery unless [name_prefix] is supplied. *)
+        next stream sequence. When [name_prefix] is omitted, the session uses
+        a unique internal name prefix so an uncertain create response can be
+        cleaned up; supplying [name_prefix] makes generation names predictable
+        to the caller. The consumer identity is not preserved across every
+        recovery. *)
 
     val next : t -> (Msg.t, Error.t) result
     (** [next ordered] returns the next message in consumer order. A call may
@@ -1315,18 +1318,24 @@ module Consumer : sig
 
     val next_with_timeout : timeout:Mtime.Span.t -> t -> (Msg.t, Error.t) result
     (** [next_with_timeout ~timeout ordered] uses an absolute caller deadline
-        across waiting and ordered-consumer recreation. A timeout leaves the
-        session open; if recovery was interrupted while deleting the previous
-        consumer, the deletion and recreation are retried by a later call. *)
+        across waiting and ordered-consumer recreation. A normal timeout leaves
+        the current session open; a timeout after the old consumer has been torn
+        down fails the session. *)
 
     val iter : t -> f:(Msg.t -> unit) -> (unit, Error.t) result
     (** [iter ordered ~f] invokes [f] for each ordered message until the session
         is closed or fails. Messages are not acknowledged. *)
 
     val close : t -> (unit, Error.t) result
-    (** [close ordered] stops the pull session, best-effort deletes its current
-        ephemeral consumer, and is idempotent. Explicit closure returns
-        [Ordered_closed] from subsequent reads. *)
+    (** [close ordered] stops the pull session, waits for a best-effort delete
+        of its current ephemeral consumer, and is idempotent. Explicit closure
+        returns [Ordered_closed] from subsequent reads. *)
+
+    val release : t -> (unit, Error.t) result
+    (** [release ordered] stops the pull session and starts a best-effort delete
+        of its current ephemeral consumer without waiting for the server's
+        response. It is intended for deadline- and cancellation-sensitive
+        cleanup; use [close] when confirmed deletion is required. *)
   end
 
   val info : ?timeout:Mtime.Span.t -> t -> (Info.t, Error.t) result

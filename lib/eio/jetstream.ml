@@ -6622,14 +6622,25 @@ module Consumer = struct
       api_subject consumer.jetstream
         [ "CONSUMER"; "DELETE"; Stream.name consumer.stream; consumer.name ]
     in
-    match
-      request_msg ?timeout consumer.jetstream (Nats.Message.v ~subject "")
-    with
+    let message = Nats.Message.v ~subject "" in
+    match request_msg ?timeout consumer.jetstream message with
     | Error error -> Error error
     | Ok message -> (
         match decode_response message with
         | Ok _ -> Ok ()
         | Error error -> Error error)
+
+  let delete_async ?timeout consumer =
+    let subject =
+      api_subject consumer.jetstream
+        [ "CONSUMER"; "DELETE"; Stream.name consumer.stream; consumer.name ]
+    in
+    match
+      Connection.request_async ?timeout consumer.jetstream.connection
+        (Nats.Message.v ~subject "")
+    with
+    | Ok _ -> Ok ()
+    | Error error -> Error (Error.Connection error)
 
   module Push = struct
     type consumer = t
@@ -7222,6 +7233,23 @@ module Consumer = struct
     let recreate_attempt_timeout = Mtime.Span.(5 * s)
     let timeout_error = Error.Connection Core_error.Timeout
 
+    let valid_name_character character =
+      let code = Char.code character in
+      (code >= Char.code 'A' && code <= Char.code 'Z')
+      || (code >= Char.code 'a' && code <= Char.code 'z')
+      || (code >= Char.code '0' && code <= Char.code '9')
+      || Char.equal character '_' || Char.equal character '-'
+
+    let generated_name_prefix connection =
+      let raw =
+        Nats.Subject.to_string (Connection.fresh_inbox connection)
+      in
+      "ordered_"
+      ^ String.map
+          (fun character ->
+            if valid_name_character character then character else '_')
+          raw
+
     let fail ordered error =
       match ordered.state with
       | Open ->
@@ -7246,7 +7274,8 @@ module Consumer = struct
           ignore (Pull.close pull)
 
     let consumer_gone = function
-      | Error.Consumer_not_found -> true
+      | Error.Consumer_deleted
+      | Error.Consumer_not_found
       | Error.Api { err_code = Some 10014; _ } -> true
       | _ -> false
 
@@ -7269,13 +7298,36 @@ module Consumer = struct
     let cleanup_current_consumer ordered ~deadline =
       match remaining_timeout ordered deadline with
       | Error error -> Error error
-      | Ok None -> delete_current_consumer ordered ~timeout:cleanup_timeout ()
-      | Ok (Some timeout) ->
+      | Ok timeout ->
           let timeout =
-            if Mtime.Span.compare timeout cleanup_timeout < 0 then timeout
-            else cleanup_timeout
+            match timeout with
+            | None -> Some cleanup_timeout
+            | Some timeout ->
+                Some
+                  (if Mtime.Span.compare timeout cleanup_timeout < 0 then
+                     timeout
+                   else cleanup_timeout)
           in
-          delete_current_consumer ordered ~timeout ()
+          delete_current_consumer ordered ?timeout ()
+
+    let cleanup_created_consumer ordered ~deadline error =
+      match remaining_timeout ordered deadline with
+      | Error _ -> Error error
+      | Ok _ -> (
+          match cleanup_current_consumer ordered ~deadline with
+          | Ok () -> Error error
+          | Error cleanup_error -> Error cleanup_error)
+
+    let create_outcome_uncertain = function
+      | Error.Connection
+          ( Core_error.Disconnected | Core_error.Io _ | Core_error.Tls _
+          | Core_error.Timeout )
+      | Error.Decode _
+      | Error.Missing_field _
+      | Error.Invalid_config _
+      | Error.Invalid_subject _
+      | Error.Unexpected_consumer_name _ -> true
+      | _ -> false
 
     let await_connection ordered ~deadline =
       match remaining_timeout ordered deadline with
@@ -7347,16 +7399,33 @@ module Consumer = struct
               match generation_timeout ordered ~deadline with
               | Error error -> Error error
               | Ok timeout -> (
-                  match create ?timeout ordered.stream config with
+                  let create_result =
+                    match Config.name config with
+                    | None -> Error Error.Consumer_not_found
+                    | Some name -> (
+                        match bind ordered.stream ~name with
+                        | Error error -> Error error
+                        | Ok consumer ->
+                            ordered.consumer <- Some consumer;
+                            match create ?timeout ordered.stream config with
+                            | Ok consumer ->
+                                ordered.consumer <- Some consumer;
+                                Ok consumer
+                            | Error error when create_outcome_uncertain error ->
+                                Error error
+                            | Error error ->
+                                ordered.consumer <- None;
+                                Error error)
+                  in
+                  match create_result with
                   | Error error -> Error error
                   | Ok consumer -> (
-                      ordered.consumer <- Some consumer;
                       if not ordered.initial_pending_captured then (
                         ordered.initial_pending_captured <- true;
                         ordered.initial_pending <- created_pending consumer);
                       match remaining_timeout ordered deadline with
                       | Error error ->
-                          Error error
+                          cleanup_created_consumer ordered ~deadline error
                       | Ok _ -> (
                           match
                             Pull.v ~sw:ordered.sw ~batch:ordered.batch
@@ -7365,9 +7434,7 @@ module Consumer = struct
                               ?max_bytes:ordered.max_bytes consumer
                           with
                           | Error error ->
-                              ignore
-                                (cleanup_current_consumer ordered ~deadline);
-                              Error error
+                              cleanup_created_consumer ordered ~deadline error
                           | Ok pull ->
                               ordered.pull <- Some pull;
                               ordered.consumer_sequence <- 0L;
@@ -7389,32 +7456,38 @@ module Consumer = struct
           true
       | _ -> false
 
+    type recreate_error = {
+      error : Error.t;
+      torn_down : bool;
+    }
+
     let recreate ordered ~deadline =
       stop_current_pull ordered;
       let attempts = ref 0 in
       let last_error = ref None in
-      let rec attempt () =
+      let rec attempt ~torn_down =
         match await_connection ordered ~deadline with
-        | Error error -> Error error
+        | Error error -> Error { error; torn_down }
         | Ok () -> (
             match cleanup_current_consumer ordered ~deadline with
-            | Error error -> Error error
-            | Ok () -> (
+            | Error error -> Error { error; torn_down }
+            | Ok () ->
+                let torn_down = true in
                 match ordered.max_reset_attempts with
                 | Some limit when !attempts >= limit -> (
                     match !last_error with
-                    | Some error -> Error error
-                    | None -> Error Error.Consumer_deleted)
+                    | Some error -> Error { error; torn_down }
+                    | None -> Error { error = Error.Consumer_deleted; torn_down })
                 | _ ->
                     incr attempts;
                     match create_generation ordered ~deadline with
                     | Ok () -> Ok ()
                     | Error error when reconnectable_recreate_error error ->
                         last_error := Some error;
-                        attempt ()
-                    | Error error -> Error error))
+                        attempt ~torn_down
+                    | Error error -> Error { error; torn_down })
       in
-      attempt ()
+      attempt ~torn_down:false
 
     let recoverable = function
       | Error.Missing_heartbeat | Error.Consumer_deleted -> true
@@ -7462,15 +7535,17 @@ module Consumer = struct
             | None -> (
                 match recreate ordered ~deadline with
                 | Ok () -> ()
-                | Error error ->
-                    if not (timed_out error) then fail ordered error;
+                | Error { error; torn_down } ->
+                    if not (timed_out error && not torn_down) then
+                      fail ordered error;
                     result := Some (Error error))
-            | Some pull -> (
+            | Some pull ->
                 if heartbeat_gap ordered pull then
                   match recreate ordered ~deadline with
                   | Ok () -> ()
-                  | Error error ->
-                      if not (timed_out error) then fail ordered error;
+                  | Error { error; torn_down } ->
+                      if not (timed_out error && not torn_down) then
+                        fail ordered error;
                       result := Some (Error error)
                 else
                   match next_from_pull ordered ~deadline pull with
@@ -7478,8 +7553,9 @@ module Consumer = struct
                       if heartbeat_gap ordered pull then
                         match recreate ordered ~deadline with
                         | Ok () -> ()
-                        | Error error ->
-                            if not (timed_out error) then fail ordered error;
+                        | Error { error; torn_down } ->
+                            if not (timed_out error && not torn_down) then
+                              fail ordered error;
                             result := Some (Error error)
                       else ()
                   | Ok (Pull.Message message) -> (
@@ -7491,39 +7567,63 @@ module Consumer = struct
                       | Ok false -> (
                           match recreate ordered ~deadline with
                           | Ok () -> ()
-                          | Error error ->
-                              if not (timed_out error) then fail ordered error;
+                          | Error { error; torn_down } ->
+                              if not (timed_out error && not torn_down) then
+                                fail ordered error;
                               result := Some (Error error)))
                   | Error error when recoverable error -> (
                       match recreate ordered ~deadline with
                       | Ok () -> ()
-                      | Error recreate_error ->
-                          if not (timed_out recreate_error) then
-                            fail ordered recreate_error;
-                          result := Some (Error recreate_error))
+                      | Error { error; torn_down } ->
+                          if not (timed_out error && not torn_down) then
+                            fail ordered error;
+                          result := Some (Error error))
                   | Error error ->
                       if timed_out error && heartbeat_gap ordered pull then
                         match recreate ordered ~deadline with
                         | Ok () -> ()
-                        | Error recreate_error ->
-                            if not (timed_out recreate_error) then
-                              fail ordered recreate_error;
-                            result := Some (Error recreate_error)
+                        | Error { error; torn_down } ->
+                            if not (timed_out error && not torn_down) then
+                              fail ordered error;
+                            result := Some (Error error)
                       else (
                         if not (timed_out error) then fail ordered error;
-                        result := Some (Error error))))
+                        result := Some (Error error)))
       done;
       match !result with Some result -> result | None -> assert false
 
     let close ordered =
+      (match ordered.state with
+      | Closed -> ()
+      | Open | Failed _ ->
+          ordered.state <- Closed);
+      let pull_result =
+        match ordered.pull with
+        | None -> Ok ()
+        | Some pull ->
+            ordered.pull <- None;
+            Pull.close pull
+      in
+      let delete_result =
+        delete_current_consumer ordered ~timeout:cleanup_timeout ()
+      in
+      match pull_result with
+      | Error error -> Error error
+      | Ok () -> (
+          match delete_result with
+          | Error error -> Error error
+          | Ok () ->
+              Option.iter
+                (fun hook -> ignore (Eio.Switch.try_remove_hook hook))
+                ordered.hook;
+              ordered.hook <- None;
+              Ok ())
+
+    let release ordered =
       match ordered.state with
       | Closed -> Ok ()
-      | Open | Failed _ -> (
+      | Open | Failed _ ->
           ordered.state <- Closed;
-          Option.iter
-            (fun hook -> ignore (Eio.Switch.try_remove_hook hook))
-            ordered.hook;
-          ordered.hook <- None;
           let pull_result =
             match ordered.pull with
             | None -> Ok ()
@@ -7531,12 +7631,20 @@ module Consumer = struct
                 ordered.pull <- None;
                 Pull.close pull
           in
+          let consumer = ordered.consumer in
+          ordered.consumer <- None;
+          Option.iter
+            (fun hook -> ignore (Eio.Switch.try_remove_hook hook))
+            ordered.hook;
+          ordered.hook <- None;
           let delete_result =
-            delete_current_consumer ordered ~timeout:cleanup_timeout ()
+            match consumer with
+            | None -> Ok ()
+            | Some consumer -> delete_async ~timeout:cleanup_timeout consumer
           in
           match pull_result with
           | Error error -> Error error
-          | Ok () -> delete_result)
+          | Ok () -> delete_result
 
     let v ~sw ?batch ?expires ?idle_heartbeat ?max_bytes
         ?(deliver_policy = Config.All) ?filter_subject ?(filter_subjects = [])
@@ -7578,7 +7686,8 @@ module Consumer = struct
       in
       let name_prefix_result =
         match name_prefix with
-        | None -> Ok None
+        | None ->
+            Ok (Some (generated_name_prefix stream.jetstream.connection))
         | Some prefix when String.equal prefix "" ->
             Error
               (Error.Invalid_config
@@ -7630,15 +7739,16 @@ module Consumer = struct
               hook = None;
             }
           in
+          let hook =
+            Eio.Switch.on_release_cancellable sw (fun () ->
+                Eio.Cancel.protect (fun () -> ignore (release ordered)))
+          in
+          ordered.hook <- Some hook;
           match create_generation ordered ~deadline:None with
-          | Error error -> Error error
-          | Ok () ->
-              let hook =
-                Eio.Switch.on_release_cancellable sw (fun () ->
-                    Eio.Cancel.protect (fun () -> ignore (close ordered)))
-              in
-              ordered.hook <- Some hook;
-              Ok ordered)
+          | Error error ->
+              ignore (close ordered);
+              Error error
+          | Ok () -> Ok ordered)
 
     let initial_pending ordered = ordered.initial_pending
 

@@ -1206,7 +1206,7 @@ let get_content ~deadline (value : t) info writer =
                 ~finally:(fun () ->
                   ignore
                     (Eio.Cancel.protect (fun () ->
-                         ignore (Jetstream.Consumer.Ordered.close ordered))))
+                         ignore (Jetstream.Consumer.Ordered.release ordered))))
                 (fun () ->
                   read_chunks ();
                   match !result with

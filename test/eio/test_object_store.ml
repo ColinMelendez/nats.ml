@@ -226,6 +226,41 @@ let trace_json_string ~trace ~field =
                field value)
       | Some finish -> String.sub value start (finish - start))
 
+let trace_consumer_name ~trace ~occurrence =
+  let value = Buffer.contents trace in
+  let marker = "PUB $JS.API.CONSUMER.CREATE.OBJ_assets." in
+  let marker_length = String.length marker in
+  let limit = String.length value - marker_length in
+  let position = ref 0 in
+  let seen = ref 0 in
+  let start = ref None in
+  while Option.is_none !start && !position <= limit do
+    if String.equal (String.sub value !position marker_length) marker then (
+      incr seen;
+      if Int.equal !seen occurrence then start := Some (!position + marker_length)
+      else incr position)
+    else incr position
+  done;
+  match !start with
+  | None ->
+      fail
+        (Format.asprintf
+           "trace did not contain consumer-create occurrence %d; trace:\n%s"
+           occurrence value)
+  | Some start ->
+      let finish = ref start in
+      while
+        !finish < String.length value
+        && not (Char.equal (String.get value !finish) ' ')
+      do
+        incr finish
+      done;
+      if Int.equal !finish (String.length value) then
+        fail
+          (Format.asprintf "consumer-create occurrence %d was unterminated"
+             occurrence)
+      else String.sub value start (!finish - start)
+
 let config () =
   let placement =
     match
@@ -295,7 +330,7 @@ let object_link_info_wire ~sid ~name ~target =
   in
   direct_response_wire ~sid ~bucket:"assets" ~name payload
 
-let object_ordered_create_wire ~sid ?(name = "ordered-1") () =
+let object_ordered_create_wire ~sid ~name () =
   let payload =
     Format.asprintf
       {|{"stream_name":"OBJ_assets","name":"%s","config":{"deliver_policy":"all","ack_policy":"none","replay_policy":"instant"}}|}
@@ -304,7 +339,7 @@ let object_ordered_create_wire ~sid ?(name = "ordered-1") () =
   response_wire_with_sid ~sid payload
 
 let object_ordered_delivery_wire ~sid ~stream_sequence ~consumer_sequence
-    ~pending ?(consumer = "ordered-1") ?(nuid = "test-nuid") payload =
+    ~pending ~consumer ?(nuid = "test-nuid") payload =
   let reply_to =
     Format.asprintf "$JS.ACK.OBJ_assets.%s.1.%Ld.%Ld.0.%Ld" consumer
       stream_sequence consumer_sequence pending
@@ -1088,23 +1123,24 @@ let () =
                       {|{"name":"images/cat.png","bucket":"assets","nuid":"test-nuid","size":5,"chunks":3,"digest":"SHA-256=NrvlDtloQdEEQ7y2cNZVTwo0t2G-Z-ycSorSwMRMpCw=","options":{"max_chunk_size":2}}|}));
               wait_for_trace_count ~trace ~needle:"CONSUMER.CREATE.OBJ_assets"
                 ~count:1;
+              let consumer = trace_consumer_name ~trace ~occurrence:1 in
               Eio.Promise.resolve create_response_u
-                (Ok (object_ordered_create_wire ~sid:2 ()));
+                (Ok (object_ordered_create_wire ~sid:2 ~name:consumer ()));
               yield_n 5;
               Eio.Promise.resolve first_delivery_u
                 (Ok
                    (object_ordered_delivery_wire ~sid:3 ~stream_sequence:1L
-                      ~consumer_sequence:1L ~pending:2L "ab"));
+                      ~consumer ~consumer_sequence:1L ~pending:2L "ab"));
               yield_n 5;
               Eio.Promise.resolve second_delivery_u
                 (Ok
                    (object_ordered_delivery_wire ~sid:3 ~stream_sequence:2L
-                      ~consumer_sequence:2L ~pending:1L "cd"));
+                      ~consumer ~consumer_sequence:2L ~pending:1L "cd"));
               yield_n 5;
               Eio.Promise.resolve third_delivery_u
                 (Ok
                    (object_ordered_delivery_wire ~sid:3 ~stream_sequence:3L
-                      ~consumer_sequence:3L ~pending:0L "e"));
+                      ~consumer ~consumer_sequence:3L ~pending:0L "e"));
               wait_for_trace_count ~trace ~needle:"CONSUMER.DELETE.OBJ_assets"
                 ~count:1;
               Eio.Promise.resolve delete_response_u
@@ -1171,14 +1207,15 @@ let () =
                       ~chunk_size:3));
               wait_for_trace_count ~trace ~needle:"CONSUMER.CREATE.OBJ_assets"
                 ~count:1;
+              let consumer = trace_consumer_name ~trace ~occurrence:1 in
               Eio.Promise.resolve create_response_u
-                (Ok (object_ordered_create_wire ~sid:2 ()));
+                (Ok (object_ordered_create_wire ~sid:2 ~name:consumer ()));
               wait_for_trace_count ~trace ~needle:"CONSUMER.MSG.NEXT.OBJ_assets"
                 ~count:1;
               Eio.Promise.resolve gap_delivery_u
                 (Ok
                    (object_ordered_delivery_wire ~sid:3 ~stream_sequence:1L
-                      ~consumer_sequence:2L ~pending:1L "ab"));
+                      ~consumer ~consumer_sequence:2L ~pending:1L "ab"));
               wait_for_trace_count ~trace ~needle:"CONSUMER.DELETE.OBJ_assets"
                 ~count:1;
               Eio.Promise.resolve delete_response_u
@@ -1186,6 +1223,8 @@ let () =
               wait_for_trace_count ~trace ~needle:"CONSUMER.CREATE.OBJ_assets"
                 ~count:2;
               Eio.Time.Mono.sleep clock 0.02;
+              wait_for_trace_count ~trace ~needle:"CONSUMER.DELETE.OBJ_assets"
+                ~count:2;
               (match Eio.Promise.peek result with
               | Some
                   (Error
@@ -1201,10 +1240,15 @@ let () =
                   fail
                     (Format.asprintf
                        "object get remained pending after its deadline; trace:\n\
-                        %s"
+                       %s"
                        (Buffer.contents trace)));
+              let recreated_consumer =
+                trace_consumer_name ~trace ~occurrence:2
+              in
               Eio.Promise.resolve recreate_response_u
-                (Ok (object_ordered_create_wire ~sid:5 ~name:"ordered-2" ()));
+                (Ok
+                   (object_ordered_create_wire ~sid:5 ~name:recreated_consumer
+                      ()));
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "get follows object links before streaming target chunks" (fun () ->
@@ -1256,13 +1300,15 @@ let () =
                       ~chunk_size:2));
               wait_for_trace_count ~trace ~needle:"CONSUMER.CREATE.OBJ_assets"
                 ~count:1;
+              let consumer = trace_consumer_name ~trace ~occurrence:1 in
               Eio.Promise.resolve create_response_u
-                (Ok (object_ordered_create_wire ~sid:3 ()));
+                (Ok (object_ordered_create_wire ~sid:3 ~name:consumer ()));
               yield_n 5;
               Eio.Promise.resolve delivery_u
                 (Ok
                    (object_ordered_delivery_wire ~sid:4 ~nuid:"target-nuid"
-                      ~stream_sequence:1L ~consumer_sequence:1L ~pending:0L "xy"));
+                      ~consumer ~stream_sequence:1L ~consumer_sequence:1L
+                      ~pending:0L "xy"));
               wait_for_trace_count ~trace ~needle:"CONSUMER.DELETE.OBJ_assets"
                 ~count:1;
               Eio.Promise.resolve delete_response_u
