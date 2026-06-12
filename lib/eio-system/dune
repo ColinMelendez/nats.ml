@@ -1,0 +1,4 @@
+(library
+ (name nats_eio_system)
+ (public_name nats-eio-system)
+ (libraries nats nats-eio bytesrw jsont jsont.bytesrw eio mtime))

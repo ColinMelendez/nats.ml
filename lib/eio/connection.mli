@@ -163,7 +163,10 @@ val subscribe :
     remain available before the terminal marker. [pending_messages] and
     [pending_bytes] optionally constrain queued deliveries; each value must be
     positive or [-1], where [-1] disables that endpoint-specific limit. A
-    connection's own bounded queue capacity remains in force. *)
+    connection's own bounded queue capacity remains in force. Subscription
+    setup is cancellation-safe: if cancellation arrives after the server
+    subscription is created but before setup returns, the subscription is
+    revoked before cancellation is re-raised. *)
 
 module Request : sig
   type t

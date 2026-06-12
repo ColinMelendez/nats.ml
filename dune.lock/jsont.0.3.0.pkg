@@ -1,4 +1,4 @@
-(version 0.2.0)
+(version 0.3.0)
 
 (build
  (all_platforms
@@ -22,6 +22,6 @@
 
 (source
  (fetch
-  (url https://erratique.ch/software/jsont/releases/jsont-0.2.0.tbz)
+  (url https://erratique.ch/software/jsont/releases/jsont-0.3.0.tbz)
   (checksum
-   sha512=6206f73a66cb170b560a72e58f70b9fb2c20397b9ab819dceba49b6602b9b79e47ba307e6910e61ca4694555c66fdcd7a17490afb99548e8f43845a5a88913e7)))
+   sha512=507ab6b3d8718f322fb74999b3b82dbc1d36037042cb9067e5b8b63df80524a0602cc26e487b6e4ce061d65767162d6ffa00e173d9f51ce66cdd2a63482a350e)))

@@ -40,3 +40,22 @@
   (alcobar :with-test)
   (eio_main :with-test)
   (windtrap :with-test)))
+
+(package
+ (name nats-eio-system)
+ (synopsis "Privileged NATS system-account administration for Eio")
+ (description
+  "Server and account monitoring, operational control, and system-event subscriptions over the privileged NATS system account API.")
+ (license ISC)
+ (authors "Colin <cwrmcolin@gmail.com>")
+ (maintainers "Colin <cwrmcolin@gmail.com>")
+ (depends
+  (ocaml (>= 5.2))
+  nats
+  nats-eio
+  bytesrw
+  jsont
+  eio
+  mtime
+  (eio_main :with-test)
+  (windtrap :with-test)))

@@ -2510,17 +2510,28 @@ let subscribe t ?queue_group ?(replay_on_reconnect = true) ?pending_messages
   let* pending_messages = validate_pending_limit "messages" pending_messages in
   let* pending_bytes = validate_pending_limit "bytes" pending_bytes in
   let promise, resolver = Eio.Promise.create () in
-  send t
-    (Subscribe
-       {
-         subject;
-         queue_group;
-         replay_on_reconnect;
-         pending_messages;
-         pending_bytes;
-         resolver;
-       })
-    promise
+  let result =
+    Eio.Cancel.protect (fun () ->
+        send t
+          (Subscribe
+             {
+               subject;
+               queue_group;
+               replay_on_reconnect;
+               pending_messages;
+               pending_bytes;
+               resolver;
+             })
+          promise)
+  in
+  match result with
+  | Ok subscription when Eio.Fiber.is_cancelled () ->
+      ignore
+        (Eio.Cancel.protect (fun () ->
+             ignore (Subscription.unsubscribe subscription)));
+      Eio.Fiber.check ();
+      assert false
+  | result -> result
 
 let validate_timeout name timeout =
   if Mtime.Span.compare timeout Mtime.Span.zero > 0 then Ok timeout
