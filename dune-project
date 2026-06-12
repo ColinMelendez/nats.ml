@@ -10,7 +10,7 @@
  (authors "Colin <cwrmcolin@gmail.com>")
  (maintainers "Colin <cwrmcolin@gmail.com>")
  (depends
-  (ocaml (>= 5.2))
+  (ocaml (>= 5.5))
   bytesrw
   jsont
   mtime
@@ -26,7 +26,7 @@
  (authors "Colin <cwrmcolin@gmail.com>")
  (maintainers "Colin <cwrmcolin@gmail.com>")
  (depends
-  (ocaml (>= 5.2))
+  (ocaml (>= 5.5))
   nats
   bytesrw
   jsont
@@ -50,7 +50,7 @@
  (authors "Colin <cwrmcolin@gmail.com>")
  (maintainers "Colin <cwrmcolin@gmail.com>")
  (depends
-  (ocaml (>= 5.2))
+  (ocaml (>= 5.5))
   nats
   nats-eio
   bytesrw

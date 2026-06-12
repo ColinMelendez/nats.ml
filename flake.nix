@@ -25,7 +25,19 @@
             git
             pkg-config
           ];
-          ocaml_packages = with pkgs.ocamlPackages_latest; [
+          ocamlPackages = pkgs.ocamlPackages_latest.overrideScope (
+            final: prev: {
+              ocaml = prev.ocaml.overrideAttrs (old: {
+                nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.pkg-config ];
+                buildInputs = (old.buildInputs or [ ]) ++ [ pkgs.zstd ];
+                # The zstd-enabled compiler is rebuilt locally; the repository
+                # checks remain enabled, so do not repeat OCaml's long upstream
+                # test suite in every developer toolchain build.
+                doCheck = false;
+              });
+            }
+          );
+          ocaml_packages = with ocamlPackages; [
             ocaml
             dune_3
           ];
@@ -34,7 +46,10 @@
             version = "0.1.0";
             src = ./interop/nats-ocaml-interop-peer;
             vendorHash = "sha256-iAnaEm8vuPf/Px4e3tOk0uRvBjPlslN9rOwNb1+OzWs=";
-            ldflags = [ "-s" "-w" ];
+            ldflags = [
+              "-s"
+              "-w"
+            ];
           };
           shell_hook = ''
             export LC_ALL=C
@@ -68,7 +83,7 @@
               ++ (with pkgs; [
                 nixfmt
               ])
-              ++ (with pkgs.ocamlPackages_latest; [
+              ++ (with ocamlPackages; [
                 ocaml
                 dune_3
                 odoc
