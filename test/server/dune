@@ -69,5 +69,18 @@
 
 (executable
  (name server_system)
- (modules server_system)
- (libraries nats nats-eio nats-eio-system eio eio_main mtime))
+ (modules system_auth server_system)
+ (libraries
+  nats
+  nats-eio
+  nats-eio-system
+  eio
+  eio_main
+  tls
+  x509
+  domain-name
+  mirage-crypto-rng.unix
+  mirage-crypto-ec
+  base64
+  ptime
+  mtime))

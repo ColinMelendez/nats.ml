@@ -47,15 +47,6 @@ let expected_server_count () =
       | Some count when count > 0 -> count
       | _ -> failf "NATS_TEST_EXPECTED_SERVERS must be a positive integer")
 
-let auth () =
-  let user =
-    Option.value ~default:"sys" (Sys.getenv_opt "NATS_TEST_SYSTEM_USER")
-  in
-  let pass =
-    Option.value ~default:"sys" (Sys.getenv_opt "NATS_TEST_SYSTEM_PASS")
-  in
-  Nats.Auth.user_pass ~user ~pass
-
 let touch path =
   let output = open_out path in
   close_out output
@@ -79,6 +70,25 @@ let wait_for_core_event ~clock ~label predicate events =
     if predicate (next_core_event ~clock ~label events) then found := true
   done;
   if not !found then failf "timed out waiting for %s" label
+
+let wait_for_reconnect_server ~clock events =
+  let remaining = ref 16 in
+  let reconnected = ref false in
+  let server_id = ref None in
+  while !remaining > 0 && not !reconnected do
+    decr remaining;
+    match next_core_event ~clock ~label:"reconnect" events with
+    | Nats_eio.Event.Core (Nats.Event.Info info) -> (
+        match Nats.Info.server_id info with
+        | Some value -> server_id := Some value
+        | None -> ())
+    | Nats_eio.Event.Reconnected -> reconnected := true
+    | _ -> ()
+  done;
+  if not !reconnected then failf "timed out waiting for reconnect";
+  match !server_id with
+  | Some value -> value
+  | None -> failf "the reconnect did not advertise a server id"
 
 let server_id ~events =
   let remaining = ref 16 in
@@ -113,9 +123,22 @@ let run env =
   let clock = Eio.Stdenv.mono_clock env in
   let endpoints = endpoints () in
   let expected_servers = expected_server_count () in
-  let auth = auth () in
+  let system_account_id =
+    Option.value ~default:"SYS" (Sys.getenv_opt "NATS_TEST_SYSTEM_ACCOUNT")
+  in
+  let system_account_name =
+    Option.value ~default:"SYS" (Sys.getenv_opt "NATS_TEST_SYSTEM_ACCOUNT_NAME")
+  in
+  let reload_disconnect_allowed =
+    match Sys.getenv_opt "NATS_TEST_SYSTEM_AUTH_MODE" with
+    | Some value -> String.equal value "jwt" || String.equal value "jwt-tls"
+    | None -> false
+  in
+  System_auth.initialize ();
+  let auth = System_auth.auth () in
+  let tls = System_auth.tls () in
   let config =
-    expect_core "auth config" (Nats_eio.Connection.Config.v ~auth ())
+    expect_core "auth config" (Nats_eio.Connection.Config.v ?auth ?tls ())
   in
   let connection =
     expect_core "connect"
@@ -126,6 +149,7 @@ let run env =
     (fun () ->
       let events = Nats_eio.Connection.events connection in
       let server_id = server_id ~events in
+      let reload_server_id = ref server_id in
       let system = Nats_eio_system.v connection in
       let target =
         expect_system "server target" (Nats_eio_system.Target.server server_id)
@@ -155,7 +179,7 @@ let run env =
           expected_servers;
       let account =
         expect_system "system-account INFO"
-          (Nats_eio_system.Target.account "SYS")
+          (Nats_eio_system.Target.account system_account_id)
       in
       let account_info =
         expect_system "account INFO"
@@ -166,14 +190,10 @@ let run env =
       in
       if Int.equal (List.length account_info) 0 then
         failf "account INFO returned no responses";
-      expect_system "reload"
-        (Nats_eio_system.Control.reload
-           ~timeout:Mtime.Span.(5 * s)
-           system ~server:server_id);
       let account_events =
         expect_system "account event subscription"
           (Nats_eio_system.Events.subscribe
-             ~scope:(Nats_eio_system.Events.Account "SYS") system)
+             ~scope:(Nats_eio_system.Events.Account system_account_name) system)
       in
       expect_core "event subscription flush"
         (Nats_eio.Connection.flush connection);
@@ -201,9 +221,11 @@ let run env =
               ~timeout:Mtime.Span.(1 * s)
               account_events
           with
-          | Ok (Nats_eio_system.Events.Account_connect { account_id; _ })
-            when String.equal account_id "SYS" ->
-              result := true
+          | Ok (Nats_eio_system.Events.Account_connect { account_id; _ }) ->
+              if String.equal account_id system_account_name then result := true
+              else
+                failf "system account CONNECT event was for %S, expected %S"
+                  account_id system_account_name
           | Ok _ -> ()
           | Error (Nats_eio_system.Error.Connection Nats_eio.Error.Timeout) ->
               ()
@@ -222,9 +244,7 @@ let run env =
           wait_for_core_event ~clock ~label:"disconnect"
             (function Nats_eio.Event.Disconnected -> true | _ -> false)
             events;
-          wait_for_core_event ~clock ~label:"reconnect"
-            (function Nats_eio.Event.Reconnected -> true | _ -> false)
-            events;
+          reload_server_id := wait_for_reconnect_server ~clock events;
           let recovered_stats =
             expect_system "recovered all-server STATSZ"
               (Nats_eio_system.Monitor.request
@@ -259,9 +279,13 @@ let run env =
                   ~timeout:Mtime.Span.(1 * s)
                   account_events
               with
-              | Ok (Nats_eio_system.Events.Account_connect { account_id; _ })
-                when String.equal account_id "SYS" ->
-                  result := true
+              | Ok (Nats_eio_system.Events.Account_connect { account_id; _ }) ->
+                  if String.equal account_id system_account_name then
+                    result := true
+                  else
+                    failf
+                      "recovered system account event was for %S, expected %S"
+                      account_id system_account_name
               | Ok _ -> ()
               | Error (Nats_eio_system.Error.Connection Nats_eio.Error.Timeout)
                 ->
@@ -277,6 +301,16 @@ let run env =
           if not recovered_connected then
             failf "recovered system account CONNECT event was not observed");
       expect_system "event close" (Nats_eio_system.Events.close account_events);
+      (match
+         Nats_eio_system.Control.reload
+           ~timeout:Mtime.Span.(5 * s)
+           system ~server:!reload_server_id
+       with
+      | Ok () -> ()
+      | Error (Nats_eio_system.Error.Connection Nats_eio.Error.Disconnected)
+        when reload_disconnect_allowed ->
+          ()
+      | Error error -> failf "reload: %s" (system_error error));
       print_endline "system administration: ok")
 
 let () =
