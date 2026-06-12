@@ -1285,7 +1285,8 @@ let () =
               let watch_result, watch_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve watch_result_u
-                    (Nats_eio.Key_value.Ordered_watch.v ~sw ~key:"alice"
+                    (Nats_eio.Key_value.Ordered_watch.v ~sw
+                       ~keys:[ "alice"; "bob" ]
                        ~batch:1 ~meta_only:true ~name_prefix:"kv-ordered"
                        ~metadata:[ ("owner", "ordered-watch") ] value));
               yield_n 5;
@@ -1293,6 +1294,8 @@ let () =
                 ~needle:"deliver_policy\\\":\\\"last_per_subject";
               require_trace ~trace
                 ~needle:"filter_subjects\\\":[\\\"$KV.users.alice";
+              require_trace ~trace
+                ~needle:"$KV.users.bob";
               require_trace ~trace
                 ~needle:"name\\\":\\\"kv-ordered_1";
               require_trace ~trace ~needle:"headers_only\\\":true";
@@ -1328,7 +1331,7 @@ let () =
               Eio.Promise.resolve second_delivery_u
                 (Ok
                    (consumer_delivery_wire ~sid:2 ~consumer:"kv-ordered_1"
-                      ~key:"alice" ~stream_sequence:11L
+                      ~key:"bob" ~stream_sequence:11L
                       ~consumer_sequence:2L ~pending:0L ~operation:"DEL" ""));
               let second =
                 match expect_kv_ok (Eio.Promise.await second_result) with
@@ -1502,7 +1505,7 @@ let () =
                 (Ok
                    (consumer_response_named_with_opt_start_seq ~sid:4
                       ~policy:"by_start_sequence" ~headers_only:false
-                      ~pending:(Some 0L) ~opt_start_seq:(Some 11L) ~name:"kv-gap_2"
+                      ~pending:(Some 1L) ~opt_start_seq:(Some 11L) ~name:"kv-gap_2"
                       ~deliver_subject:""));
               yield_n 5;
               Eio.Promise.resolve replay_delivery_u

@@ -149,6 +149,29 @@ let status_wire_with_sid ~sid ~code ~description =
 let status_wire ~code ~description =
   status_wire_with_sid ~sid:1 ~code ~description
 
+let ordered_heartbeat_wire ~sid ~consumer_sequence ~stream_sequence =
+  let headers =
+    match
+      Nats.Header.of_list
+        [
+          ("Nats-Last-Consumer", Int64.to_string consumer_sequence);
+          ("Nats-Last-Stream", Int64.to_string stream_sequence);
+        ]
+    with
+    | Ok headers -> headers
+    | Error error -> fail (Format.asprintf "%a" Nats.Header.pp_error error)
+  in
+  let message =
+    Nats.Message.v ~subject:(Nats.Subject.literal "_INBOX.reply") ~headers ""
+  in
+  operation_wire
+    (Nats.Op.Hmsg
+       {
+         sid;
+         message;
+         status = Some { code = 100; description = "Idle Heartbeat" };
+       })
+
 let control_status_wire ~sid ~reply_to ~description =
   let message =
     Nats.Message.v
@@ -4337,6 +4360,238 @@ let () =
                     (Nats_eio.Jetstream.Consumer.Ordered.close ordered));
               yield_n 5;
               Eio.Promise.resolve second_delete_u (Ok (api_ok_wire ~sid:6));
+              expect_jetstream_ok (Eio.Promise.await close_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "ordered consumer recreates when a heartbeat reports a sequence gap"
+        (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let first_delivery, first_delivery_u = Eio.Promise.create () in
+          let heartbeat, heartbeat_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let recreated, recreated_u = Eio.Promise.create () in
+          let replay_delivery, replay_delivery_u = Eio.Promise.create () in
+          let final_delete, final_delete_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await first_delivery;
+                `Await heartbeat;
+                `Await delete_response;
+                `Await recreated;
+                `Await replay_delivery;
+                `Await final_delete;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
+              in
+              let ordered_result, ordered_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve ordered_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ~batch:3
+                       ~expires:Mtime.Span.(10 * ms)
+                       ~idle_heartbeat:Mtime.Span.(1 * ms)
+                       ~max_reset_attempts:3 ~name_prefix:"ordered-heartbeat"
+                       stream));
+              yield_n 5;
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (ordered_create_wire ~sid:1 ~name:"ordered-heartbeat_1"
+                      ~deliver_policy:"all" ()));
+              let ordered =
+                expect_jetstream_ok (Eio.Promise.await ordered_result)
+              in
+              let first_result, first_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.next ordered));
+              yield_n 5;
+              Eio.Promise.resolve first_delivery_u
+                (Ok
+                   (ordered_delivery_wire ~sid:2 ~consumer:"ordered-heartbeat_1"
+                      ~stream_sequence:10L ~consumer_sequence:1L "first"));
+              ignore (expect_jetstream_ok (Eio.Promise.await first_result));
+              let replay_result, replay_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve replay_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.next ordered));
+              yield_n 5;
+              Eio.Promise.resolve heartbeat_u
+                (Ok
+                   (ordered_heartbeat_wire ~sid:2 ~consumer_sequence:3L
+                      ~stream_sequence:12L));
+              wait_for_trace_count ~trace
+                ~needle:
+                  "PUB $JS.API.CONSUMER.DELETE.ORDERS.ordered-heartbeat_1"
+                ~count:1;
+              Eio.Promise.resolve delete_response_u (Ok (api_ok_wire ~sid:3));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.CONSUMER.CREATE.ORDERS" ~count:2;
+              if
+                not
+                  (contains_substring ~needle:"\\\"opt_start_seq\\\":11"
+                     (Buffer.contents trace))
+              then fail "heartbeat reset did not resume at the next sequence";
+              Eio.Promise.resolve recreated_u
+                (Ok
+                   (ordered_create_wire ~sid:4 ~name:"ordered-heartbeat_2"
+                      ~deliver_policy:"by_start_sequence" ~opt_start_seq:11L
+                      ()));
+              wait_for_trace_count ~trace
+                ~needle:
+                  "PUB $JS.API.CONSUMER.MSG.NEXT.ORDERS.ordered-heartbeat_2"
+                ~count:1;
+              Eio.Promise.resolve replay_delivery_u
+                (Ok
+                   (ordered_delivery_wire ~sid:5 ~consumer:"ordered-heartbeat_2"
+                      ~stream_sequence:11L ~consumer_sequence:1L "replayed"));
+              let replayed =
+                expect_jetstream_ok (Eio.Promise.await replay_result)
+              in
+              equal string "replayed"
+                (Nats_eio.Jetstream.Msg.payload replayed);
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.close ordered));
+              wait_for_trace_count ~trace
+                ~needle:
+                  "PUB $JS.API.CONSUMER.DELETE.ORDERS.ordered-heartbeat_2"
+                ~count:1;
+              Eio.Promise.resolve final_delete_u (Ok (api_ok_wire ~sid:6));
+              expect_jetstream_ok (Eio.Promise.await close_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "ordered recovery timeout leaves the session retryable" (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let first_delivery, first_delivery_u = Eio.Promise.create () in
+          let gap_delivery, gap_delivery_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          let retry_delete_response, retry_delete_response_u =
+            Eio.Promise.create ()
+          in
+          let recreated, recreated_u = Eio.Promise.create () in
+          let replay_delivery, replay_delivery_u = Eio.Promise.create () in
+          let final_delete, final_delete_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced_clock
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await first_delivery;
+                `Await gap_delivery;
+                `Await delete_response;
+                `Await retry_delete_response;
+                `Await recreated;
+                `Await replay_delivery;
+                `Await final_delete;
+                `Await hold;
+              ]
+            (fun ~sw ~trace ~clock connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
+              in
+              let ordered_result, ordered_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve ordered_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ~batch:1
+                       ~expires:Mtime.Span.(1 * s)
+                       ~idle_heartbeat:Mtime.Span.(100 * ms)
+                       ~max_reset_attempts:3 ~name_prefix:"ordered-timeout"
+                       stream));
+              yield_n 5;
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (ordered_create_wire ~sid:1 ~name:"ordered-timeout_1"
+                      ~deliver_policy:"all" ()));
+              let ordered =
+                expect_jetstream_ok (Eio.Promise.await ordered_result)
+              in
+              let first_result, first_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.next ordered));
+              yield_n 5;
+              Eio.Promise.resolve first_delivery_u
+                (Ok
+                   (ordered_delivery_wire ~sid:2 ~consumer:"ordered-timeout_1"
+                      ~stream_sequence:10L ~consumer_sequence:1L "first"));
+              ignore (expect_jetstream_ok (Eio.Promise.await first_result));
+              let recovery_result, recovery_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve recovery_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.next_with_timeout
+                       ~timeout:Mtime.Span.(10 * ms) ordered));
+              yield_n 5;
+              Eio.Promise.resolve gap_delivery_u
+                (Ok
+                   (ordered_delivery_wire ~sid:2 ~consumer:"ordered-timeout_1"
+                      ~stream_sequence:12L ~consumer_sequence:3L "gap"));
+              wait_for_trace ~clock ~trace
+                ~needle:"PUB $JS.API.CONSUMER.DELETE.ORDERS.ordered-timeout_1"
+                ~count:1;
+              Eio.Time.Mono.sleep clock 0.02;
+              (match Eio.Promise.await recovery_result with
+              | Error
+                  (Nats_eio.Jetstream.Error.Connection Nats_eio.Error.Timeout)
+                -> ()
+              | Ok _ -> fail "ordered recovery unexpectedly returned a message"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected ordered recovery result: %a"
+                       Nats_eio.Jetstream.Error.pp error));
+              Eio.Promise.resolve delete_response_u (Ok (api_ok_wire ~sid:3));
+              let replay_result, replay_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve replay_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.next ordered));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.CONSUMER.DELETE.ORDERS.ordered-timeout_1"
+                ~count:2;
+              Eio.Promise.resolve retry_delete_response_u
+                (Ok (consumer_not_found_wire ~sid:4));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.CONSUMER.CREATE.ORDERS" ~count:2;
+              Eio.Promise.resolve recreated_u
+                (Ok
+                   (ordered_create_wire ~sid:5 ~name:"ordered-timeout_2"
+                      ~deliver_policy:"by_start_sequence" ~opt_start_seq:11L
+                      ()));
+              wait_for_trace_count ~trace
+                ~needle:
+                  "PUB $JS.API.CONSUMER.MSG.NEXT.ORDERS.ordered-timeout_2"
+                ~count:1;
+              Eio.Promise.resolve replay_delivery_u
+                (Ok
+                   (ordered_delivery_wire ~sid:6 ~consumer:"ordered-timeout_2"
+                      ~stream_sequence:11L ~consumer_sequence:1L "replayed"));
+              let replayed =
+                expect_jetstream_ok (Eio.Promise.await replay_result)
+              in
+              equal string "replayed"
+                (Nats_eio.Jetstream.Msg.payload replayed);
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.close ordered));
+              wait_for_trace ~clock ~trace
+                ~needle:"PUB $JS.API.CONSUMER.DELETE.ORDERS.ordered-timeout_2"
+                ~count:1;
+              Eio.Promise.resolve final_delete_u (Ok (api_ok_wire ~sid:7));
               expect_jetstream_ok (Eio.Promise.await close_result);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
