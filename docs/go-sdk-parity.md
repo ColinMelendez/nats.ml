@@ -24,7 +24,7 @@ marked as covered.
 | Server-wide administration | Not exposed | The privileged `$SYS` system-account control and monitoring surface is separate from JetStream resource administration and requires its own typed API and authorization model |
 | JetStream publishing | Covered, including async futures, retries, TTL/schedule headers, atomic and fast batches | Shared async acknowledgement multiplexing is a throughput optimization, not a capability gap |
 | JetStream consumption | Covered: pull, push, ordered, fetch, no-wait, heartbeats, flow control, priority, and continuous consumption | Go callback/channel receive shapes and threshold/error-handler tuning are represented by direct Eio iteration and structured results |
-| Key-Value | Covered: CRUD, CAS, history, watches, listers, managers, policy fields, composition, TTL, and purge-marker cleanup | Watch recovery intentionally does not claim ordered-consumer gap detection |
+| Key-Value | Covered: CRUD, CAS, history, ordinary and ordered watches, listers, managers, policy fields, composition, TTL, and purge-marker cleanup | Ordinary and ordered watch behavior remain separate contracts; live cluster failure coverage remains acceptance work |
 | Object Store | Covered: streaming CRUD, links, metadata, watches, listing, sealing, managers, file helpers, and Go interop | No material data-plane gap; broader cluster failure matrices remain acceptance work |
 | Services | Covered for the pinned `micro` surface and lifecycle matrices | Future server/SDK versions and transport-specific integration hooks remain separate work |
 
@@ -137,9 +137,10 @@ consumer handle and error path.
 
 The OCaml module covers revisioned get/put/create/update, compare-and-set
 delete/purge, exact revision reads, finite key scans, history, purge-marker
-cleanup, and switch-owned watches with initial markers, delivery policies,
-delete filtering, metadata-only delivery, multiple filters, and revision
-resumption. Per-key and purge-marker TTLs are represented explicitly.
+cleanup, and switch-owned ordinary and ordered watches with initial markers,
+delivery policies, delete filtering, metadata-only delivery, multiple filters,
+and revision resumption. Per-key and purge-marker TTLs are represented
+explicitly.
 
 `Key_value.Manager` covers account-wide create, update, create-or-update,
 open, delete, name listing, and status listing. `Config` and `Status` project
@@ -155,19 +156,19 @@ stream name and preserves caller-supplied transforms, so another bucket is
 referenced as its `KV_` stream name. This is an intentional precision tradeoff
 in favor of preserving the underlying JetStream composition model.
 
-The OCaml watch documents that ordinary ephemeral-consumer recovery does not
-provide the stronger ordered-consumer gap detection of Go's ordered watcher.
-Callers that require that invariant should use `Consumer.Ordered` directly or
-resume a watch from an application-owned revision checkpoint.
+`Key_value.Watch` remains the ordinary, revision-resumable watch contract.
+`Key_value.Ordered_watch` is the explicit stronger mode: it composes
+`Consumer.Ordered` with bucket entry decoding, emits an initial marker, and
+preserves filters, headers-only delivery, metadata, replay/heartbeat settings,
+name prefixes, and reset limits while recovering from consumer-sequence gaps,
+missing heartbeats, deletion, and non-replayed disconnects. It resumes each
+new generation at the next expected stream revision. This separation keeps
+the ordinary watch's duplicate and loss semantics stable.
 
-Adding that guarantee to KV would require a distinct ordered-watch mode. It
-would validate consumer and stream sequences, detect missing heartbeats,
-deletions, disconnects, and gaps, recreate an ephemeral consumer at the next
-expected stream sequence, preserve the watch configuration, and define
-duplicate/truncation/reset limits. It also needs live-server and cross-SDK
-failure tests. The existing ordinary watch contract should not be strengthened
-implicitly because those recovery rules change its loss and duplicate
-semantics.
+The local mock suite covers retained/live and empty snapshots, metadata-only
+delivery, and deterministic gap recovery. Live-server and cross-SDK failure
+tests for the wrapper remain acceptance work; the lower-level ordered consumer
+already has the corresponding live recovery harness.
 
 The pinned Go interop runner covers revisions, stale CAS, tombstones, watches,
 purge markers, and cleanup across the supported single-server matrix.
@@ -224,6 +225,6 @@ These are acceptance and product-scope decisions, not unimplemented Core,
 JetStream, KV, Object Store, or Services wire capabilities in the current
 Eio surface.
 
-Two intentionally separate extensions remain possible: a privileged
-system-account server-administration module, and an explicitly ordered KV
-watch. Neither is included in the pinned Go JetStream parity claim.
+One intentionally separate extension remains possible: a privileged
+system-account server-administration module. It is outside the pinned Go
+JetStream parity claim.

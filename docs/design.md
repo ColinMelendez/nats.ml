@@ -296,6 +296,17 @@ covers NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS under both failures on
 `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. Additional failure modes
 remain final-acceptance work.
 
+Key-Value exposes this state machine through a separate
+`Key_value.Ordered_watch` mode. It retains the ordinary watch's typed entry
+decoding and initial marker, but validates ordered consumer delivery and
+recreates the ephemeral consumer at the next stream revision after a gap,
+missing heartbeat, deletion, or non-replayed disconnect. Ordinary
+`Key_value.Watch` remains revision-resumable without that stronger recovery
+contract, so applications choose their duplicate and loss semantics
+explicitly. The local wrapper tests cover retained/live and empty snapshots,
+metadata-only delivery, and deterministic gap replay; live wrapper failure
+matrices remain acceptance work.
+
 ### The protocol core as a testable boundary
 
 An adapter should be able to drive the protocol without a socket:

@@ -24,7 +24,7 @@ channels, and mutable handles.
 | JetStream resource administration | Account information plus stream and consumer administration/configuration are covered, including placement, persistence mode, message counters, and the material pinned Go SDK fields. |
 | Server-wide administration | Not part of the JetStream API or current client surface. See below. |
 | JetStream consumption | Pull, push, ordered, fetch-by-bytes, no-wait fetch, flow control, priority groups, and bounded continuous consumption are covered. `Messages`/`Consume` threshold callbacks are represented by Eio backpressure and result ownership. |
-| Key-Value watches | Revision-resumable watches are covered. Strong ordered-consumer gap detection and automatic ordered recovery are not claimed by the ordinary watch API. |
+| Key-Value watches | Revision-resumable `Watch` and distinct `Ordered_watch` modes are covered. Ordinary watches retain their weaker recovery contract; ordered watches validate consumer sequence continuity and recover at the next stream revision. |
 | Object Store | Streaming data access, links, metadata, watches, sealing, bucket managers/listers, and file helpers are covered. |
 
 ### JetStream administration versus server administration
@@ -53,30 +53,27 @@ review.
 ### Ordered recovery for Key-Value watches
 
 The current `Key_value.Watch` is a normal JetStream consumer with revision
-resumption. It can resume from an application-selected revision, but it does
-not promise the stronger ordered-consumer invariant: every accepted delivery
-must follow the preceding consumer sequence, and a missing heartbeat,
-consumer deletion, transport interruption, or sequence gap must trigger
-recovery.
+resumption and keeps that contract deliberately lightweight. Callers that need
+the stronger ordered-consumer invariant use the separate
+`Key_value.Ordered_watch` module. It emits `Initial_done` after the selected
+retained snapshot, then delivers typed bucket entries while preserving the
+same filtering, metadata-only, delete-filtering, timeout, and switch-lifetime
+options.
 
-An ordered watch would need to:
+`Ordered_watch` is built on the lower-level ordered consumer. It validates
+consumer sequence continuity, detects missing heartbeats, consumer deletion,
+non-replayed disconnects, and delivery gaps, then recreates its ephemeral
+no-ack memory consumer at the next expected stream revision. Filters,
+headers-only mode, heartbeat/replay settings, metadata, name prefixes, and
+reset limits are retained across generations. `max_reset_attempts` bounds
+recovery; the default permits the underlying ordered session's unlimited
+attempt policy.
 
-- retain the last accepted stream and consumer sequences and validate every
-  delivery against them;
-- detect missing heartbeats, deleted consumers, reconnects, and sequence gaps;
-- recreate its ephemeral consumer at the next expected stream sequence while
-  preserving filters, metadata, headers-only mode, heartbeat, and reset
-  policy;
-- define duplicate handling, stream truncation, retention races, cleanup,
-  cancellation, and a bounded reset-attempt/error policy; and
-- add live-server and Go-peer tests for filtered streams, consumer deletion,
-  reconnect, leader failure, and restart recovery.
-
-This should be a distinct ordered-watch mode or module, not an undocumented
-strengthening of `Watch`: ordered recovery changes duplicate, loss, and error
-semantics that existing callers may rely on. The lower-level
-`Nats_eio.Jetstream.Consumer.Ordered` already provides these recovery
-mechanics for callers that need ordered delivery directly.
+This is a distinct mode rather than an undocumented strengthening of `Watch`:
+ordered recovery changes duplicate, loss, and error semantics. The local mock
+suite covers retained/live and empty snapshots, metadata-only delivery, and
+gap recovery with replay. Live-server, cluster-failure, and Go-peer coverage
+remain part of the production-readiness acceptance program.
 
 ## Development
 

@@ -98,9 +98,9 @@ after gaps, liveness loss, deletion, or non-replayed disconnects while resuming
 from the next stream sequence. Reconnection waits for the connection replay
 barrier and retries transient JetStream availability failures without repeating
 stale-consumer cleanup. Key-Value now provides typed bucket management,
-compare-and-set mutations, finite scans, history, cancellable watches,
-per-key/marker TTL, account-wide managers, policy projection, and composed
-mirror/source/republish configuration. The opt-in single-server runner now
+compare-and-set mutations, finite scans, history, cancellable ordinary and
+ordered watches, per-key/marker TTL, account-wide managers, policy projection,
+and composed mirror/source/republish configuration. The opt-in single-server runner now
 exercises these behaviors against a live JetStream bucket as well. Continuous
 pull consumption is available through a bounded switch-owned
 `Consumer.Consume` session with explicit stop, drain, and cleanup controls.
@@ -160,12 +160,12 @@ Against the pinned official Go `nats.go v1.52.0` surface, the material Eio
 capabilities are now implemented: JetStream account and resource management,
 stream persistence/message-counter and publish controls, pull/push/ordered and
 continuous consumption, multiple priority groups, KV managers and composed
-bucket policies, and Object Store managers, file helpers, and data-plane
-interop. The remaining differences are deliberate runtime or product-scope
-choices: direct Eio iteration instead of Go callbacks/channels, ordinary KV
-watch recovery instead of ordered-consumer gap detection, adapter-specific
-diagnostics/dialer conveniences, broader failure matrices, and alternative
-transports.
+bucket policies, ordinary and ordered KV watches, and Object Store managers,
+file helpers, and data-plane interop. The remaining differences are deliberate
+runtime or product-scope choices: direct Eio iteration instead of Go
+callbacks/channels, separate ordinary and ordered KV watch contracts,
+adapter-specific diagnostics/dialer conveniences, broader failure matrices,
+and alternative transports.
 
 ### Production-readiness acceptance program
 
@@ -918,9 +918,15 @@ semantics before calling the feature complete.
 - Completed locally: add bucket create/open/status and typed
   entry/operation/revision values; implement get, put, create/update
   compare-and-set, delete, purge, history, finite scans, TTL, keys, and
-  cancellable watches.
+  cancellable ordinary and ordered watches.
 - Preserve watch ordering and expose bucket/key/value/revision/timestamp/
   operation without requiring callers to parse JetStream messages.
+- Completed locally: add `Key_value.Ordered_watch` as a separate stronger
+  contract over `Consumer.Ordered`. It emits the retained-snapshot marker,
+  preserves filters, metadata-only delivery, heartbeat/replay settings,
+  name-prefix/reset controls, and recreates at the next stream revision after
+  consumer-sequence gaps, missing heartbeats, deletion, or non-replayed
+  disconnects.
 - Completed cross-SDK baseline: a Nix-built official Go `nats.go` peer and the
   OCaml client alternate bucket creation, revisioned updates, stale CAS,
   tombstones, watches, purge markers, and cleanup. The matrix passes across
@@ -952,6 +958,9 @@ semantics before calling the feature complete.
 - KV CAS success/failure, revisions, history, TTL, deletes/purges, finite
   scans, and watches are covered locally through the Eio mock transport.
 - Watch cancellation and ordering under reconnect are covered locally.
+- Ordered-watch retained/live and empty snapshots, metadata-only delivery, and
+  consumer-gap replay are covered locally; live-server and cluster-failure
+  wrapper coverage remains in the acceptance matrix.
 - The opt-in single-server runner covers bucket status, direct reads, CAS
   failures, history, tombstones, filtered keys, and a live watch against
   nats-server.
