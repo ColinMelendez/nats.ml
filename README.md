@@ -160,6 +160,20 @@ The cluster runner starts a three-node route mesh, connects only to the seed,
 checks the advertised client URLs, kills the seed, verifies recovery to a
 discovered peer, then kills that active peer and verifies recovery to the last
 node with subscription replay.
+The system-account runner extends that routed check to privileged account
+administration, server/account monitoring, system events, reload, and the same
+failover path. Its matrix covers username/password, username/password over
+TLS, NKey, NKey over TLS, JWT, JWT over TLS, and certificate-mapped mTLS across
+`nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` (21 cases by default). Set
+`NATS_SYSTEM_SERVER_IMAGES` or `NATS_SYSTEM_AUTH_MODES` to select a bounded
+subset; the runner refuses uncached images. JWT resolver accounts have dynamic
+public IDs, so the test derives both the account request target and event
+subject from the generated resolver configuration. Certificate-mapped mTLS
+uses the explicit `Nats.Auth.tls` handshake mode, which sends an empty
+`CONNECT` while allowing the server to authenticate the transport certificate.
+Simple token authentication is intentionally not a system-account cell because
+the token-only server mode does not select an account-scoped privileged user;
+token authentication remains covered by the ordinary Core acceptance runner.
 The JetStream cluster runner starts a separate three-node full route mesh with
 file-backed, three-replica JetStream state, verifies durable Push delivery and
 acknowledgement before killing the seed, then verifies reconnect, replicated

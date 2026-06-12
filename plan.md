@@ -251,6 +251,16 @@ JetStream Push restart now passes the same five modes across all three
 releases; authenticated multi-node loss and other feature-family combinations
 remain later acceptance increments, with server-version and feature-gate
 differences documented there.
+The routed system-account acceptance matrix now covers seven privileged
+credential/TLS modes—username/password, username/password over TLS, NKey, NKey
+over TLS, JWT, JWT over TLS, and certificate-mapped mTLS—across the same three
+releases, including monitoring, system events, reload, and ordered failover
+recovery (21 cells). The Core auth API exposes `Nats.Auth.tls` separately from
+anonymous authentication so a TLS client certificate can satisfy an
+authentication-required server without putting transport credentials into the
+NATS `CONNECT` payload. Simple token authentication remains outside this
+privileged matrix because the token-only server mode does not select an
+account-scoped system user; it is covered by the ordinary Core acceptance path.
 
 #### F. Define release gates
 
@@ -1109,11 +1119,14 @@ ordinary `nats-eio` package.
 - Completed: add a cached-image system-account matrix for
   `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. It uses the same small
   ephemeral fixture for each release and refuses to pull missing images.
+- Completed: expand the routed system-account matrix to username/password,
+  username/password over TLS, NKey, NKey over TLS, JWT, JWT over TLS, and
+  certificate-mapped mTLS. The 21-cell release/authentication matrix covers
+  monitoring, system events, reload, and failover recovery, and the Core API
+  now models certificate authentication with `Nats.Auth.tls`.
 
 ### Remaining
 
-- Extend the system-account matrix to the other supported credential and TLS
-  modes, then add any version-specific endpoint gates exposed by those modes.
 - Consider operator JWT claims/user-management requests only as a separately
   reviewed authorization feature; they are not part of this first package.
 
