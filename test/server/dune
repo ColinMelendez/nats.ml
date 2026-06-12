@@ -66,3 +66,8 @@
   domain-name
   mirage-crypto-rng.unix
   ptime))
+
+(executable
+ (name server_system)
+ (modules server_system)
+ (libraries nats nats-eio nats-eio-system eio eio_main mtime))
