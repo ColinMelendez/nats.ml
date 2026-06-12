@@ -1101,10 +1101,19 @@ ordinary `nats-eio` package.
   monitoring envelopes, fan-out collection, controls, and event classification,
   plus a real `nats-server` system-account runner covering targeted monitoring,
   fan-out, account monitoring, reload, and a live account-connect event.
+- Completed: parameterize that runner over ordered client endpoints and add a
+  reusable three-node routed system-account fixture. The pinned
+  `nats:2.14.5` scenario now verifies exact system-monitor fan-out, primary
+  loss and Core reconnect, reduced post-failure fan-out, and replay of the
+  account event subscription on a recovered connection.
+- Completed: add a cached-image system-account matrix for
+  `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. It uses the same small
+  ephemeral fixture for each release and refuses to pull missing images.
 
 ### Remaining
 
-- Add authenticated multi-node and cross-version system-account matrices.
+- Extend the system-account matrix to the other supported credential and TLS
+  modes, then add any version-specific endpoint gates exposed by those modes.
 - Consider operator JWT claims/user-management requests only as a separately
   reviewed authorization feature; they are not part of this first package.
 

@@ -102,6 +102,8 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/start-colima.sh
 ./scripts/runtest-server.sh
 ./scripts/runtest-system.sh
+./scripts/runtest-system-cluster.sh
+./scripts/runtest-system-matrix.sh
 ./scripts/runtest-reconnect.sh
 ./scripts/runtest-cluster.sh
 ./scripts/runtest-jetstream-cluster.sh
@@ -139,6 +141,11 @@ NATS_TEST_TLS=1 ./scripts/runtest-interop-service-reconnect.sh
 NATS_TEST_TLS=1 ./scripts/runtest-interop-service-failure.sh
 NATS_TEST_TLS=1 ./scripts/runtest-interop-service-parent-close.sh
 ```
+
+The system-account cluster runner uses three ephemeral routed containers and
+the matrix repeats it over the three pinned NATS releases. These runners
+require the selected images to already be cached; they refuse to pull images
+so that the documented 10 GiB Colima baseline remains bounded.
 
 The script requires Docker and is intentionally outside `dune runtest`; Docker
 is the one integration dependency supplied by the host rather than Nix. The
