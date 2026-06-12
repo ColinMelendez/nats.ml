@@ -11,12 +11,14 @@ type signer = nonce:string -> (string, string) result
 
 type t =
   | Anonymous
+  | Tls
   | Token of string
   | User_pass of { user : string; pass : string }
   | Nkey of { nkey : string; sign : signer }
   | Jwt of { jwt : string; nkey : string; sign : signer }
 
 let none = Anonymous
+let tls = Tls
 let token value = Token value
 let user_pass ~user ~pass = User_pass { user; pass }
 let nkey ~nkey ~sign = Nkey { nkey; sign }
@@ -35,6 +37,7 @@ let connect auth info =
   | Anonymous ->
       if Info.auth_required info then Error Auth_required
       else Ok (Client.Connect.v ())
+  | Tls -> Ok (Client.Connect.v ())
   | Token value -> Ok (Client.Connect.v ~auth_token:value ())
   | User_pass { user; pass } -> Ok (Client.Connect.v ~user ~pass ())
   | Nkey { nkey; sign } ->

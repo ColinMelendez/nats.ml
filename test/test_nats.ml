@@ -86,6 +86,27 @@ let () =
           equal int 4222 (Nats.Endpoint.port endpoint);
           equal string "nats://example.com:4222"
             (Nats.Endpoint.to_string endpoint));
+      test "distinguishes anonymous and TLS certificate authentication"
+        (fun () ->
+          let info =
+            match
+              Nats.Info.of_string
+                {|{"max_payload":1048576,"auth_required":true}|}
+            with
+            | Ok value -> value
+            | Error error ->
+                fail (Format.asprintf "%a" Nats.Info.pp_error error)
+          in
+          (match Nats.Auth.connect Nats.Auth.none info with
+          | Error Nats.Auth.Auth_required -> ()
+          | Ok _ -> fail "anonymous authentication unexpectedly succeeded"
+          | Error error -> fail (Format.asprintf "%a" Nats.Auth.pp_error error));
+          match Nats.Auth.connect Nats.Auth.tls info with
+          | Ok _ -> ()
+          | Error error ->
+              fail
+                (Format.asprintf "TLS certificate authentication: %a"
+                   Nats.Auth.pp_error error));
       test "parses TLS and bracketed IPv6 endpoints" (fun () ->
           let endpoint =
             match Nats.Endpoint.of_string "tls://[2001:DB8::1]:4443" with

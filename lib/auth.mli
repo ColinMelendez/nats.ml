@@ -14,6 +14,12 @@ type t
 val none : t
 (** [none] sends no authentication fields. *)
 
+val tls : t
+(** [tls] sends no authentication fields and permits an authentication-required
+    server to authenticate the connection from its TLS client certificate. The
+    caller must supply a client certificate through the transport TLS
+    configuration. *)
+
 val token : string -> t
 (** [token value] authenticates with a bearer token. *)
 
