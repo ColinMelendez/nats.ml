@@ -22,7 +22,7 @@ channels, and mutable handles.
 | --- | --- |
 | Core connection conveniences | Core protocol, authentication, TLS, discovery, reconnect, drain, and lifecycle events are covered. Go-specific custom dialers, proxy headers, stale-connection tuning, connection statistics, richer introspection, and dynamic callback hooks are not currently exposed. |
 | JetStream resource administration | Account information plus stream and consumer administration/configuration are covered, including placement, persistence mode, message counters, and the material pinned Go SDK fields. |
-| Server-wide administration | Not part of the JetStream API or current client surface. See below. |
+| Server-wide administration | Monitoring and selected controls are covered by the optional `nats-eio-system` package: privileged server/account queries, fan-out collection, reload, client kick/LDM, and system events. Claims, resolver, and user-management operations remain separate work. |
 | JetStream consumption | Pull, push, ordered, fetch-by-bytes, no-wait fetch, flow control, priority groups, and bounded continuous consumption are covered. `Messages`/`Consume` threshold callbacks are represented by Eio backpressure and result ownership. |
 | Key-Value watches | Revision-resumable `Watch` and distinct `Ordered_watch` modes are covered. Ordinary watches retain their weaker recovery contract; ordered watches validate consumer sequence continuity and recover at the next stream revision. |
 | Object Store | Streaming data access, links, metadata, watches, sealing, bucket managers/listers, and file helpers are covered. |
@@ -33,22 +33,25 @@ channels, and mutable handles.
 request/reply namespace. It covers account/domain usage, stream and consumer
 CRUD, listing, message operations, and configuration projection.
 
-General server-wide administration is a separate capability. NATS exposes
-privileged system-account services under subjects such as
+General server-wide administration is a separate capability and package. NATS
+exposes privileged system-account services under subjects such as
 `$SYS.REQ.SERVER.<server-id>.*` and `$SYS.REQ.ACCOUNT.<account-id>.*`; these
 provide monitoring and operational control across servers and accounts. They
 require system-account permissions and have version-specific JSON schemas.
 They are distinct from JetStream administration and from the ordinary
-application client surface. See the [NATS system-account reference](https://github.com/nats-io/nats.docs/blob/master/running-a-nats-service/nats_admin/jwt.md).
+application client surface. The `nats-eio-system` package provides this
+capability without adding a privileged dependency to ordinary `nats-eio`
+applications. See the [NATS system-account reference](https://github.com/nats-io/nats.docs/blob/master/running-a-nats-service/nats_admin/jwt.md).
 
-If server administration becomes a project requirement, it should be added as
-a separate, explicitly privileged module rather than folded into
-`Jetstream`. A useful first slice would define typed requests and responses
-for server/account monitoring endpoints such as `STATZ`, `VARZ`, `CONNZ`,
-`SUBSZ`, `ACCOUNTZ`, and `JSZ`, with selectors for server, cluster, host, and
-tags. Operational mutations such as lameduck, client kick, reload, and
-account-claims updates need a separate authorization and version-compatibility
-review.
+Open a `Nats_eio_system` handle over an existing connection to use typed target
+and selector construction, endpoint-specific monitoring options, monitoring
+endpoints (`VARZ`, `STATZ`, `CONNZ`, `SUBSZ`, `ACCOUNTZ`, `JSZ`, and the other
+server monitor services), reload, client kick/LDM controls, and classified
+`$SYS` events. Responses retain their complete `Jsont.json` payload so callers
+can consume fields introduced by newer servers. The package intentionally does
+not implement operator JWT claims mutation, resolver management, user
+information, or alternate transports; those are separate authorization and
+product decisions.
 
 ### Ordered recovery for Key-Value watches
 
@@ -98,6 +101,7 @@ against a pinned `nats-server` Docker image is available with:
 ```sh
 ./scripts/start-colima.sh
 ./scripts/runtest-server.sh
+./scripts/runtest-system.sh
 ./scripts/runtest-reconnect.sh
 ./scripts/runtest-cluster.sh
 ./scripts/runtest-jetstream-cluster.sh

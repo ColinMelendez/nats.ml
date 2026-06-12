@@ -21,7 +21,7 @@ marked as covered.
 | Authentication and TLS | Covered | The callback/dialer breadth is narrower because credentials and TLS flows are explicit values |
 | Reconnect, discovery, drain | Covered | Lifecycle callbacks and connection statistics use Eio events/results rather than Go callback/stat APIs |
 | JetStream management | Covered for the material v1.52.0 surface | No material protocol gap; future server-only fields remain an acceptance concern |
-| Server-wide administration | Not exposed | The privileged `$SYS` system-account control and monitoring surface is separate from JetStream resource administration and requires its own typed API and authorization model |
+| Server-wide administration | Monitoring and selected controls covered by the optional `nats-eio-system` package | This privileged `$SYS` surface is separate from JetStream and outside the pinned Go JetStream package parity claim; claims, resolver, and user-management operations remain out of scope and explicit system-account authorization is required |
 | JetStream publishing | Covered, including async futures, retries, TTL/schedule headers, atomic and fast batches | Shared async acknowledgement multiplexing is a throughput optimization, not a capability gap |
 | JetStream consumption | Covered: pull, push, ordered, fetch, no-wait, heartbeats, flow control, priority, and continuous consumption | Go callback/channel receive shapes and threshold/error-handler tuning are represented by direct Eio iteration and structured results |
 | Key-Value | Covered: CRUD, CAS, history, ordinary and ordered watches, listers, managers, policy fields, composition, TTL, and purge-marker cleanup | Ordinary and ordered watch behavior remain separate contracts; live cluster failure coverage remains acceptance work |
@@ -83,8 +83,12 @@ This resource-management surface is not general server administration. NATS
 server-wide monitoring and operational control use privileged system-account
 subjects such as `$SYS.REQ.SERVER.<server-id>.*` and
 `$SYS.REQ.ACCOUNT.<account-id>.*`, with separate versioned response schemas.
-They should be modeled as a separate module if this project adopts server
-operations as a goal; see the [NATS system-account reference](https://github.com/nats-io/nats.docs/blob/master/running-a-nats-service/nats_admin/jwt.md).
+The optional `nats-eio-system` package now models those subjects separately,
+including selectors, endpoint-specific monitoring options, targeted and
+fan-out monitoring, reload, client kick/LDM, and classified system events. It
+keeps complete JSON response values so version-specific monitor fields remain
+available. Claims, resolver, and user-management operations remain outside
+this package. See the [NATS system-account reference](https://github.com/nats-io/nats.docs/blob/master/running-a-nats-service/nats_admin/jwt.md).
 
 ## JetStream publishing
 
@@ -225,6 +229,7 @@ These are acceptance and product-scope decisions, not unimplemented Core,
 JetStream, KV, Object Store, or Services wire capabilities in the current
 Eio surface.
 
-One intentionally separate extension remains possible: a privileged
-system-account server-administration module. It is outside the pinned Go
-JetStream parity claim.
+The privileged system-account extension is intentionally separate from the
+`nats-eio` JetStream parity claim. Remaining work there is broader live
+cluster/failure coverage and any future operator-specific claims or
+user-management APIs, not the monitoring/control slice documented above.

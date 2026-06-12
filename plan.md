@@ -1067,7 +1067,48 @@ Services may start after G2 and do not block JetStream,
 KV, or Object Store. Stabilize only after confirming that all service behavior
 composes with the Core connection ownership model.
 
-## Phase 7 — Operational polish and optional integrations
+## Phase 7 — Privileged system-account administration
+
+### Goal
+
+Provide an explicitly optional package for operators who have access to the
+NATS system account, without adding privileged subjects or JSON schemas to the
+ordinary `nats-eio` package.
+
+### Work
+
+- Completed: add the `nats-eio-system` package over the existing Eio Core
+  connection, with validated server/account targets and server-name, cluster,
+  host, exact-match, tag, and JetStream-domain selectors.
+- Completed: cover the current server monitor services and account `INFO`,
+  `STATZ`, and connection-tracking endpoints through targeted or bounded
+  fan-out request/reply. Typed endpoint options cover connection and
+  subscription pagination/details, routing, gateway, leaf-node, account,
+  JetStream, health, profile, IP-queue, and Raft filters. Preserve complete
+  `Jsont.json` response bodies and structured API errors so newer server fields
+  do not become decode failures.
+- Completed: implement targeted configuration reload, client kick, and client
+  lame-duck (`LDM`) controls. Keep control mutations separate from monitoring
+  and require an explicit server target and non-negative client id.
+- Completed: expose scoped `$SYS` event subscriptions for server lifecycle,
+  server statistics/authentication, and account connection/leaf-node events,
+  while retaining unknown event subjects and payloads for forward compatibility.
+- Completed: make shared Eio subscription acquisition cancellation-safe, so a
+  cancellation racing the wire `SUB` setup revokes the created subscription
+  before the cancellation escapes; add a regression test for that ownership
+  boundary.
+- Completed: add local Eio mock coverage for target/selector validation,
+  monitoring envelopes, fan-out collection, controls, and event classification,
+  plus a real `nats-server` system-account runner covering targeted monitoring,
+  fan-out, account monitoring, reload, and a live account-connect event.
+
+### Remaining
+
+- Add authenticated multi-node and cross-version system-account matrices.
+- Consider operator JWT claims/user-management requests only as a separately
+  reviewed authorization feature; they are not part of this first package.
+
+## Phase 8 — Operational polish and optional integrations
 
 Only pursue these after the core feature waves are stable and a concrete user
 needs them:
