@@ -28,8 +28,8 @@ let auth_required_info_wire =
   ^ "\r\n"
 
 let delivery_wire ~sid ~subject payload =
-  Format.asprintf "MSG %s %d %d\r\n%s\r\n" subject sid
-    (String.length payload) payload
+  Format.asprintf "MSG %s %d %d\r\n%s\r\n" subject sid (String.length payload)
+    payload
 
 let expect_ok = function
   | Ok value -> value
@@ -516,23 +516,32 @@ let () =
               expect_ok (Eio.Promise.await iter_result);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
-      test "subscription drain preserves queued messages until the barrier"
-        (fun () ->
-          let messages, messages_u = Eio.Promise.create () in
+      test
+        "subscription drain preserves queued and in-flight messages until the \
+         barrier" (fun () ->
+          let messages_before, messages_before_u = Eio.Promise.create () in
+          let messages_after, messages_after_u = Eio.Promise.create () in
           let pong, pong_u = Eio.Promise.create () in
           let first, first_u = Eio.Promise.create () in
           let second, second_u = Eio.Promise.create () in
+          let third, third_u = Eio.Promise.create () in
           let iter_result, iter_result_u = Eio.Promise.create () in
           let drain_result, drain_result_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
           with_connection
             ~reads:
-              [ `Return info_wire; `Await messages; `Await pong; `Await hold ]
+              [
+                `Return info_wire;
+                `Await messages_before;
+                `Await messages_after;
+                `Await pong;
+                `Await hold;
+              ]
             (fun ~sw connection ->
               let subscription =
                 expect_ok (Nats_eio.Connection.subscribe connection filter)
               in
-              Eio.Promise.resolve messages_u
+              Eio.Promise.resolve messages_before_u
                 (Ok
                    ("MSG orders.created 1 1\r\na\r\n"
                   ^ "MSG orders.created 1 1\r\nb\r\n"));
@@ -552,10 +561,16 @@ let () =
                          | 1 ->
                              Eio.Promise.resolve second_u
                                (Nats.Message.payload delivery.message)
+                         | 2 ->
+                             Eio.Promise.resolve third_u
+                               (Nats.Message.payload delivery.message)
                          | _ -> ());
                          count := !count + 1)));
+              Eio.Promise.resolve messages_after_u
+                (Ok "MSG orders.created 1 1\r\nc\r\n");
               equal string "a" (Eio.Promise.await first);
               equal string "b" (Eio.Promise.await second);
+              equal string "c" (Eio.Promise.await third);
               Eio.Promise.resolve pong_u (Ok "PONG\r\n");
               expect_ok (Eio.Promise.await drain_result);
               expect_ok (Eio.Promise.await iter_result);
@@ -912,7 +927,8 @@ let () =
             (fun ~sw connection ->
               Eio.Switch.check sw;
               (match
-                 Nats_eio.Connection.subscribe connection ~pending_bytes:0 filter
+                 Nats_eio.Connection.subscribe connection ~pending_bytes:0
+                   filter
                with
               | Error
                   (Nats_eio.Error.Invalid_pending_limit
@@ -932,11 +948,9 @@ let () =
                 (Ok
                    (delivery_wire ~sid:1 ~subject:"orders.created" "aa"
                    ^ delivery_wire ~sid:1 ~subject:"orders.created" "b"));
-              let first =
-                expect_ok (Nats_eio.Subscription.next subscription)
-              in
+              let first = expect_ok (Nats_eio.Subscription.next subscription) in
               equal string "aa" (Nats.Message.payload first.message);
-              (match Nats_eio.Subscription.next subscription with
+              match Nats_eio.Subscription.next subscription with
               | Error
                   (Nats_eio.Error.Slow_consumer
                      (Nats_eio.Error.Subscription { sid = 1 })) ->
@@ -949,7 +963,7 @@ let () =
               | Error error ->
                   fail
                     (Format.asprintf "expected slow consumer, got %a"
-                       Nats_eio.Error.pp error))));
+                       Nats_eio.Error.pp error)));
       test "a full event stream reports a slow consumer" (fun () ->
           let extra_info, extra_info_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
@@ -1777,7 +1791,8 @@ let () =
           equal string "after" (Nats.Message.payload delivery.message);
           expect_ok (Nats_eio.Connection.close connection);
           Eio.Promise.resolve hold_u (Error End_of_file));
-      test "shared configs derive independent reconnect jitter streams" (fun () ->
+      test "shared configs derive independent reconnect jitter streams"
+        (fun () ->
           Eio_mock.Backend.run_full @@ fun env ->
           let disconnect_a, disconnect_a_u = Eio.Promise.create () in
           let disconnect_b, disconnect_b_u = Eio.Promise.create () in
@@ -1792,12 +1807,15 @@ let () =
           Eio_mock.Flow.on_read second_a [ `Return info_wire; `Await hold_a ];
           let net_a = make_net "jitter-network-a" in
           Eio_mock.Net.on_connect net_a
-            [ `Return first_a;
+            [
+              `Return first_a;
               `Raise End_of_file;
-              `Run (fun () ->
-                let now = Eio.Time.Mono.now env#mono_clock in
-                Eio.Promise.resolve redial_a_u now;
-                second_a) ];
+              `Run
+                (fun () ->
+                  let now = Eio.Time.Mono.now env#mono_clock in
+                  Eio.Promise.resolve redial_a_u now;
+                  second_a);
+            ];
           let first_b = Eio_mock.Flow.make "jitter-first-b" in
           Eio_mock.Flow.on_read first_b
             [ `Return info_wire; `Await disconnect_b ];
@@ -1805,30 +1823,34 @@ let () =
           Eio_mock.Flow.on_read second_b [ `Return info_wire; `Await hold_b ];
           let net_b = make_net "jitter-network-b" in
           Eio_mock.Net.on_connect net_b
-            [ `Return first_b;
+            [
+              `Return first_b;
               `Raise End_of_file;
-              `Run (fun () ->
-                let now = Eio.Time.Mono.now env#mono_clock in
-                Eio.Promise.resolve redial_b_u now;
-                second_b) ];
+              `Run
+                (fun () ->
+                  let now = Eio.Time.Mono.now env#mono_clock in
+                  Eio.Promise.resolve redial_b_u now;
+                  second_b);
+            ];
           let config =
             expect_ok
               (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 3)
                  ~reconnect_delay:Mtime.Span.(1 * ms)
                  ~reconnect_max_delay:Mtime.Span.(10 * ms)
                  ~reconnect_jitter:Mtime.Span.(1 * ms)
-                 ~random:(Random.State.make [| 7 |]) ())
+                 ~random:(Random.State.make [| 7 |])
+                 ())
           in
           Eio.Switch.run @@ fun sw ->
           let connection_a =
             expect_ok
-              (Nats_eio.Connection.connect ~sw ~net:net_a
-                 ~clock:env#mono_clock ~config [ endpoint ])
+              (Nats_eio.Connection.connect ~sw ~net:net_a ~clock:env#mono_clock
+                 ~config [ endpoint ])
           in
           let connection_b =
             expect_ok
-              (Nats_eio.Connection.connect ~sw ~net:net_b
-                 ~clock:env#mono_clock ~config [ endpoint ])
+              (Nats_eio.Connection.connect ~sw ~net:net_b ~clock:env#mono_clock
+                 ~config [ endpoint ])
           in
           Eio.Promise.resolve disconnect_a_u (Error End_of_file);
           Eio.Promise.resolve disconnect_b_u (Error End_of_file);

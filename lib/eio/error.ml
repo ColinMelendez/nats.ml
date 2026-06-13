@@ -10,6 +10,7 @@ type t =
   | Invalid_chunk_size of int
   | Invalid_inbox_prefix of Nats.Subject.error
   | Invalid_reconnect_attempts of int
+  | Invalid_retry_attempts of int
   | Invalid_reconnect_delay of {
       initial : Mtime.Span.t;
       maximum : Mtime.Span.t;
@@ -49,6 +50,8 @@ let pp ppf = function
       Format.fprintf ppf "invalid inbox prefix: %a" Nats.Subject.pp_error error
   | Invalid_reconnect_attempts value ->
       Format.fprintf ppf "invalid reconnect attempt limit %d" value
+  | Invalid_retry_attempts value ->
+      Format.fprintf ppf "invalid request retry attempt limit %d" value
   | Invalid_reconnect_delay { initial; maximum } ->
       Format.fprintf ppf "reconnect delay %a exceeds maximum %a" Mtime.Span.pp
         initial Mtime.Span.pp maximum

@@ -251,6 +251,7 @@ module Subscription = struct
     mutable terminal : Error.t option;
     mutable done_seen : bool;
     mutable active : bool;
+    mutable drain_requested : bool;
     mutable drain_waiter : subscription_drain_waiter option;
     mutable drain_promise : (unit, Error.t) result Eio.Promise.t option;
     mutable drain_resolver : (unit, Error.t) result Eio.Promise.u option;
@@ -293,6 +294,7 @@ module Subscription = struct
       terminal = None;
       done_seen = false;
       active = true;
+      drain_requested = false;
       drain_waiter = None;
       drain_promise = None;
       drain_resolver = None;
@@ -391,7 +393,8 @@ module Subscription = struct
 
   let clear_drain_state t =
     t.drain_promise <- None;
-    t.drain_resolver <- None
+    t.drain_resolver <- None;
+    t.drain_requested <- false
 
   let record_drain_result t result = t.drain_result <- Some result
 
@@ -425,17 +428,13 @@ module Subscription = struct
       signal_recovery t);
     fail_pending_drain t error
 
-  let terminate_for_drain t =
+  let terminate_after_drain t =
     t.active <- false;
+    t.drain_requested <- false;
     if Option.is_none t.terminal then (
       t.terminal <- Some Error.Closed;
       Eio.Stream.add t.queue (Done Error.Closed);
-      signal_recovery t);
-    match t.drain_waiter with
-    | None -> ()
-    | Some waiter ->
-        waiter.done_seen <- true;
-        if waiter.server_flushed then complete_drain t waiter (Ok ())
+      signal_recovery t)
 
   let terminal_error t =
     match t.terminal with Some error -> Error error | None -> assert false
@@ -579,10 +578,15 @@ module Subscription = struct
     in
     wait ()
 
-  let unsubscribe t = if not t.active then Ok () else t.unsubscribe_request ()
+  let unsubscribe t =
+    if not t.active then Ok ()
+    else if t.drain_requested then Error Error.Draining
+    else t.unsubscribe_request ()
 
   let auto_unsubscribe t ~max_messages =
-    if not t.active then Ok () else t.auto_unsubscribe_request ~max_messages
+    if not t.active then Ok ()
+    else if t.drain_requested then Error Error.Draining
+    else t.auto_unsubscribe_request ~max_messages
 
   let drain ?timeout t =
     match t.drain_promise with
@@ -596,6 +600,7 @@ module Subscription = struct
               let promise, resolver = Eio.Promise.create () in
               t.drain_promise <- Some promise;
               t.drain_resolver <- Some resolver;
+              t.drain_requested <- true;
               match t.drain_request ~timeout ~promise ~resolver with
               | Error error ->
                   clear_drain_state t;
@@ -985,9 +990,9 @@ let finish t error =
     | Error.Slow_consumer kind ->
         Event_stream.push_terminal t.events (Event.Slow_consumer kind)
     | Error.Invalid_endpoints | Error.Invalid_capacity _
-    | Error.Invalid_pending_limit _
-    | Error.Command_queue_full _ | Error.Invalid_chunk_size _
-    | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
+    | Error.Invalid_pending_limit _ | Error.Command_queue_full _
+    | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
+    | Error.Invalid_reconnect_attempts _ | Error.Invalid_retry_attempts _
     | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
     | Error.Invalid_timeout _ | Error.No_responders | Error.Auth _ ->
         ()
@@ -1081,6 +1086,12 @@ let attach_replayed_subscriptions t =
         Subscription.attach subscription)
     t.subscriptions
 
+let core_has_subscription t sid =
+  List.exists
+    (fun (subscription : Nats.Client.subscription) ->
+      Int.equal sid subscription.sid)
+    (Nats.Client.subscriptions t.state)
+
 let handle_event t event =
   match event with
   | Nats.Event.Info info ->
@@ -1141,8 +1152,9 @@ let handle_event t event =
                   Subscription.complete_drain_waiter waiter (Error Error.Closed);
                   Ok ()
               | Some subscription ->
-                  if waiter.done_seen then
-                    Subscription.complete_drain subscription waiter (Ok ())
+                  if
+                    waiter.done_seen || not (core_has_subscription t waiter.sid)
+                  then Subscription.complete_drain subscription waiter (Ok ())
                   else Hashtbl.replace t.subscription_drains waiter.sid waiter;
                   Ok ()))
   | Nats.Event.Closed -> Ok ()
@@ -1616,8 +1628,7 @@ let apply_outgoing t command =
               let subscription =
                 Subscription.create ~sid
                   ~capacity:t.config.subscription_capacity ~pending_messages
-                  ~pending_bytes ~unsubscribe_request
-                  ~replay_on_reconnect
+                  ~pending_bytes ~unsubscribe_request ~replay_on_reconnect
                   ~auto_unsubscribe_request:(fun ~max_messages ->
                     if t.closed then Error Error.Closed
                     else if
@@ -1730,7 +1741,9 @@ let apply_outgoing t command =
                   on_complete =
                     (fun result ->
                       Subscription.record_drain_result subscription result;
+                      Subscription.terminate_after_drain subscription;
                       Subscription.clear_drain_state subscription;
+                      t.state <- Nats.Client.forget_subscription t.state sid;
                       Hashtbl.remove t.subscription_drains sid;
                       Hashtbl.remove t.subscriptions sid);
                 }
@@ -1738,7 +1751,8 @@ let apply_outgoing t command =
               Subscription.arm_drain subscription waiter;
               Hashtbl.replace t.subscription_drains sid waiter;
               match
-                Nats.Client.outgoing t.state (Nats.Client.Unsubscribe { sid })
+                Nats.Client.outgoing t.state
+                  (Nats.Client.Drain_subscription { sid })
               with
               | Error (Nats.Error.Unknown_subscription _) ->
                   t.state <- Nats.Client.forget_subscription t.state sid;
@@ -1755,23 +1769,9 @@ let apply_outgoing t command =
                       Subscription.complete_drain subscription waiter
                         (Error error);
                       Error error
-                  | Ok () -> (
-                      Subscription.terminate_for_drain subscription;
-                      match Nats.Client.outgoing t.state Nats.Client.Flush with
-                      | Error error ->
-                          Subscription.complete_drain subscription waiter
-                            (Error (command_error error));
-                          Ok ()
-                      | Ok flush_transition -> (
-                          match apply_transition t flush_transition with
-                          | Error error ->
-                              Subscription.complete_drain subscription waiter
-                                (Error error);
-                              Error error
-                          | Ok () ->
-                              Queue.add (Subscription_drain_waiter waiter)
-                                t.barriers;
-                              Ok ()))))))
+                  | Ok () ->
+                      Queue.add (Subscription_drain_waiter waiter) t.barriers;
+                      Ok ()))))
   | Cancel_subscription_drain { sid } -> (
       match Hashtbl.find_opt t.subscriptions sid with
       | None -> Ok ()
@@ -2101,9 +2101,9 @@ let may_recover t =
 let recoverable_transport_error = function
   | Error.Disconnected | Error.Io _ -> true
   | Error.Invalid_endpoints | Error.Invalid_capacity _
-  | Error.Invalid_pending_limit _
-  | Error.Command_queue_full _ | Error.Invalid_chunk_size _
-  | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
+  | Error.Invalid_pending_limit _ | Error.Command_queue_full _
+  | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
+  | Error.Invalid_reconnect_attempts _ | Error.Invalid_retry_attempts _
   | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
   | Error.Invalid_timeout _ | Error.Tls_required | Error.Tls_unexpected_input
   | Error.Tls _ | Error.Timeout | Error.Slow_consumer _ | Error.Auth _
@@ -2115,9 +2115,9 @@ let reconnectable_attempt_error = function
     ->
       true
   | Error.Invalid_endpoints | Error.Invalid_capacity _
-  | Error.Invalid_pending_limit _
-  | Error.Command_queue_full _ | Error.Invalid_chunk_size _
-  | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
+  | Error.Invalid_pending_limit _ | Error.Command_queue_full _
+  | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
+  | Error.Invalid_reconnect_attempts _ | Error.Invalid_retry_attempts _
   | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
   | Error.Invalid_timeout _ | Error.Tls_required | Error.Tls_unexpected_input
   | Error.Slow_consumer _ | Error.Protocol _ | Error.No_responders
@@ -2435,9 +2435,9 @@ let initial_connect_retryable = function
   | Error.Tls_required | Error.Tls_unexpected_input | Error.Auth _ ->
       true
   | Error.Invalid_endpoints | Error.Invalid_capacity _
-  | Error.Invalid_pending_limit _
-  | Error.Command_queue_full _ | Error.Invalid_chunk_size _
-  | Error.Invalid_inbox_prefix _ | Error.Invalid_reconnect_attempts _
+  | Error.Invalid_pending_limit _ | Error.Command_queue_full _
+  | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
+  | Error.Invalid_reconnect_attempts _ | Error.Invalid_retry_attempts _
   | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
   | Error.Invalid_timeout _ | Error.Slow_consumer _ | Error.Protocol _
   | Error.No_responders | Error.Draining | Error.Closed ->
@@ -2574,16 +2574,22 @@ let request_async ?timeout t message =
       let setup_result =
         try
           Eio.Cancel.protect (fun () ->
-              send t
-                (Request
-                   {
-                     message;
-                     timeout;
-                     setup = setup_resolver;
-                     resolver = response_resolver;
-                     cancelled;
-                   })
-                setup)
+              let result =
+                send t
+                  (Request
+                     {
+                       message;
+                       timeout;
+                       setup = setup_resolver;
+                       resolver = response_resolver;
+                       cancelled;
+                     })
+                  setup
+              in
+              (match result with
+              | Error _ -> ()
+              | Ok request_sid -> sid := Some request_sid);
+              result)
         with Eio.Cancel.Cancelled _ as cancellation ->
           cancelled := true;
           (match !sid with
@@ -2613,8 +2619,8 @@ let request_msg_retry ?timeout ~retry_wait ~retry_attempts t message =
   | Ok _ -> (
       match retry_attempts with
       | Some attempts when Int.compare attempts 0 < 0 ->
-          Error (Error.Invalid_reconnect_attempts attempts)
-      | _ ->
+          Error (Error.Invalid_retry_attempts attempts)
+      | _ -> (
           let deadline =
             match timeout with
             | None -> Ok None
@@ -2662,20 +2668,20 @@ let request_msg_retry ?timeout ~retry_wait ~retry_attempts t message =
                 | Error error -> Error error
                 | Ok timeout -> (
                     match request_msg ?timeout t message with
-                    | (Error Error.No_responders as result) ->
+                    | Error Error.No_responders as result -> (
                         let should_retry =
                           match retry_attempts with
                           | None -> true
                           | Some attempts -> Int.compare retries attempts < 0
                         in
                         if not should_retry then result
-                        else (
+                        else
                           match wait_before_retry () with
                           | Error error -> Error error
                           | Ok () -> loop (retries + 1))
                     | result -> result)
               in
-              loop 0)
+              loop 0))
 
 let request ?timeout ?(headers = Nats.Header.empty) t subject payload =
   request_msg ?timeout t (Nats.Message.v ~subject ~headers payload)

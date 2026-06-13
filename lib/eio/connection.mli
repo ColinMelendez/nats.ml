@@ -47,6 +47,10 @@ module Event_stream : sig
   type t
 
   val next : t -> (Event.t, Error.t) result
+  (** [next events] returns the next lifecycle or Core event. During reconnect,
+      stale Core events from the failed transport are suppressed; the
+      replacement [INFO] and [Connected] sequence is emitted with the
+      [Reconnected] event. *)
 end
 
 module Subscription : sig
@@ -135,9 +139,14 @@ val connect :
     resolved again for every pass. Each [INFO] replaces the discovered candidate
     set while retaining configured seeds; malformed advertisements are ignored.
     The list must be non-empty. A [tls] endpoint requires [Config.tls] and
-    performs TLS before the NATS handshake. *)
+    performs TLS before the NATS handshake. A successful result means that the
+    initial CONNECT has been written and the event stream is active; server
+    authorization failures are reported asynchronously as Core server-error
+    events. *)
 
 val publish_msg : t -> Nats.Message.t -> (unit, Error.t) result
+(** [publish_msg connection message] fails with [Disconnected] while a
+    reconnect is in progress; Core publishes are not buffered or replayed. *)
 
 val publish :
   t ->
@@ -146,6 +155,8 @@ val publish :
   Nats.Subject.t ->
   string ->
   (unit, Error.t) result
+  (** [publish connection ...] has the same reconnect and no-replay contract as
+      {!publish_msg}. *)
 
 val subscribe :
   t ->
@@ -159,8 +170,9 @@ val subscribe :
     subscription, such as a pull-reply inbox, that is terminated with
     [Disconnected] rather than restored after a transport loss. The default is
     [true], preserving ordinary subscription replay. A blocked subscription read
-    and an in-flight drain receive [Disconnected]; already queued deliveries
-    remain available before the terminal marker. [pending_messages] and
+    and an in-flight drain receive [Disconnected]; deliveries already queued
+    or accepted by the server before the drain barrier remain available before
+    the terminal marker. [pending_messages] and
     [pending_bytes] optionally constrain queued deliveries; each value must be
     positive or [-1], where [-1] disables that endpoint-specific limit. A
     connection's own bounded queue capacity remains in force. Subscription
@@ -214,7 +226,8 @@ val request_msg_retry :
 (** [request_msg_retry ?timeout ~retry_wait ~retry_attempts connection message]
     retries only [No_responders] failures. [retry_attempts] counts retries
     after the initial request; [None] retries without a limit. The wait uses
-    the connection's monotonic clock and remains cancellation-safe. *)
+    the connection's monotonic clock and remains cancellation-safe. A negative
+    [retry_attempts] is rejected with [Invalid_retry_attempts]. *)
 
 val flush : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
 val drain : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
