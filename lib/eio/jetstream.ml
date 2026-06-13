@@ -7464,12 +7464,21 @@ module Consumer = struct
     let recreate ordered ~deadline =
       stop_current_pull ordered;
       let attempts = ref 0 in
+      let cleanup_attempts = ref 0 in
       let last_error = ref None in
       let rec attempt ~torn_down =
         match await_connection ordered ~deadline with
         | Error error -> Error { error; torn_down }
         | Ok () -> (
             match cleanup_current_consumer ordered ~deadline with
+            | Error error when reconnectable_recreate_error error ->
+                (match ordered.max_reset_attempts with
+                | Some limit when !cleanup_attempts >= limit ->
+                    Error { error; torn_down }
+                | _ ->
+                    incr cleanup_attempts;
+                    last_error := Some error;
+                    attempt ~torn_down)
             | Error error -> Error { error; torn_down }
             | Ok () ->
                 let torn_down = true in

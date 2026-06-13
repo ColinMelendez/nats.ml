@@ -4792,11 +4792,111 @@ let () =
               expect_jetstream_ok (Eio.Promise.await close_result);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "ordered cleanup retries honor reset limits" (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let first_delivery, first_delivery_u = Eio.Promise.create () in
+          let gap_delivery, gap_delivery_u = Eio.Promise.create () in
+          let first_delete, first_delete_u = Eio.Promise.create () in
+          let second_delete, second_delete_u = Eio.Promise.create () in
+          let final_delete, final_delete_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced_clock
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await first_delivery;
+                `Await gap_delivery;
+                `Await first_delete;
+                `Await second_delete;
+                `Await final_delete;
+                `Await hold;
+              ]
+            (fun ~sw ~trace ~clock connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"ORDERS")
+              in
+              let ordered_result, ordered_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve ordered_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ~batch:1
+                       ~expires:Mtime.Span.(10 * ms)
+                       ~idle_heartbeat:Mtime.Span.(1 * ms)
+                       ~max_reset_attempts:1 ~name_prefix:"ordered"
+                       stream));
+              yield_n 5;
+              Eio.Promise.resolve create_response_u
+                (Ok
+                   (ordered_create_wire ~sid:1 ~name:"ordered_1"
+                      ~deliver_policy:"all" ()));
+              let ordered =
+                expect_jetstream_ok (Eio.Promise.await ordered_result)
+              in
+              let first_result, first_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve first_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.next ordered));
+              yield_n 5;
+              Eio.Promise.resolve first_delivery_u
+                (Ok
+                   (ordered_delivery_wire ~sid:2 ~consumer:"ordered_1"
+                      ~stream_sequence:10L ~consumer_sequence:1L "first"));
+              ignore (expect_jetstream_ok (Eio.Promise.await first_result));
+              let recovery_result, recovery_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve recovery_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.next_with_timeout
+                       ~timeout:Mtime.Span.(1 * s) ordered));
+              yield_n 5;
+              Eio.Promise.resolve gap_delivery_u
+                (Ok
+                   (ordered_delivery_wire ~sid:2 ~consumer:"ordered_1"
+                      ~stream_sequence:12L ~consumer_sequence:3L "gap"));
+              wait_for_trace ~clock ~trace
+                ~needle:"wrote \"PUB $JS.API.CONSUMER.DELETE.ORDERS.ordered_1"
+                ~count:1;
+              Eio.Promise.resolve first_delete_u
+                (Ok
+                   (api_error_wire ~sid:3 ~code:503 ~err_code:10008
+                      ~description:"JetStream not available"));
+              wait_for_trace ~clock ~trace
+                ~needle:"wrote \"PUB $JS.API.CONSUMER.DELETE.ORDERS.ordered_1"
+                ~count:2;
+              Eio.Promise.resolve second_delete_u
+                (Ok
+                   (api_error_wire ~sid:4 ~code:503 ~err_code:10008
+                      ~description:"JetStream not available"));
+              (match Eio.Promise.await recovery_result with
+              | Error
+                  (Nats_eio.Jetstream.Error.Api
+                     { code = 503; err_code = Some 10008; _ }) ->
+                  ()
+              | Ok _ -> fail "ordered recovery unexpectedly returned a message"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected ordered recovery result: %a"
+                       Nats_eio.Jetstream.Error.pp error));
+              let close_result, close_result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve close_result_u
+                    (Nats_eio.Jetstream.Consumer.Ordered.close ordered));
+              wait_for_trace ~clock ~trace
+                ~needle:"wrote \"PUB $JS.API.CONSUMER.DELETE.ORDERS.ordered_1"
+                ~count:3;
+              Eio.Promise.resolve final_delete_u (Ok (api_ok_wire ~sid:5));
+              expect_jetstream_ok (Eio.Promise.await close_result);
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "ordered consumer recreates after transport reconnect" (fun () ->
           let create_response, create_response_u = Eio.Promise.create () in
           let first_delivery, first_delivery_u = Eio.Promise.create () in
           let disconnect, disconnect_u = Eio.Promise.create () in
           let reconnect_info, reconnect_info_u = Eio.Promise.create () in
+          let transient_delete, transient_delete_u = Eio.Promise.create () in
           let previous_delete, previous_delete_u = Eio.Promise.create () in
           let transient_create, transient_create_u = Eio.Promise.create () in
           let recreated, recreated_u = Eio.Promise.create () in
@@ -4814,6 +4914,7 @@ let () =
             ~second_reads:
               [
                 `Await reconnect_info;
+                `Await transient_delete;
                 `Await previous_delete;
                 `Await transient_create;
                 `Await recreated;
@@ -4860,30 +4961,37 @@ let () =
               in
               equal string "before-reconnect"
                 (Nats_eio.Jetstream.Msg.payload first);
+              Eio.Promise.resolve disconnect_u (Error End_of_file);
+              wait_for_trace ~clock ~trace
+                ~needle:"jetstream-reconnect-network: connect to tcp" ~count:2;
+              Eio.Promise.resolve reconnect_info_u (Ok info_wire);
               let second_result, second_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve second_result_u
                     (Nats_eio.Jetstream.Consumer.Ordered.next ordered));
               yield_n 5;
-              Eio.Promise.resolve disconnect_u (Error End_of_file);
-              wait_for_trace ~clock ~trace
-                ~needle:"jetstream-reconnect-network: connect to tcp" ~count:2;
-              Eio.Promise.resolve reconnect_info_u (Ok info_wire);
               wait_for_trace ~clock ~trace
                 ~needle:"wrote \"PUB $JS.API.CONSUMER.DELETE.ORDERS.ordered_1"
                 ~count:1;
-              Eio.Promise.resolve previous_delete_u (Ok (api_ok_wire ~sid:3));
+              Eio.Promise.resolve transient_delete_u
+                (Ok
+                   (api_error_wire ~sid:3 ~code:503 ~err_code:10008
+                      ~description:"JetStream not available"));
+              wait_for_trace ~clock ~trace
+                ~needle:"wrote \"PUB $JS.API.CONSUMER.DELETE.ORDERS.ordered_1"
+                ~count:2;
+              Eio.Promise.resolve previous_delete_u (Ok (api_ok_wire ~sid:4));
               wait_for_trace ~clock ~trace
                 ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS" ~count:2;
               Eio.Promise.resolve transient_create_u
                 (Ok
-                   (api_error_wire ~sid:4 ~code:503 ~err_code:10008
+                   (api_error_wire ~sid:5 ~code:503 ~err_code:10008
                       ~description:"JetStream not available"));
               wait_for_trace ~clock ~trace
                 ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS" ~count:3;
               Eio.Promise.resolve recreated_u
                 (Ok
-                   (ordered_create_wire ~sid:5 ~name:"ordered_3"
+                   (ordered_create_wire ~sid:6 ~name:"ordered_3"
                       ~deliver_policy:"by_start_sequence" ~opt_start_seq:11L ()));
               if
                 not
@@ -4897,7 +5005,7 @@ let () =
                 ~count:1;
               Eio.Promise.resolve second_delivery_u
                 (Ok
-                   (ordered_delivery_wire ~sid:6 ~consumer:"ordered_3"
+                   (ordered_delivery_wire ~sid:7 ~consumer:"ordered_3"
                       ~stream_sequence:11L ~consumer_sequence:1L
                       "after-reconnect"));
               let second =
@@ -4912,7 +5020,7 @@ let () =
               wait_for_trace ~clock ~trace
                 ~needle:"wrote \"PUB $JS.API.CONSUMER.DELETE.ORDERS.ordered_3"
                 ~count:1;
-              Eio.Promise.resolve final_delete_u (Ok (api_ok_wire ~sid:7));
+              Eio.Promise.resolve final_delete_u (Ok (api_ok_wire ~sid:8));
               expect_jetstream_ok (Eio.Promise.await close_result);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
