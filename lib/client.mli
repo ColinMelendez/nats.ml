@@ -26,6 +26,7 @@ type command =
     }
   | Unsubscribe of { sid : int }
   | Auto_unsubscribe of { sid : int; max_messages : int }
+  | Drain_subscription of { sid : int }
   | Flush
   | Drain
   | Close

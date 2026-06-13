@@ -360,6 +360,24 @@ let () =
             | Nats.Error.Max_payload_exceeded { size = 101; limit = 100 } ->
                 true
             | _ -> false));
+      test "HPUB max_payload includes the encoded headers" (fun () ->
+          let connected = connected_client () in
+          let headers =
+            match Nats.Header.of_list [ ("X-Test", "header") ] with
+            | Ok value -> value
+            | Error error -> fail_with Nats.Header.pp_error error
+          in
+          let message =
+            Nats.Message.v
+              ~subject:(Nats.Subject.literal "orders.created")
+              ~headers (String.make 90 'x')
+          in
+          expect_error
+            (Nats.Client.outgoing connected.state (Nats.Client.Publish message))
+            (function
+            | Nats.Error.Max_payload_exceeded { size; limit = 100 } ->
+                size > 100
+            | _ -> false));
       test "headers are rejected when the server did not negotiate them"
         (fun () ->
           let client = Nats.Client.v (expect_config (Nats.Config.v ())) in
@@ -542,7 +560,8 @@ let () =
           let info =
             expect_client
               (Nats.Client.incoming ~eod:true client ~now:Mtime.min_stamp
-                 (Bytesrw.Bytes.Reader.of_string "INFO {\"max_payload\":100}\r\n"))
+                 (Bytesrw.Bytes.Reader.of_string
+                    "INFO {\"max_payload\":100}\r\n"))
           in
           let connected =
             expect_client
@@ -562,9 +581,17 @@ let () =
           let flushed =
             expect_client (Nats.Client.outgoing pinged.state Nats.Client.Flush)
           in
-          let completed =
+          let liveness_pong =
             expect_client
               (Nats.Client.incoming ~eod:true flushed.state ~now:deadline
+                 (Bytesrw.Bytes.Reader.of_string "PONG\r\n"))
+          in
+          (match liveness_pong.events with
+          | [] -> ()
+          | _ -> fail "expected the liveness PONG to remain silent");
+          let completed =
+            expect_client
+              (Nats.Client.incoming ~eod:true liveness_pong.state ~now:deadline
                  (Bytesrw.Bytes.Reader.of_string "PONG\r\n"))
           in
           (match completed.events with
@@ -575,7 +602,9 @@ let () =
             | Some value -> value
             | None -> fail "expected the next liveness deadline"
           in
-          let next_ping = Nats.Client.timer completed.state ~now:next_deadline in
+          let next_ping =
+            Nats.Client.timer completed.state ~now:next_deadline
+          in
           match (Nats.Client.phase next_ping.state, next_ping.output) with
           | Nats.Client.Connected, [ output ] -> equal string "PING\r\n" output
           | Nats.Client.Closed, _ ->
@@ -591,7 +620,8 @@ let () =
           let info =
             expect_client
               (Nats.Client.incoming ~eod:true client ~now:Mtime.min_stamp
-                 (Bytesrw.Bytes.Reader.of_string "INFO {\"max_payload\":100}\r\n"))
+                 (Bytesrw.Bytes.Reader.of_string
+                    "INFO {\"max_payload\":100}\r\n"))
           in
           let connected =
             expect_client
@@ -688,7 +718,7 @@ let () =
           (match draining.events with
           | [ Nats.Event.Draining ] -> ()
           | _ -> fail "expected draining event");
-          equal int 0 (List.length (Nats.Client.subscriptions draining.state));
+          equal int 2 (List.length (Nats.Client.subscriptions draining.state));
           (match Nats.Client.next_timeout draining.state with
           | None -> ()
           | Some _ -> fail "draining state retained a liveness deadline");
@@ -711,6 +741,7 @@ let () =
           (match drain_ack.events with
           | [ Nats.Event.Flush_completed ] -> ()
           | _ -> fail "expected the drain flush completion");
+          equal int 0 (List.length (Nats.Client.subscriptions drain_ack.state));
           let flushed =
             expect_client
               (Nats.Client.outgoing drain_ack.state Nats.Client.Flush)

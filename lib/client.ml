@@ -99,15 +99,29 @@ type subscription = {
   remaining : int option;
 }
 
+type ping_origin = Liveness | Flush | Drain | Subscription_drain of int
+type ping_queue = { front : ping_origin list; back : ping_origin list }
+
+let empty_ping_queue = { front = []; back = [] }
+let enqueue_ping queue origin = { queue with back = origin :: queue.back }
+
+let take_ping queue =
+  match queue.front with
+  | origin :: front -> Some (origin, { queue with front })
+  | [] -> (
+      match List.rev queue.back with
+      | [] -> None
+      | origin :: front -> Some (origin, { front; back = [] }))
+
 type t = {
   config : Config.t;
   phase : phase;
   info : Info.t option;
   next_sid : int;
   subscriptions : subscription list;
-  pending_flushes : int;
+  draining_subscriptions : int list;
+  pending_pings : ping_queue;
   pending_liveness_pings : int;
-  pending_liveness_responses : int;
   next_ping : Mtime.t option;
 }
 
@@ -120,6 +134,7 @@ type command =
     }
   | Unsubscribe of { sid : int }
   | Auto_unsubscribe of { sid : int; max_messages : int }
+  | Drain_subscription of { sid : int }
   | Flush
   | Drain
   | Close
@@ -141,9 +156,9 @@ let v config =
     info = None;
     next_sid = 1;
     subscriptions = [];
-    pending_flushes = 0;
+    draining_subscriptions = [];
+    pending_pings = empty_ping_queue;
     pending_liveness_pings = 0;
-    pending_liveness_responses = 0;
     next_ping = None;
   }
 
@@ -156,9 +171,9 @@ let prepare_reconnect state =
     state with
     phase = Awaiting_info;
     info = None;
-    pending_flushes = 0;
+    draining_subscriptions = [];
+    pending_pings = empty_ping_queue;
     pending_liveness_pings = 0;
-    pending_liveness_responses = 0;
     next_ping = None;
   }
 
@@ -218,7 +233,14 @@ let remove_subscription (sid : int) (subscriptions : subscription list) =
     subscriptions
 
 let forget_subscription state sid =
-  { state with subscriptions = remove_subscription sid state.subscriptions }
+  {
+    state with
+    subscriptions = remove_subscription sid state.subscriptions;
+    draining_subscriptions =
+      List.filter
+        (fun value -> not (Int.equal value sid))
+        state.draining_subscriptions;
+  }
 
 let require_connected state =
   match state.phase with
@@ -329,33 +351,31 @@ let handle_operation state now operation =
           |> Result.map (fun output ->
               { (empty_transition (touch state now)) with output = [ output ] })
       | Op.Pong ->
-          let pending_flushes = state.pending_flushes in
-          let events, pending_flushes, pending_liveness_pings,
-              pending_liveness_responses =
-            if pending_flushes > 0 then
-              ( [ Event.Flush_completed ],
-                pending_flushes - 1,
-                0,
-                state.pending_liveness_responses )
-            else if state.pending_liveness_responses > 0 then
-              ( [],
-                pending_flushes,
-                0,
-                state.pending_liveness_responses - 1 )
-            else
-              ([ Event.Protocol_notice Event.Pong ], 0, 0, 0)
+          let state, events =
+            match take_ping state.pending_pings with
+            | None ->
+                ( { state with pending_liveness_pings = 0 },
+                  [ Event.Protocol_notice Event.Pong ] )
+            | Some (origin, pending_pings) -> (
+                let state =
+                  { state with pending_pings; pending_liveness_pings = 0 }
+                in
+                match origin with
+                | Liveness -> (state, [])
+                | Flush -> (state, [ Event.Flush_completed ])
+                | Drain ->
+                    ( {
+                        state with
+                        subscriptions = [];
+                        draining_subscriptions = [];
+                      },
+                      [ Event.Flush_completed ] )
+                | Subscription_drain sid ->
+                    (forget_subscription state sid, [ Event.Flush_completed ]))
           in
           Ok
             {
-              state =
-                touch
-                  {
-                    state with
-                    pending_flushes;
-                    pending_liveness_pings;
-                    pending_liveness_responses;
-                  }
-                  now;
+              state = touch state now;
               output = [];
               events;
               deliveries = [];
@@ -489,15 +509,10 @@ let outgoing_publish state message =
           else Op.Hpub { message; status = None }
         in
         match encode_with_state state operation with
-        | Error (Error.Codec (Codec.Packet (Packet.Payload_too_large _))) ->
-            let limit =
-              match state.info with
-              | Some info -> Info.max_payload info
-              | None -> Packet.default_limits.max_payload_bytes
-            in
-            Error
-              (Error.Max_payload_exceeded
-                 { size = String.length (Message.payload message); limit })
+        | Error
+            (Error.Codec
+               (Codec.Packet (Packet.Payload_too_large { size; limit }))) ->
+            Error (Error.Max_payload_exceeded { size; limit })
         | Error error -> Error error
         | Ok output -> Ok { (empty_transition state) with output = [ output ] })
 
@@ -551,8 +566,52 @@ let outgoing_unsubscribe state sid max_messages =
                 in
                 Ok
                   {
-                    (empty_transition { state with subscriptions }) with
+                    (empty_transition
+                       {
+                         state with
+                         subscriptions;
+                         draining_subscriptions =
+                           List.filter
+                             (fun value -> not (Int.equal value sid))
+                             state.draining_subscriptions;
+                       })
+                    with
                     output = [ output ];
+                  }))
+
+let outgoing_drain_subscription state sid =
+  match require_connected state with
+  | Error error -> Error error
+  | Ok () -> (
+      if sid <= 0 then Error (Error.Invalid_subscription_id sid)
+      else if
+        List.exists
+          (fun value -> Int.equal value sid)
+          state.draining_subscriptions
+      then Error Error.Draining
+      else
+        match find_subscription sid state.subscriptions with
+        | None -> Error (Error.Unknown_subscription { sid })
+        | Some _ -> (
+            let operations =
+              [ Op.Unsub { sid; max_messages = None }; Op.Ping ]
+            in
+            match encode_all state operations with
+            | Error error -> Error error
+            | Ok output ->
+                Ok
+                  {
+                    (empty_transition
+                       {
+                         state with
+                         draining_subscriptions =
+                           sid :: state.draining_subscriptions;
+                         pending_pings =
+                           enqueue_ping state.pending_pings
+                             (Subscription_drain sid);
+                       })
+                    with
+                    output;
                   }))
 
 let outgoing_flush state =
@@ -564,7 +623,10 @@ let outgoing_flush state =
           Ok
             {
               (empty_transition
-                 { state with pending_flushes = state.pending_flushes + 1 })
+                 {
+                   state with
+                   pending_pings = enqueue_ping state.pending_pings Flush;
+                 })
               with
               output = [ output ];
             })
@@ -578,7 +640,13 @@ let outgoing_drain state =
         List.map
           (fun (subscription : subscription) ->
             Op.Unsub { sid = subscription.sid; max_messages = None })
-          (List.rev state.subscriptions)
+          (List.filter
+             (fun (subscription : subscription) ->
+               not
+                 (List.exists
+                    (fun sid -> Int.equal sid subscription.sid)
+                    state.draining_subscriptions))
+             (List.rev state.subscriptions))
       in
       let operations = operations @ [ Op.Ping ] in
       match encode_all state operations with
@@ -590,8 +658,7 @@ let outgoing_drain state =
                 {
                   state with
                   phase = Draining;
-                  subscriptions = [];
-                  pending_flushes = state.pending_flushes + 1;
+                  pending_pings = enqueue_ping state.pending_pings Drain;
                 };
               output;
               events = [ Event.Draining ];
@@ -613,6 +680,7 @@ let outgoing state command =
   | Auto_unsubscribe { sid; max_messages } ->
       if max_messages <= 0 then Error (Error.Invalid_max_messages max_messages)
       else outgoing_unsubscribe state sid (Some max_messages)
+  | Drain_subscription { sid } -> outgoing_drain_subscription state sid
   | Flush -> outgoing_flush state
   | Drain -> outgoing_drain state
   | Close -> (
@@ -633,8 +701,7 @@ let timer state ~now =
               state with
               next_ping = next_ping state.config now;
               pending_liveness_pings = state.pending_liveness_pings + 1;
-              pending_liveness_responses =
-                state.pending_liveness_responses + 1;
+              pending_pings = enqueue_ping state.pending_pings Liveness;
             }
           in
           match encode_with_state state Op.Ping with

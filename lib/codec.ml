@@ -461,7 +461,7 @@ let check_limits (limits : Packet.limits) output =
       | Packet.Line -> (0, 0)
       | Packet.Payload { bytes } -> (bytes, 0)
       | Packet.Headers { header_bytes; total_bytes } ->
-          (total_bytes - header_bytes, header_bytes)
+          (total_bytes, header_bytes)
     in
     if header_length > limits.max_header_bytes then
       packet_error
