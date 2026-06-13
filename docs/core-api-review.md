@@ -8,15 +8,24 @@ Store, Services, and the system-account package remain outside this gate.
 The review checked the public `.mli` contracts against their implementations,
 the `Packet -> Op -> Client` transition boundary, reader ownership, structured
 errors, reconnect state, request and subscription ownership, cancellation, and
-terminal event behavior. An independent outside review was used for the pure
-state machine, Eio lifecycle, PRNG ownership, and the final overlap fix.
+terminal event behavior. Independent outside reviews were used for the pure
+state machine, Eio lifecycle, PRNG ownership, and the remediation diff.
 
 ## Resolved findings
 
-- A `PONG` completing a flush also proves connection liveness. The client now
-  resets liveness close debt for every PONG while retaining a separate count of
-  outstanding liveness replies, so additional legitimate PONGs are not
-  reported as unsolicited protocol notices.
+- PONG classification now follows wire order. Liveness, ordinary flush,
+  connection-drain, and subscription-drain barriers each occupy an ordered
+  slot, so a PONG for an earlier liveness probe cannot complete a later flush.
+- A drain keeps its local subscription intent and delivery queue alive until the
+  server's barrier PONG. Messages accepted by the server after `UNSUB` but
+  before that PONG are delivered before the terminal marker.
+- Negotiated `max_payload` applies to the complete HPUB body, including the
+  encoded NATS header block. The structured client error reports that complete
+  size.
+- Request cancellation records the private reply SID before leaving the
+  cancellation-protected setup region, so a cancellation/setup race can issue
+  its cleanup `UNSUB` immediately. Request retry validation reports its own
+  structured error variant.
 - A reusable Eio configuration no longer gives every connection an identical
   reconnect-jitter stream. Caller-provided PRNG state is copied at
   configuration construction; connection creation splits independent child
@@ -32,6 +41,13 @@ state machine does not own a clock policy for drain completion; the Eio facade
 owns `Config.drain_timeout` and applies it to connection and subscription
 drains. Keeping that split avoids silently adding adapter policy to the pure
 protocol API and is covered by the existing drain contract test.
+
+The Eio connection reports initial server authorization errors through its
+event stream after writing `CONNECT`; `Connection.connect` therefore means that
+the transport and initial protocol exchange are active, not that the server has
+already accepted the credentials. During reconnect, Core events from the failed
+transport are suppressed and the replacement `INFO`/`Connected` sequence is
+emitted as the reconnect control sequence.
 
 ## Evidence
 

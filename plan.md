@@ -618,7 +618,8 @@ cluster restart combinations remain later work.
 - Dynamic `INFO` updates replace the discovered candidate set while retaining
   configured seeds; server discovery and endpoint rotation are observable.
 - No arbitrary Core publish is replayed after reconnect by default.
-- Subscription drain delivers already queued messages before termination.
+- Subscription drain delivers messages already queued or accepted by the server
+  before the drain barrier, then terminates.
 - Connection drain rejects new work, flushes, closes, and resolves all
   waiters.
 - A full subscription reports structured slow-consumer failure and an event
