@@ -633,6 +633,11 @@ Stabilize only the Core domain values and `Nats_eio.Connection`/
 reviewer has seen the black-box behavior, lifecycle/error semantics, and
 ownership model. JetStream types remain experimental or absent from this gate.
 
+The G2 review record is in [`docs/core-api-review.md`](docs/core-api-review.md).
+It covers the pure transition API and the Eio request/subscription lifecycle,
+records the resolved PONG and shared-jitter ownership findings, and documents
+why drain deadlines remain an Eio policy rather than a pure-client timeout.
+
 ## Phase 3 — Core interoperability hardening
 
 ### Goal

@@ -1,8 +1,8 @@
 (** JetStream-backed streaming object stores.
 
     An object store is a bucket of named, immutable-content objects. Object
-    content crosses the API as {!Bytesrw.Bytes.Reader.t} and
-    {!Bytesrw.Bytes.Writer.t}; the string functions are convenience wrappers for
+    content crosses the API as [Bytesrw.Bytes.Reader.t] and
+    [Bytesrw.Bytes.Writer.t]; the string functions are convenience wrappers for
     small values. *)
 
 module Config : sig

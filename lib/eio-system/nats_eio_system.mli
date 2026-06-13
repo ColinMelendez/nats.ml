@@ -3,7 +3,7 @@
     The system account is an operator-facing NATS service. It is separate from
     JetStream administration and normally requires explicit permissions on the
     [$SYS] request and event subjects. JSON response bodies remain available as
-    {!Jsont.json} values because the server adds fields across releases. *)
+    [Jsont.json] values because the server adds fields across releases. *)
 
 module Error : sig
   type api = {
