@@ -273,7 +273,7 @@ func main() {
 	flag.StringVar(&config.signal, "signal-file", "", "file written to trigger reconnect in reconnect mode")
 	flag.StringVar(&config.leader, "leader-file", "", "file written with the JetStream stream leader")
 	flag.StringVar(&config.survivor, "survivor-file", "", "file containing the endpoints for the post-failover client")
-	flag.StringVar(&config.mode, "mode", "core", "interop mode: core, service, service-failure, service-parent-close, reconnect, service-reconnect, jetstream, jetstream-admin, jetstream-push, jetstream-ordered, jetstream-kv, jetstream-object, jetstream-push-reconnect, jetstream-ordered-reconnect, jetstream-ordered-restart, or jetstream-ordered-leader-failover")
+	flag.StringVar(&config.mode, "mode", "core", "interop mode: core, service, service-failure, service-parent-close, reconnect, service-reconnect, jetstream, jetstream-admin, jetstream-push, jetstream-ordered, jetstream-kv, jetstream-object, jetstream-push-reconnect, jetstream-ordered-reconnect, jetstream-ordered-restart, jetstream-ordered-leader-failover, jetstream-kv-reconnect, jetstream-kv-restart, or jetstream-kv-leader-failover")
 	flag.Parse()
 	if err := validateOptions(config); err != nil {
 		fmt.Fprintln(os.Stderr, err)

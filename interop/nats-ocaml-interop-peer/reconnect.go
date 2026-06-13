@@ -311,6 +311,37 @@ func runMode(config options) error {
 			return fmt.Errorf("survivor-file is required in jetstream-ordered-leader-failover mode")
 		}
 		return runJetStreamOrderedReconnectPeer(config)
+	case "jetstream-kv-reconnect":
+		if config.signal == "" {
+			return fmt.Errorf("signal-file is required in jetstream-kv-reconnect mode")
+		}
+		if config.bucket == "" {
+			return fmt.Errorf("bucket is required in jetstream-kv-reconnect mode")
+		}
+		return runJetStreamKeyValueOrderedReconnectPeer(config)
+	case "jetstream-kv-restart":
+		if config.signal == "" {
+			return fmt.Errorf("signal-file is required in jetstream-kv-restart mode")
+		}
+		if config.bucket == "" {
+			return fmt.Errorf("bucket is required in jetstream-kv-restart mode")
+		}
+		config.requireReplicatedStream = true
+		return runJetStreamKeyValueOrderedReconnectPeer(config)
+	case "jetstream-kv-leader-failover":
+		if config.signal == "" {
+			return fmt.Errorf("signal-file is required in jetstream-kv-leader-failover mode")
+		}
+		if config.bucket == "" {
+			return fmt.Errorf("bucket is required in jetstream-kv-leader-failover mode")
+		}
+		if config.leader == "" {
+			return fmt.Errorf("leader-file is required in jetstream-kv-leader-failover mode")
+		}
+		if config.survivor == "" {
+			return fmt.Errorf("survivor-file is required in jetstream-kv-leader-failover mode")
+		}
+		return runJetStreamKeyValueOrderedReconnectPeer(config)
 	default:
 		return fmt.Errorf("unknown mode %q", config.mode)
 	}

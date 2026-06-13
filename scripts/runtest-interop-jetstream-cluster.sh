@@ -16,6 +16,26 @@ if [ "$runner_timeout" -lt 1 ]; then
   exit 1
 fi
 
+cluster_scenario=${NATS_TEST_JS_CLUSTER_SCENARIO:-ordered}
+case "$cluster_scenario" in
+  ordered)
+    acceptance_executable=test/interop/interop_jetstream_ordered_reconnect_acceptance.exe
+    prefix="ocaml.interop.jetstream.cluster.$$"
+    stream="OCAML_INTEROP_JS_CLUSTER_$$"
+    bucket=
+    ;;
+  kv)
+    acceptance_executable=test/interop/interop_key_value_ordered_reconnect_acceptance.exe
+    prefix="ocaml.interop.key-value.cluster.$$"
+    bucket="OCAML_INTEROP_KV_$$"
+    stream="KV_$bucket"
+    ;;
+  *)
+    echo "NATS_TEST_JS_CLUSTER_SCENARIO must be ordered or kv" >&2
+    exit 1
+    ;;
+esac
+
 if [ "${NATS_INTEGRATION_SHELL-}" != 1 ]; then
   LC_ALL=C
   export LC_ALL
@@ -69,8 +89,6 @@ peer_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-js-interop-cluster-peer.XXXXXX")
 ocaml_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-js-interop-cluster-ocaml.XXXXXX")
 docker_error=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-js-interop-cluster-docker.XXXXXX")
 rm -f "$signal"
-prefix="ocaml.interop.jetstream.cluster.$$"
-stream="OCAML_INTEROP_JS_CLUSTER_$$"
 failure_mode=${NATS_TEST_JS_CLUSTER_FAILURE_MODE:-seed}
 volume_suffix=${signal##*/}
 leader_file="$signal.leader"
@@ -83,7 +101,7 @@ ocaml_reconnected_file="$signal.ocaml-reconnected"
 
 # shellcheck disable=SC1091 # script_dir points at this file's directory.
 . "$script_dir/test-artifacts.sh"
-artifact_init interop-jetstream-cluster "$run_id"
+artifact_init "interop-$cluster_scenario-cluster" "$run_id"
 
 case "$failure_mode" in
   seed|leader|restart) ;;
@@ -159,9 +177,9 @@ fi
 if ! integration_command timeout --signal=TERM --kill-after=5s \
     "${runner_timeout}s" dune build \
     --build-dir "$dune_build_dir" \
-    test/interop/interop_jetstream_ordered_reconnect_acceptance.exe
+    "$acceptance_executable"
 then
-  echo "JetStream ordered reconnect acceptance executable did not build" >&2
+  echo "$cluster_scenario cluster acceptance executable did not build" >&2
   exit 1
 fi
 
@@ -214,7 +232,8 @@ cleanup() {
   artifact_save_docker_state "$status" "$tertiary" cluster-c.state
   artifact_save_image "$status" "$image" nats-server.image
   artifact_save_text "$status" run.txt \
-    "runner=interop-jetstream-cluster" "image=$image" \
+    "runner=interop-jetstream-cluster" "scenario=$cluster_scenario" \
+    "image=$image" \
     "failure_mode=$failure_mode" "tls=$tls_enabled" "auth_mode=$auth_mode" \
     "cluster_port=$cluster_base_port" "build_dir=$dune_build_dir" \
     "status=$status"
@@ -673,13 +692,25 @@ fi
 watcher=$!
 
 if [ "$failure_mode" = leader ]; then
-  peer_mode=jetstream-ordered-leader-failover
+  if [ "$cluster_scenario" = kv ]; then
+    peer_mode=jetstream-kv-leader-failover
+  else
+    peer_mode=jetstream-ordered-leader-failover
+  fi
   peer_server="$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$tertiary_port")"
 elif [ "$failure_mode" = restart ]; then
-  peer_mode=jetstream-ordered-restart
+  if [ "$cluster_scenario" = kv ]; then
+    peer_mode=jetstream-kv-restart
+  else
+    peer_mode=jetstream-ordered-restart
+  fi
   peer_server="$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$tertiary_port")"
 else
-  peer_mode=jetstream-ordered-reconnect
+  if [ "$cluster_scenario" = kv ]; then
+    peer_mode=jetstream-kv-reconnect
+  else
+    peer_mode=jetstream-ordered-reconnect
+  fi
   peer_server="$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$tertiary_port")"
 fi
 
@@ -688,11 +719,13 @@ if [ "$failure_mode" = leader ]; then
     NATS_TEST_SERVER="$(endpoint_for_port "$cluster_base_port")" \
     NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" \
+    NATS_TEST_INTEROP_BUCKET="$bucket" \
     NATS_TEST_INTEROP_SIGNAL="$signal" \
     nats-ocaml-interop-peer \
     --mode "$peer_mode" \
     --server "$peer_server" \
-    --prefix "$prefix" --stream "$stream" --ready-file "$peer_ready" \
+    --prefix "$prefix" --stream "$stream" --bucket "$bucket" \
+    --ready-file "$peer_ready" \
     --signal-file "$signal" --leader-file "$leader_file" \
     --survivor-file "$survivor_file" >"$peer_log" 2>&1 &
 else
@@ -700,11 +733,13 @@ else
     NATS_TEST_SERVER="$(endpoint_for_port "$cluster_base_port")" \
     NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" \
+    NATS_TEST_INTEROP_BUCKET="$bucket" \
     NATS_TEST_INTEROP_SIGNAL="$signal" \
     nats-ocaml-interop-peer \
     --mode "$peer_mode" \
     --server "$peer_server" \
-    --prefix "$prefix" --stream "$stream" --ready-file "$peer_ready" \
+    --prefix "$prefix" --stream "$stream" --bucket "$bucket" \
+    --ready-file "$peer_ready" \
     --signal-file "$signal" >"$peer_log" 2>&1 &
 fi
 peer_pid=$!
@@ -714,7 +749,7 @@ while [ ! -e "$peer_ready" ] && kill -0 "$peer_pid" >/dev/null 2>&1; do
   attempt=$((attempt + 1))
   # Nix may need to realize the Go peer on a fresh machine.
   if [ "$attempt" -ge "$runner_timeout" ]; then
-    echo "Go JetStream ordered reconnect peer did not become ready" >&2
+    echo "Go $cluster_scenario cluster peer did not become ready" >&2
     cat "$peer_log" >&2 || true
     exit 1
   fi
@@ -722,17 +757,17 @@ while [ ! -e "$peer_ready" ] && kill -0 "$peer_pid" >/dev/null 2>&1; do
 done
 
 if [ ! -e "$peer_ready" ]; then
-  echo "Go JetStream ordered reconnect peer exited before becoming ready" >&2
+  echo "Go $cluster_scenario cluster peer exited before becoming ready" >&2
   cat "$peer_log" >&2 || true
   exit 1
 fi
 if [ "$failure_mode" = leader ] && [ ! -s "$leader_file" ]; then
-  echo "Go JetStream ordered leader failover peer did not report a leader" >&2
+  echo "Go $cluster_scenario leader failover peer did not report a leader" >&2
   cat "$peer_log" >&2 || true
   exit 1
 fi
 if [ "$failure_mode" = leader ] && [ ! -e "$survivor_file" ]; then
-  echo "Go JetStream ordered leader failover peer did not resolve survivors" >&2
+  echo "Go $cluster_scenario leader failover peer did not resolve survivors" >&2
   cat "$peer_log" >&2 || true
   exit 1
 fi
@@ -765,6 +800,7 @@ if integration_command timeout --signal=TERM --kill-after=5s \
     NATS_TEST_SERVER="$ocaml_server" \
     NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" \
+    NATS_TEST_INTEROP_BUCKET="$bucket" \
     NATS_TEST_INTEROP_SIGNAL="$signal" \
     NATS_TEST_JS_CLUSTER_FAILURE_MODE="$failure_mode" \
     NATS_TEST_JS_CLUSTER_INITIAL_NAME="$ocaml_initial_name" \
@@ -772,7 +808,7 @@ if integration_command timeout --signal=TERM --kill-after=5s \
     NATS_TEST_JS_CLUSTER_DISCOVERED="$ocaml_discovered" \
     dune exec \
     --build-dir "$dune_build_dir" \
-    test/interop/interop_jetstream_ordered_reconnect_acceptance.exe \
+    "$acceptance_executable" \
     >"$ocaml_log" 2>&1
 then
   :
