@@ -1397,14 +1397,14 @@ let () =
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve watch_result_u
                     (Nats_eio.Key_value.Ordered_watch.v ~sw ~key:"alice"
-                       value));
+                       ~name_prefix:"ordered-empty" value));
               yield_n 5;
               Eio.Promise.resolve create_response_u
                 (Ok
                    (consumer_response_named_with_opt_start_seq ~sid:1
                       ~policy:"last_per_subject" ~headers_only:false
                       ~pending:(Some 0L) ~opt_start_seq:None
-                      ~name:"ordered-empty" ~deliver_subject:""));
+                      ~name:"ordered-empty_1" ~deliver_subject:""));
               let watch = expect_kv_ok (Eio.Promise.await watch_result) in
               (match expect_kv_ok (Nats_eio.Key_value.Ordered_watch.next watch) with
               | Nats_eio.Key_value.Ordered_watch.Initial_done -> ()
@@ -1415,7 +1415,7 @@ let () =
                   Eio.Promise.resolve close_result_u
                     (Nats_eio.Key_value.Ordered_watch.close watch));
               wait_for_trace ~trace
-                ~needle:"PUB $JS.API.CONSUMER.DELETE.KV_users.ordered-empty";
+                ~needle:"PUB $JS.API.CONSUMER.DELETE.KV_users.ordered-empty_1";
               Eio.Promise.resolve delete_response_u (Ok (api_ok_wire ~sid:3));
               expect_kv_ok (Eio.Promise.await close_result);
               expect_ok (Nats_eio.Connection.close connection);
@@ -1505,7 +1505,7 @@ let () =
                 (Ok
                    (consumer_response_named_with_opt_start_seq ~sid:4
                       ~policy:"by_start_sequence" ~headers_only:false
-                      ~pending:(Some 1L) ~opt_start_seq:(Some 11L) ~name:"kv-gap_2"
+                      ~pending:(Some 0L) ~opt_start_seq:(Some 11L) ~name:"kv-gap_2"
                       ~deliver_subject:""));
               yield_n 5;
               Eio.Promise.resolve replay_delivery_u
