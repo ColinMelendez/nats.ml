@@ -532,6 +532,100 @@ let () =
           match (Nats.Client.phase closed.state, closed.events) with
           | Nats.Client.Closed, [ Nats.Event.Closed ] -> ()
           | _ -> fail "expected liveness close");
+      test "a flush PONG also proves liveness" (fun () ->
+          let config =
+            expect_config
+              (Nats.Config.v ~ping_interval:(Some Mtime.Span.s)
+                 ~max_pings_without_pong:1 ())
+          in
+          let client = Nats.Client.v config in
+          let info =
+            expect_client
+              (Nats.Client.incoming ~eod:true client ~now:Mtime.min_stamp
+                 (Bytesrw.Bytes.Reader.of_string "INFO {\"max_payload\":100}\r\n"))
+          in
+          let connected =
+            expect_client
+              (Nats.Client.outgoing info.state
+                 (Nats.Client.Connect
+                    {
+                      credentials = Nats.Client.Connect.v ();
+                      tls_required = false;
+                    }))
+          in
+          let deadline =
+            match Nats.Client.next_timeout connected.state with
+            | Some value -> value
+            | None -> fail "expected a liveness deadline"
+          in
+          let pinged = Nats.Client.timer connected.state ~now:deadline in
+          let flushed =
+            expect_client (Nats.Client.outgoing pinged.state Nats.Client.Flush)
+          in
+          let completed =
+            expect_client
+              (Nats.Client.incoming ~eod:true flushed.state ~now:deadline
+                 (Bytesrw.Bytes.Reader.of_string "PONG\r\n"))
+          in
+          (match completed.events with
+          | [ Nats.Event.Flush_completed ] -> ()
+          | _ -> fail "expected flush completion");
+          let next_deadline =
+            match Nats.Client.next_timeout completed.state with
+            | Some value -> value
+            | None -> fail "expected the next liveness deadline"
+          in
+          let next_ping = Nats.Client.timer completed.state ~now:next_deadline in
+          match (Nats.Client.phase next_ping.state, next_ping.output) with
+          | Nats.Client.Connected, [ output ] -> equal string "PING\r\n" output
+          | Nats.Client.Closed, _ ->
+              fail "closed although the flush PONG proved liveness"
+          | _ -> fail "expected the next liveness PING");
+      test "multiple liveness PONGs remain classified as liveness" (fun () ->
+          let config =
+            expect_config
+              (Nats.Config.v ~ping_interval:(Some Mtime.Span.s)
+                 ~max_pings_without_pong:3 ())
+          in
+          let client = Nats.Client.v config in
+          let info =
+            expect_client
+              (Nats.Client.incoming ~eod:true client ~now:Mtime.min_stamp
+                 (Bytesrw.Bytes.Reader.of_string "INFO {\"max_payload\":100}\r\n"))
+          in
+          let connected =
+            expect_client
+              (Nats.Client.outgoing info.state
+                 (Nats.Client.Connect
+                    {
+                      credentials = Nats.Client.Connect.v ();
+                      tls_required = false;
+                    }))
+          in
+          let first_deadline =
+            match Nats.Client.next_timeout connected.state with
+            | Some value -> value
+            | None -> fail "expected the first liveness deadline"
+          in
+          let first_ping =
+            Nats.Client.timer connected.state ~now:first_deadline
+          in
+          let second_deadline =
+            match Nats.Client.next_timeout first_ping.state with
+            | Some value -> value
+            | None -> fail "expected the second liveness deadline"
+          in
+          let second_ping =
+            Nats.Client.timer first_ping.state ~now:second_deadline
+          in
+          let first_pong = incoming second_ping.state "PONG\r\n" in
+          (match first_pong.events with
+          | [] -> ()
+          | _ -> fail "expected the first liveness PONG to be silent");
+          let second_pong = incoming first_pong.state "PONG\r\n" in
+          match second_pong.events with
+          | [] -> ()
+          | _ -> fail "expected the second liveness PONG to be silent");
       test "drain orders UNSUBs, permits flush, and leaves final close to owner"
         (fun () ->
           let config =

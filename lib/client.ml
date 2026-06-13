@@ -107,6 +107,7 @@ type t = {
   subscriptions : subscription list;
   pending_flushes : int;
   pending_liveness_pings : int;
+  pending_liveness_responses : int;
   next_ping : Mtime.t option;
 }
 
@@ -142,6 +143,7 @@ let v config =
     subscriptions = [];
     pending_flushes = 0;
     pending_liveness_pings = 0;
+    pending_liveness_responses = 0;
     next_ping = None;
   }
 
@@ -156,6 +158,7 @@ let prepare_reconnect state =
     info = None;
     pending_flushes = 0;
     pending_liveness_pings = 0;
+    pending_liveness_responses = 0;
     next_ping = None;
   }
 
@@ -327,20 +330,32 @@ let handle_operation state now operation =
               { (empty_transition (touch state now)) with output = [ output ] })
       | Op.Pong ->
           let pending_flushes = state.pending_flushes in
-          let pending_liveness_pings = state.pending_liveness_pings in
-          let events, pending_flushes, pending_liveness_pings =
+          let events, pending_flushes, pending_liveness_pings,
+              pending_liveness_responses =
             if pending_flushes > 0 then
               ( [ Event.Flush_completed ],
                 pending_flushes - 1,
-                pending_liveness_pings )
-            else if pending_liveness_pings > 0 then
-              ([], pending_flushes, pending_liveness_pings - 1)
-            else ([ Event.Protocol_notice Event.Pong ], 0, 0)
+                0,
+                state.pending_liveness_responses )
+            else if state.pending_liveness_responses > 0 then
+              ( [],
+                pending_flushes,
+                0,
+                state.pending_liveness_responses - 1 )
+            else
+              ([ Event.Protocol_notice Event.Pong ], 0, 0, 0)
           in
           Ok
             {
               state =
-                touch { state with pending_flushes; pending_liveness_pings } now;
+                touch
+                  {
+                    state with
+                    pending_flushes;
+                    pending_liveness_pings;
+                    pending_liveness_responses;
+                  }
+                  now;
               output = [];
               events;
               deliveries = [];
@@ -618,6 +633,8 @@ let timer state ~now =
               state with
               next_ping = next_ping state.config now;
               pending_liveness_pings = state.pending_liveness_pings + 1;
+              pending_liveness_responses =
+                state.pending_liveness_responses + 1;
             }
           in
           match encode_with_state state Op.Ping with
