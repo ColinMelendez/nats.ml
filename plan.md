@@ -948,8 +948,12 @@ semantics before calling the feature complete.
   tombstones, watches, purge markers, and cleanup. The matrix passes across
   `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` in anonymous, token,
   username/password, and corresponding server-required TLS modes.
-- Remaining: KV reconnect and cluster-failure coverage, and broader
-  server/version combinations beyond the pinned auth/TLS matrix.
+- Completed live cluster acceptance: the dedicated
+  `runtest-interop-key-value-cluster.sh` runner uses the official Go
+  `jetstream.KeyValue` API and a three-node file-backed stream to verify the
+  retained snapshot marker, revision continuity, and ordered-watch recovery
+  after seed loss, elected-leader loss, and durable seed restart. Broader
+  server/version combinations beyond the pinned auth/TLS matrix remain.
 
 ### Workstream 5B — Object Store
 
@@ -975,8 +979,9 @@ semantics before calling the feature complete.
   scans, and watches are covered locally through the Eio mock transport.
 - Watch cancellation and ordering under reconnect are covered locally.
 - Ordered-watch retained/live and empty snapshots, metadata-only delivery, and
-  consumer-gap replay are covered locally; live-server and cluster-failure
-  wrapper coverage remains in the acceptance matrix.
+  consumer-gap replay are covered locally; the dedicated live cluster wrapper
+  also verifies retained snapshot markers, revision continuity, and recovery
+  after seed loss, elected-leader loss, and durable seed restart.
 - The opt-in single-server runner covers bucket status, direct reads, CAS
   failures, history, tombstones, filtered keys, and a live watch against
   nats-server.

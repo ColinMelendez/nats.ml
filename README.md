@@ -125,6 +125,7 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-interop-jetstream-reconnect.sh
 ./scripts/runtest-interop-auth-jetstream-reconnect-matrix.sh
 ./scripts/runtest-interop-jetstream-cluster.sh
+./scripts/runtest-interop-key-value-cluster.sh
 ./scripts/runtest-interop-jetstream-cluster-matrix.sh
 ./scripts/runtest-interop-auth-jetstream-cluster.sh
 ./scripts/runtest-interop-auth-jetstream-cluster-matrix.sh
@@ -302,7 +303,10 @@ between Go and OCaml. Its matrix covers the same six anonymous/authenticated
 plaintext/TLS modes across all three pinned releases; all 18 baseline cases
 pass. The Object Store interop runner uses the same official Go peer to
 exchange chunked content and metadata, updates, links, listing, tombstones,
-and sealing. KV cluster/reconnect and broader authenticated or failure
+and sealing. The dedicated
+`./scripts/runtest-interop-key-value-cluster.sh` runner now covers replicated
+ordered-watch recovery after seed loss, elected-leader loss, and durable seed
+restart in anonymous plaintext mode. Broader authenticated or failure
 topologies remain separate acceptance work; the dedicated auth matrix covers
 the corresponding Core authentication and TLS contracts.
 The separate JetStream reconnect runner uses a file-backed stream and durable
