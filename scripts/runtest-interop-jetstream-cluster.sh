@@ -4,11 +4,24 @@ set -eu
 script_dir=$(CDPATH=; export CDPATH; cd "$(dirname "$0")" && pwd)
 cd "$script_dir/.."
 
+runner_timeout=${NATS_TEST_RUN_TIMEOUT:-300}
+case "$runner_timeout" in
+  ""|*[!0-9]*)
+    echo "NATS_TEST_RUN_TIMEOUT must be a positive number of seconds" >&2
+    exit 1
+    ;;
+esac
+if [ "$runner_timeout" -lt 1 ]; then
+  echo "NATS_TEST_RUN_TIMEOUT must be a positive number of seconds" >&2
+  exit 1
+fi
+
 if [ "${NATS_INTEGRATION_SHELL-}" != 1 ]; then
   LC_ALL=C
   export LC_ALL
-  exec nix develop .#integration -c env \
-    NATS_INTEGRATION_SHELL=1 "$script_dir/runtest-interop-jetstream-cluster.sh" "$@"
+  exec nix develop .#integration -c timeout --signal=TERM --kill-after=5s \
+    "${runner_timeout}s" env NATS_INTEGRATION_SHELL=1 \
+    "$script_dir/runtest-interop-jetstream-cluster.sh" "$@"
 fi
 
 integration_command() {
@@ -20,7 +33,6 @@ integration_command() {
 }
 
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
-dune_build_dir=${NATS_TEST_DUNE_BUILD_DIR:-_build-interop}
 tls_enabled=${NATS_TEST_TLS-0}
 interop_auth_mode=${NATS_TEST_INTEROP_AUTH_MODE-}
 auth_user=${NATS_TEST_USER-}
@@ -35,6 +47,7 @@ else
   server_debug_args=
 fi
 run_id=$$
+dune_build_dir=${NATS_TEST_DUNE_BUILD_DIR:-_build-interop-$run_id}
 network="ocaml-nats-js-interop-cluster-$run_id"
 cluster_name="ocaml-nats-js-interop-$run_id"
 primary_name="$network-a"
@@ -43,6 +56,7 @@ tertiary_name="$network-c"
 primary=
 secondary=
 tertiary=
+cluster_base_port=
 primary_data_volume=
 secondary_data_volume=
 tertiary_data_volume=
@@ -66,6 +80,10 @@ killed_file="$signal.killed"
 kill_ready_file="$signal.kill-ready"
 go_reconnected_file="$signal.go-reconnected"
 ocaml_reconnected_file="$signal.ocaml-reconnected"
+
+# shellcheck disable=SC1091 # script_dir points at this file's directory.
+. "$script_dir/test-artifacts.sh"
+artifact_init interop-jetstream-cluster "$run_id"
 
 case "$failure_mode" in
   seed|leader|restart) ;;
@@ -138,7 +156,8 @@ if [ "$auth_mode" = mtls ]; then
   tls_enabled=1
 fi
 
-if ! integration_command dune build \
+if ! integration_command timeout --signal=TERM --kill-after=5s \
+    "${runner_timeout}s" dune build \
     --build-dir "$dune_build_dir" \
     test/interop/interop_jetstream_ordered_reconnect_acceptance.exe
 then
@@ -146,7 +165,31 @@ then
   exit 1
 fi
 
+remove_container() {
+  container=$1
+  name=$2
+  if [ -n "$container" ]; then
+    docker rm -f "$container" >/dev/null 2>&1 || true
+  fi
+  if [ "$container" != "$name" ]; then
+    docker rm -f "$name" >/dev/null 2>&1 || true
+  fi
+}
+
+remove_cluster() {
+  remove_container "$tertiary" "$tertiary_name"
+  remove_container "$secondary" "$secondary_name"
+  remove_container "$primary" "$primary_name"
+  tertiary=
+  secondary=
+  primary=
+}
+
 cleanup() {
+  status=$?
+  if [ "$#" -eq 1 ]; then
+    status=$1
+  fi
   if [ -n "$resolver" ]; then
     kill "$resolver" >/dev/null 2>&1 || true
     wait "$resolver" >/dev/null 2>&1 || true
@@ -159,15 +202,23 @@ cleanup() {
     kill "$peer_pid" >/dev/null 2>&1 || true
     wait "$peer_pid" >/dev/null 2>&1 || true
   fi
-  if [ -n "$primary" ]; then
-    docker rm -f "$primary" >/dev/null 2>&1 || true
-  fi
-  if [ -n "$secondary" ]; then
-    docker rm -f "$secondary" >/dev/null 2>&1 || true
-  fi
-  if [ -n "$tertiary" ]; then
-    docker rm -f "$tertiary" >/dev/null 2>&1 || true
-  fi
+  artifact_save_file "$status" "$peer_log" go-peer.log
+  artifact_save_file "$status" "$ocaml_log" ocaml.log
+  artifact_save_file "$status" "$docker_error" docker-launcher.log
+  artifact_save_file "$status" "$peer_ready" peer-ready
+  artifact_save_docker_log "$status" "$primary" cluster-a.log
+  artifact_save_docker_log "$status" "$secondary" cluster-b.log
+  artifact_save_docker_log "$status" "$tertiary" cluster-c.log
+  artifact_save_docker_state "$status" "$primary" cluster-a.state
+  artifact_save_docker_state "$status" "$secondary" cluster-b.state
+  artifact_save_docker_state "$status" "$tertiary" cluster-c.state
+  artifact_save_image "$status" "$image" nats-server.image
+  artifact_save_text "$status" run.txt \
+    "runner=interop-jetstream-cluster" "image=$image" \
+    "failure_mode=$failure_mode" "tls=$tls_enabled" "auth_mode=$auth_mode" \
+    "cluster_port=$cluster_base_port" "build_dir=$dune_build_dir" \
+    "status=$status"
+  remove_cluster
   if [ -n "$primary_data_volume" ]; then
     docker volume rm "$primary_data_volume" >/dev/null 2>&1 || true
   fi
@@ -190,7 +241,9 @@ cleanup() {
     "$peer_log" "$ocaml_log" "$docker_error"
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # shellcheck disable=SC1091 # script_dir points at this file's directory.
 . "$script_dir/interop-auth-material.sh"
@@ -220,7 +273,10 @@ tls {
 EOF
 fi
 
-cluster_base_port=${NATS_TEST_JS_INTEROP_CLUSTER_BASE_PORT:-16222}
+cluster_base_port=${NATS_TEST_JS_INTEROP_CLUSTER_BASE_PORT:-}
+if [ -z "$cluster_base_port" ]; then
+  cluster_base_port=$((16222 + (run_id % 1000) * 3))
+fi
 case "$cluster_base_port" in
   ""|*[!0-9]*)
     echo "NATS_TEST_JS_INTEROP_CLUSTER_BASE_PORT must be a decimal port" >&2
@@ -315,27 +371,94 @@ run_server() {
     -cluster nats://0.0.0.0:6222 \
     -cluster_advertise "$node_name:6222" -routes "$routes" \
     -cluster_name "$cluster_name" \
-    -client_advertise "$client_host:$client_port" 2>"$docker_error"
+    -client_advertise "$client_host:$client_port" 2>>"$docker_error"
 }
 
-docker network create "$network" >/dev/null
+retryable_launch_error() {
+  grep -Eiq 'port (is )?already allocated|address already in use|failed to bind|bind .* failed' \
+    "$docker_error"
+}
+
+docker network create "$network" > /dev/null 2>>"$docker_error"
 if [ "$failure_mode" = restart ]; then
-  docker volume create "$primary_data_volume" >/dev/null
-  docker volume create "$secondary_data_volume" >/dev/null
-  docker volume create "$tertiary_data_volume" >/dev/null
+  {
+    docker volume create "$primary_data_volume"
+    docker volume create "$secondary_data_volume"
+    docker volume create "$tertiary_data_volume"
+  } >>"$docker_error" 2>&1
 fi
 
-primary=$(run_server "$primary_name" cluster-a "$cluster_base_port" \
-  "nats://$secondary_name:6222,nats://$tertiary_name:6222")
-secondary=$(run_server "$secondary_name" cluster-b "$secondary_port" \
-  "nats://$primary_name:6222")
-tertiary=$(run_server "$tertiary_name" cluster-c "$tertiary_port" \
-  "nats://$primary_name:6222,nats://$secondary_name:6222")
+start_cluster() {
+  launch_attempt=0
+  while [ "$launch_attempt" -lt 30 ]; do
+    primary=
+    secondary=
+    tertiary=
+    secondary_port=$((cluster_base_port + 1))
+    tertiary_port=$((cluster_base_port + 2))
+    if [ "$tertiary_port" -gt 65535 ]; then
+      echo "could not allocate three local NATS cluster ports" >&2
+      return 1
+    fi
+    : >"$docker_error"
+    if primary=$(run_server "$primary_name" cluster-a "$cluster_base_port" \
+      "nats://$secondary_name:6222,nats://$tertiary_name:6222"); then
+      :
+    else
+      remove_cluster
+      if retryable_launch_error; then
+        cluster_base_port=$((cluster_base_port + 3))
+        launch_attempt=$((launch_attempt + 1))
+        continue
+      fi
+      return 1
+    fi
+    if secondary=$(run_server "$secondary_name" cluster-b "$secondary_port" \
+      "nats://$primary_name:6222"); then
+      :
+    else
+      remove_cluster
+      if retryable_launch_error; then
+        cluster_base_port=$((cluster_base_port + 3))
+        launch_attempt=$((launch_attempt + 1))
+        continue
+      fi
+      return 1
+    fi
+    if tertiary=$(run_server "$tertiary_name" cluster-c "$tertiary_port" \
+      "nats://$primary_name:6222,nats://$secondary_name:6222"); then
+      return 0
+    else
+      remove_cluster
+      if retryable_launch_error; then
+        cluster_base_port=$((cluster_base_port + 3))
+        launch_attempt=$((launch_attempt + 1))
+        continue
+      fi
+      return 1
+    fi
+  done
+  echo "could not allocate three local NATS cluster ports" >&2
+  return 1
+}
+
+start_cluster
 
 wait_until_ready() {
   container=$1
   attempt=0
   while [ "$attempt" -lt 45 ]; do
+    if ! state=$(docker inspect --format '{{.State.Running}}' "$container" \
+      2>/dev/null); then
+      attempt=$((attempt + 1))
+      sleep 1
+      continue
+    fi
+    if [ "$state" != true ]; then
+      echo "NATS JetStream server $container stopped before becoming ready" >&2
+      docker logs "$container" >&2 || true
+      return 1
+    fi
     if docker logs "$container" 2>&1 | grep -q "Server is ready"; then
       return 0
     fi
@@ -352,6 +475,17 @@ wait_until_ready_count() {
   minimum=$2
   attempt=0
   while [ "$attempt" -lt 45 ]; do
+    if ! state=$(docker inspect --format '{{.State.Running}}' "$container" \
+      2>/dev/null); then
+      attempt=$((attempt + 1))
+      sleep 1
+      continue
+    fi
+    if [ "$state" != true ]; then
+      echo "NATS JetStream server $container stopped while restarting" >&2
+      docker logs "$container" >&2 || true
+      return 1
+    fi
     ready_count=$(docker logs "$container" 2>&1 \
       | grep -c "Server is ready" || true)
     if [ "$ready_count" -ge "$minimum" ]; then
@@ -384,10 +518,59 @@ wait_for_barrier() {
   return 1
 }
 
+wait_for_file() {
+  path=$1
+  label=$2
+  attempt=0
+  while [ "$attempt" -lt "$runner_timeout" ]; do
+    if [ -e "$signal.failed" ]; then
+      echo "$label failed (see $signal.failed)" >&2
+      return 1
+    fi
+    if [ -e "$path" ]; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  echo "timed out waiting for $label" >&2
+  return 1
+}
+
+wait_for_nonempty_file() {
+  path=$1
+  label=$2
+  attempt=0
+  while [ "$attempt" -lt "$runner_timeout" ]; do
+    if [ -e "$signal.failed" ]; then
+      echo "$label failed (see $signal.failed)" >&2
+      return 1
+    fi
+    if [ -s "$path" ]; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  echo "timed out waiting for $label" >&2
+  return 1
+}
+
 wait_for_routes() {
   container=$1
   attempt=0
   while [ "$attempt" -lt 45 ]; do
+    if ! state=$(docker inspect --format '{{.State.Running}}' "$container" \
+      2>/dev/null); then
+      attempt=$((attempt + 1))
+      sleep 1
+      continue
+    fi
+    if [ "$state" != true ]; then
+      echo "NATS JetStream server $container stopped while forming routes" >&2
+      docker logs "$container" >&2 || true
+      return 1
+    fi
     route_count=$(docker logs "$container" 2>&1 \
       | grep -c "Route connection created" || true)
     if [ "$route_count" -ge 2 ]; then
@@ -413,16 +596,10 @@ sleep 2
 
 if [ "$failure_mode" = leader ]; then
   (
-    leader=
-    while [ -z "$leader" ]; do
-      if [ -e "$signal.failed" ]; then
-        exit 1
-      fi
-      leader=$(sed -n '1p' "$leader_file" 2>/dev/null || true)
-      if [ -z "$leader" ]; then
-        sleep 1
-      fi
-    done
+    if ! wait_for_nonempty_file "$leader_file" "JetStream leader report"; then
+      exit 1
+    fi
+    leader=$(sed -n '1p' "$leader_file" 2>/dev/null || true)
     case "$leader" in
       cluster-a)
         survivor="$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$tertiary_port")"
@@ -448,20 +625,14 @@ if [ "$failure_mode" = leader ]; then
 fi
 
 (
-  while [ ! -e "$signal.1" ]; do
-    if [ -e "$signal.failed" ]; then
-      exit 1
-    fi
-    sleep 1
-  done
+  if ! wait_for_file "$signal.1" "cluster failure trigger"; then
+    exit 1
+  fi
 
   if [ "$failure_mode" = leader ]; then
-    while [ ! -e "$kill_ready_file" ]; do
-      if [ -e "$signal.failed" ]; then
-        exit 1
-      fi
-      sleep 1
-    done
+    if ! wait_for_file "$kill_ready_file" "leader failure trigger"; then
+      exit 1
+    fi
     leader=$(sed -n '1p' "$leader_file")
     case "$leader" in
       cluster-a) target=$primary ;;
@@ -513,7 +684,7 @@ else
 fi
 
 if [ "$failure_mode" = leader ]; then
-  integration_command env \
+  timeout --signal=TERM --kill-after=5s "${runner_timeout}s" env \
     NATS_TEST_SERVER="$(endpoint_for_port "$cluster_base_port")" \
     NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" \
@@ -525,7 +696,7 @@ if [ "$failure_mode" = leader ]; then
     --signal-file "$signal" --leader-file "$leader_file" \
     --survivor-file "$survivor_file" >"$peer_log" 2>&1 &
 else
-  integration_command env \
+  timeout --signal=TERM --kill-after=5s "${runner_timeout}s" env \
     NATS_TEST_SERVER="$(endpoint_for_port "$cluster_base_port")" \
     NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" \
@@ -542,7 +713,7 @@ attempt=0
 while [ ! -e "$peer_ready" ] && kill -0 "$peer_pid" >/dev/null 2>&1; do
   attempt=$((attempt + 1))
   # Nix may need to realize the Go peer on a fresh machine.
-  if [ "$attempt" -ge 180 ]; then
+  if [ "$attempt" -ge "$runner_timeout" ]; then
     echo "Go JetStream ordered reconnect peer did not become ready" >&2
     cat "$peer_log" >&2 || true
     exit 1
@@ -555,7 +726,7 @@ if [ ! -e "$peer_ready" ]; then
   cat "$peer_log" >&2 || true
   exit 1
 fi
-if [ "$failure_mode" = leader ] && [ ! -e "$leader_file" ]; then
+if [ "$failure_mode" = leader ] && [ ! -s "$leader_file" ]; then
   echo "Go JetStream ordered leader failover peer did not report a leader" >&2
   cat "$peer_log" >&2 || true
   exit 1
@@ -589,7 +760,8 @@ if [ "$failure_mode" = leader ]; then
 fi
 
 status=0
-if integration_command env \
+if integration_command timeout --signal=TERM --kill-after=5s \
+    "${runner_timeout}s" env \
     NATS_TEST_SERVER="$ocaml_server" \
     NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" \
@@ -654,5 +826,5 @@ else
   docker logs "$tertiary" >&2 || true
 fi
 trap - EXIT
-cleanup
+cleanup "$status"
 exit "$status"
