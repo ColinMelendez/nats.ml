@@ -145,8 +145,8 @@ val connect :
     events. *)
 
 val publish_msg : t -> Nats.Message.t -> (unit, Error.t) result
-(** [publish_msg connection message] fails with [Disconnected] while a
-    reconnect is in progress; Core publishes are not buffered or replayed. *)
+(** [publish_msg connection message] fails with [Disconnected] while a reconnect
+    is in progress; Core publishes are not buffered or replayed. *)
 
 val publish :
   t ->
@@ -155,8 +155,8 @@ val publish :
   Nats.Subject.t ->
   string ->
   (unit, Error.t) result
-  (** [publish connection ...] has the same reconnect and no-replay contract as
-      {!publish_msg}. *)
+(** [publish connection ...] has the same reconnect and no-replay contract as
+    {!publish_msg}. *)
 
 val subscribe :
   t ->
@@ -170,15 +170,16 @@ val subscribe :
     subscription, such as a pull-reply inbox, that is terminated with
     [Disconnected] rather than restored after a transport loss. The default is
     [true], preserving ordinary subscription replay. A blocked subscription read
-    and an in-flight drain receive [Disconnected]; deliveries already queued
-    or accepted by the server before the drain barrier remain available before
-    the terminal marker. [pending_messages] and
-    [pending_bytes] optionally constrain queued deliveries; each value must be
-    positive or [-1], where [-1] disables that endpoint-specific limit. A
-    connection's own bounded queue capacity remains in force. Subscription
-    setup is cancellation-safe: if cancellation arrives after the server
-    subscription is created but before setup returns, the subscription is
-    revoked before cancellation is re-raised. *)
+    and an in-flight drain receive [Disconnected]; deliveries already queued or
+    accepted by the server before the drain barrier remain available before the
+    terminal marker. [pending_messages] and [pending_bytes] optionally constrain
+    queued deliveries; each value must be positive or [-1], where [-1] disables
+    that endpoint-specific limit. A connection's own bounded queue capacity
+    remains in force. Subscription requests made while reconnecting fail with
+    [Disconnected]; unsubscribe and auto-unsubscribe requests are deferred until
+    [Reconnected]. Subscription setup is cancellation-safe: if cancellation
+    arrives after the server subscription is created but before setup returns,
+    the subscription is revoked before cancellation is re-raised. *)
 
 module Request : sig
   type t
@@ -193,14 +194,11 @@ module Request : sig
 end
 
 val request_async :
-  ?timeout:Mtime.Span.t ->
-  t ->
-  Nats.Message.t ->
-  (Request.t, Error.t) result
+  ?timeout:Mtime.Span.t -> t -> Nats.Message.t -> (Request.t, Error.t) result
 (** [request_async ?timeout connection message] starts a request and returns
-    once its private reply subscription is installed. The request remains
-    owned by [connection]'s switch until it replies, times out, is cancelled,
-    or the connection terminates. *)
+    once its private reply subscription is installed. The request remains owned
+    by [connection]'s switch until it replies, times out, is cancelled, or the
+    connection terminates. *)
 
 val request :
   ?timeout:Mtime.Span.t ->
@@ -224,9 +222,9 @@ val request_msg_retry :
   Nats.Message.t ->
   (Nats.Message.t, Error.t) result
 (** [request_msg_retry ?timeout ~retry_wait ~retry_attempts connection message]
-    retries only [No_responders] failures. [retry_attempts] counts retries
-    after the initial request; [None] retries without a limit. The wait uses
-    the connection's monotonic clock and remains cancellation-safe. A negative
+    retries only [No_responders] failures. [retry_attempts] counts retries after
+    the initial request; [None] retries without a limit. The wait uses the
+    connection's monotonic clock and remains cancellation-safe. A negative
     [retry_attempts] is rejected with [Invalid_retry_attempts]. *)
 
 val flush : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result

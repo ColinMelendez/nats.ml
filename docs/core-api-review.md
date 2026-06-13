@@ -49,6 +49,10 @@ already accepted the credentials. During reconnect, Core events from the failed
 transport are suppressed and the replacement `INFO`/`Connected` sequence is
 emitted as the reconnect control sequence.
 
+New publish and subscribe commands fail fast with `Disconnected` during that
+sequence; only unsubscribe and auto-unsubscribe commands are deferred. This is
+the explicit no-replay boundary for ordinary Core operations.
+
 ## Evidence
 
 The local G2 evidence gate passes inside the pinned Nix/OCaml 5.5 environment:
