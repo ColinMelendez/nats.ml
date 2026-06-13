@@ -9,7 +9,8 @@ The review checked the public `.mli` contracts against their implementations,
 the `Packet -> Op -> Client` transition boundary, reader ownership, structured
 errors, reconnect state, request and subscription ownership, cancellation, and
 terminal event behavior. Independent outside reviews were used for the pure
-state machine, Eio lifecycle, PRNG ownership, and the remediation diff.
+state machine, Eio lifecycle, and PRNG ownership. The remediation was then
+rechecked against the local Go SDK behavior and black-box regressions.
 
 ## Resolved findings
 
