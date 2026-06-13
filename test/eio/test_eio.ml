@@ -1777,6 +1777,69 @@ let () =
           equal string "after" (Nats.Message.payload delivery.message);
           expect_ok (Nats_eio.Connection.close connection);
           Eio.Promise.resolve hold_u (Error End_of_file));
+      test "shared configs derive independent reconnect jitter streams" (fun () ->
+          Eio_mock.Backend.run_full @@ fun env ->
+          let disconnect_a, disconnect_a_u = Eio.Promise.create () in
+          let disconnect_b, disconnect_b_u = Eio.Promise.create () in
+          let hold_a, hold_a_u = Eio.Promise.create () in
+          let hold_b, hold_b_u = Eio.Promise.create () in
+          let redial_a, redial_a_u = Eio.Promise.create () in
+          let redial_b, redial_b_u = Eio.Promise.create () in
+          let first_a = Eio_mock.Flow.make "jitter-first-a" in
+          Eio_mock.Flow.on_read first_a
+            [ `Return info_wire; `Await disconnect_a ];
+          let second_a = Eio_mock.Flow.make "jitter-second-a" in
+          Eio_mock.Flow.on_read second_a [ `Return info_wire; `Await hold_a ];
+          let net_a = make_net "jitter-network-a" in
+          Eio_mock.Net.on_connect net_a
+            [ `Return first_a;
+              `Raise End_of_file;
+              `Run (fun () ->
+                let now = Eio.Time.Mono.now env#mono_clock in
+                Eio.Promise.resolve redial_a_u now;
+                second_a) ];
+          let first_b = Eio_mock.Flow.make "jitter-first-b" in
+          Eio_mock.Flow.on_read first_b
+            [ `Return info_wire; `Await disconnect_b ];
+          let second_b = Eio_mock.Flow.make "jitter-second-b" in
+          Eio_mock.Flow.on_read second_b [ `Return info_wire; `Await hold_b ];
+          let net_b = make_net "jitter-network-b" in
+          Eio_mock.Net.on_connect net_b
+            [ `Return first_b;
+              `Raise End_of_file;
+              `Run (fun () ->
+                let now = Eio.Time.Mono.now env#mono_clock in
+                Eio.Promise.resolve redial_b_u now;
+                second_b) ];
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v ~max_reconnect_attempts:(Some 3)
+                 ~reconnect_delay:Mtime.Span.(1 * ms)
+                 ~reconnect_max_delay:Mtime.Span.(10 * ms)
+                 ~reconnect_jitter:Mtime.Span.(1 * ms)
+                 ~random:(Random.State.make [| 7 |]) ())
+          in
+          Eio.Switch.run @@ fun sw ->
+          let connection_a =
+            expect_ok
+              (Nats_eio.Connection.connect ~sw ~net:net_a
+                 ~clock:env#mono_clock ~config [ endpoint ])
+          in
+          let connection_b =
+            expect_ok
+              (Nats_eio.Connection.connect ~sw ~net:net_b
+                 ~clock:env#mono_clock ~config [ endpoint ])
+          in
+          Eio.Promise.resolve disconnect_a_u (Error End_of_file);
+          Eio.Promise.resolve disconnect_b_u (Error End_of_file);
+          let time_a = Eio.Promise.await redial_a in
+          let time_b = Eio.Promise.await redial_b in
+          if Mtime.compare time_a time_b = 0 then
+            fail "shared config produced identical reconnect jitter";
+          expect_ok (Nats_eio.Connection.close connection_a);
+          expect_ok (Nats_eio.Connection.close connection_b);
+          Eio.Promise.resolve hold_a_u (Error End_of_file);
+          Eio.Promise.resolve hold_b_u (Error End_of_file));
       test "defers unsubscribe until the reconnect handshake completes"
         (fun () ->
           let disconnect, disconnect_u = Eio.Promise.create () in

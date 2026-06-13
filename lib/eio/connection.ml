@@ -13,6 +13,7 @@ module Config = struct
     reconnect_max_delay : Mtime.Span.t;
     reconnect_jitter : Mtime.Span.t;
     random : Random.State.t;
+    random_lock : Mutex.t;
     tls : Tls.Config.client option;
     tls_required : bool;
     handshake_timeout : Mtime.Span.t;
@@ -99,7 +100,7 @@ module Config = struct
           in
           let random =
             match random with
-            | Some random -> random
+            | Some random -> Random.State.copy random
             | None -> Random.State.make_self_init ()
           in
           Ok
@@ -117,6 +118,7 @@ module Config = struct
               reconnect_max_delay;
               reconnect_jitter;
               random;
+              random_lock = Mutex.create ();
               tls;
               tls_required;
               handshake_timeout;
@@ -131,6 +133,12 @@ module Config = struct
     | Error error ->
         invalid_arg
           (Format.asprintf "invalid default Eio config: %a" Error.pp error)
+
+  let random_for_connection config =
+    Mutex.lock config.random_lock;
+    Fun.protect
+      ~finally:(fun () -> Mutex.unlock config.random_lock)
+      (fun () -> Random.State.split config.random)
 end
 
 module Event_stream = struct
@@ -2260,7 +2268,7 @@ let create ~sw ~clock ~config ~(dial : dial) ~pool ~current_endpoint ~tls_active
       flow = transport;
       clock;
       config;
-      random = Random.State.copy config.Config.random;
+      random = Config.random_for_connection config;
       work = Eio.Stream.create max_int;
       input;
       pending = Buffer.create 4096;
