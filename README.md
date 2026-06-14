@@ -28,7 +28,7 @@ channels, and mutable handles.
 | Server-wide administration | Monitoring and selected controls are covered by the optional `nats-eio-system` package: privileged server/account queries, fan-out collection, reload, client kick/LDM, and system events. Claims, resolver, and user-management operations remain separate work. |
 | JetStream consumption | Pull, push, ordered, fetch-by-bytes, no-wait fetch, flow control, priority groups, and bounded continuous consumption are covered. `Messages`/`Consume` threshold callbacks are represented by Eio backpressure and result ownership. |
 | Key-Value watches | Revision-resumable `Watch` and distinct `Ordered_watch` modes are covered. Ordinary watches retain their weaker recovery contract; ordered watches validate consumer sequence continuity and recover at the next stream revision. |
-| Object Store | Streaming data access, links, metadata, watches, sealing, bucket managers/listers, and file helpers are covered. |
+| Object Store | Streaming data access, links, metadata, watches, sealing, bucket managers/listers, and file helpers are covered; the anonymous replicated cluster slice also covers seed loss, elected-leader loss, and durable restart. |
 
 ### JetStream administration versus server administration
 
@@ -129,6 +129,8 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-interop-auth-jetstream-reconnect-matrix.sh
 ./scripts/runtest-interop-jetstream-cluster.sh
 ./scripts/runtest-interop-key-value-cluster.sh
+./scripts/runtest-interop-object-store-cluster.sh
+./scripts/runtest-interop-object-store-cluster-matrix.sh
 ./scripts/runtest-interop-jetstream-cluster-matrix.sh
 ./scripts/runtest-interop-auth-jetstream-cluster.sh
 ./scripts/runtest-interop-auth-jetstream-cluster-matrix.sh
@@ -320,8 +322,14 @@ and sealing. Its six-mode single-server authentication/TLS matrix passes all
 ordered-watch recovery after seed loss, elected-leader loss, and durable seed
 restart in anonymous plaintext mode. Broader authenticated or failure
 topologies remain separate acceptance work for KV and Object Store cluster
-behavior; the single-server Object Store authentication/TLS contract is now
-covered by the matrix above.
+behavior. The dedicated `./scripts/runtest-interop-object-store-cluster.sh`
+runner covers replicated Object Store content, metadata, cross-SDK writes and
+reads, cleanup, seed loss, elected-leader loss, and durable seed restart in
+anonymous plaintext mode. Its nine cases pass across the three pinned releases;
+the companion matrix repeats those cases by default and accepts
+`NATS_SERVER_IMAGES` or `NATS_INTEROP_OBJECT_STORE_CLUSTER_MODES` for a bounded
+sweep. Authenticated, multi-node, and changed-advertisement scenarios remain
+separate acceptance work.
 The separate JetStream reconnect runner uses a file-backed stream and durable
 Push consumers on one persistent server container, kills and restarts that
 container, and verifies both the OCaml and Go Push legs recover and exchange

@@ -30,8 +30,14 @@ case "$cluster_scenario" in
     bucket="OCAML_INTEROP_KV_$$"
     stream="KV_$bucket"
     ;;
+  object)
+    acceptance_executable=test/interop/interop_object_store_reconnect_acceptance.exe
+    prefix="ocaml.interop.object-store.cluster.$$"
+    bucket="OCAML_INTEROP_OBJ_$$"
+    stream="OBJ_$bucket"
+    ;;
   *)
-    echo "NATS_TEST_JS_CLUSTER_SCENARIO must be ordered or kv" >&2
+    echo "NATS_TEST_JS_CLUSTER_SCENARIO must be ordered, kv, or object" >&2
     exit 1
     ;;
 esac
@@ -694,6 +700,8 @@ watcher=$!
 if [ "$failure_mode" = leader ]; then
   if [ "$cluster_scenario" = kv ]; then
     peer_mode=jetstream-kv-leader-failover
+  elif [ "$cluster_scenario" = object ]; then
+    peer_mode=jetstream-object-leader-failover
   else
     peer_mode=jetstream-ordered-leader-failover
   fi
@@ -701,6 +709,8 @@ if [ "$failure_mode" = leader ]; then
 elif [ "$failure_mode" = restart ]; then
   if [ "$cluster_scenario" = kv ]; then
     peer_mode=jetstream-kv-restart
+  elif [ "$cluster_scenario" = object ]; then
+    peer_mode=jetstream-object-restart
   else
     peer_mode=jetstream-ordered-restart
   fi
@@ -708,6 +718,8 @@ elif [ "$failure_mode" = restart ]; then
 else
   if [ "$cluster_scenario" = kv ]; then
     peer_mode=jetstream-kv-reconnect
+  elif [ "$cluster_scenario" = object ]; then
+    peer_mode=jetstream-object-reconnect
   else
     peer_mode=jetstream-ordered-reconnect
   fi

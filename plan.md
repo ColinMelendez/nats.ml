@@ -233,6 +233,11 @@ management and delivery operations, consumer recreation under more failure
 modes, and multi-node loss. Keep the failure trigger synchronized with a
 flushed, observable barrier so a test failure identifies the lost invariant
 rather than a startup race.
+The anonymous Object Store cluster runner separately covers replicated content
+and metadata recovery after seed loss, elected-leader loss, and durable seed
+restart; all nine cases pass across the three pinned releases. Authenticated,
+multi-node, changed-advertisement, and broader management-operation failure
+topologies remain in this workstream.
 
 #### D. Make cross-SDK behavior the wire-level oracle
 
@@ -1001,7 +1006,15 @@ semantics before calling the feature complete.
   `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. Stream updates omit
   default values for version-gated fields absent from an older server's INFO,
   preserving Object Store sealing compatibility on the pinned 2.12 release.
-  Cluster and failure-injection coverage remains acceptance work.
+- Completed anonymous live cluster acceptance: the dedicated
+  `runtest-interop-object-store-cluster.sh` runner uses the official Go peer
+  and a three-node file-backed stream to verify cross-SDK content and metadata
+  visibility, post-failure writes and reads, cleanup, seed loss, elected-leader
+  loss, and durable seed restart. All nine cases pass across the three pinned
+  releases. Authenticated, multi-node, changed-advertisement, and broader
+  management-operation failure topologies remain acceptance work.
+  Its companion matrix wrapper repeats the nine default cells and supports
+  bounded image and failure-mode selection.
 - Keep transfer chunks incremental; never require a whole object as one
   `string`.
 - Preserve the metadata rollup as the commit point and define cancellation,
@@ -1027,10 +1040,14 @@ semantics before calling the feature complete.
   listing, deletion and tombstones, updates, sealing, and cleanup against the
   official Go peer. Its six-mode single-server authentication/TLS matrix
   passes all 18 cases across the three pinned releases.
+- The dedicated Object Store cluster runner covers the same cross-SDK content
+  and metadata contracts through seed loss, elected-leader loss, and durable
+  seed restart; all nine anonymous cases pass across the three pinned releases.
 - Large Object Store transfer, metadata, replacement/deletion ordering,
   interrupted-transfer cleanup, listing/watch boundaries, links, rename,
   sealing, and bucket configuration updates are covered locally; broader
-  cluster and failure-injection coverage remains acceptance work.
+  authenticated and multi-node cluster/failure coverage remains acceptance
+  work.
 - No direct dependence by these modules on a private socket or private
   connection lifecycle.
 
@@ -1051,9 +1068,9 @@ revision semantics before documenting them as stable.
   cleanup, and replacement cleanup for prior tombstone NUIDs are covered by
   focused mock-transport regressions. File-transfer partial-result behavior is
   now explicit in the public documentation.
-- Remaining before a release claim: live KV/Object Store cluster and
-  failure-injection coverage, broader authenticated topologies, and the final
-  acceptance evidence described in the production-readiness program.
+- Remaining before a release claim: broader authenticated and multi-node KV/
+  Object Store failure coverage, plus the final acceptance evidence described
+  in the production-readiness program.
 
 ## Phase 6 — Services over Core NATS
 
