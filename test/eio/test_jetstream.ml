@@ -2623,6 +2623,10 @@ let () =
                 fail "stream update cleared deny-purge";
               if not (contains_substring ~needle:"no_ack\\\":false" trace)
               then fail "stream update omitted the no-ack false value";
+              if contains_substring ~needle:"allow_batched\\\":false" trace
+              then
+                fail
+                  "stream update sent an unsupported default allow-batched field";
               if count_substring ~needle:"num_replicas\\\":2" trace < 1 then
                 fail "stream update did not replace the replica count";
               if count_substring ~needle:"sealed\\\":true" trace < 2 then

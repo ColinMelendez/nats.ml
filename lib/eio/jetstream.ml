@@ -2529,7 +2529,11 @@ module Stream = struct
       allow_atomic_publish = Some (Config.allow_atomic_publish value);
       allow_msg_schedules = Some (Config.allow_msg_schedules value);
       persist_mode = Some (Config.persist_mode value);
-      allow_batch_publish = Some (Config.allow_batch_publish value);
+      allow_batch_publish =
+        (match (current.allow_batch_publish, Config.allow_batch_publish value) with
+        | Some _, value -> Some value
+        | None, true -> Some true
+        | None, false -> None);
       subject_delete_marker_ttl =
         Some
           (Option.value ~default:0L
