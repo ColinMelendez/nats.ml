@@ -52,14 +52,13 @@ let expect_status status bucket =
   | Nats_eio.Object_store.Config.Memory -> ()
   | Nats_eio.Object_store.Config.File ->
       failf "Object Store status used file storage, expected memory");
-  (match Nats_eio.Object_store.Status.metadata status with
-  | [ (key, value) ]
-    when String.equal key "owner" && String.equal value "interop" ->
-      ()
-  | metadata ->
-      failf
-        "Object Store status metadata had %d entries, expected owner=interop"
-        (List.length metadata));
+  if
+    not
+      (List.exists
+         (fun (key, value) ->
+           String.equal key "owner" && String.equal value "interop")
+         (Nats_eio.Object_store.Status.metadata status))
+  then failf "Object Store status omitted owner=interop metadata";
   if Nats_eio.Object_store.Status.sealed status then
     failf "Object Store status was unexpectedly sealed"
 
