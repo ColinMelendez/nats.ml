@@ -12,6 +12,7 @@ module Config : sig
     ?read_capacity:int ->
     ?read_chunk_size:int ->
     ?max_reconnect_attempts:int option ->
+    ?reconnect_buffer_size:int ->
     ?reconnect_delay:Mtime.Span.t ->
     ?reconnect_max_delay:Mtime.Span.t ->
     ?reconnect_jitter:Mtime.Span.t ->
@@ -28,6 +29,11 @@ module Config : sig
   (** [v] validates connection capacities, timeouts, and reconnect policy.
       [max_reconnect_attempts] counts full candidate passes after a transport
       loss; [None] permits unlimited attempts. The default is [Some 3]. The
+      [reconnect_buffer_size] option bounds bytes accepted from new Core
+      publishes while reconnecting; its default is 8 MiB and [-1] disables the
+      bound. A publish accepted into this buffer is written after [CONNECT] and
+      subscription replay succeeds, and can be lost or duplicated at a transport
+      failure. A value of [0] selects the default, matching the Go client. The
       first redial is immediate; later attempts wait [reconnect_delay] (default
       one second) and double up to [reconnect_max_delay] (default 30 seconds).
       [reconnect_jitter] adds a bounded random offset to delayed reconnect
@@ -107,7 +113,12 @@ module Subscription : sig
   val iter : t -> f:(delivery -> unit) -> (unit, Error.t) result
   val unsubscribe : t -> (unit, Error.t) result
   val auto_unsubscribe : t -> max_messages:int -> (unit, Error.t) result
+
   val drain : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
+  (** [drain subscription] keeps the subscription drain pending across a
+      transient reconnect and reissues its server barrier after the replacement
+      subscription is installed. A timeout still completes the local drain with
+      [Timeout]. *)
 end
 
 type t
@@ -145,8 +156,11 @@ val connect :
     events. *)
 
 val publish_msg : t -> Nats.Message.t -> (unit, Error.t) result
-(** [publish_msg connection message] fails with [Disconnected] while a reconnect
-    is in progress; Core publishes are not buffered or replayed. *)
+(** [publish_msg connection message] accepts a new publish during reconnect
+    while the bounded reconnect buffer has room. Accepted bytes are flushed
+    after the replacement handshake and subscription replay. The call does not
+    mean that the server received the message; a full buffer returns
+    [Reconnect_buffer_exceeded]. *)
 
 val publish :
   t ->
@@ -155,7 +169,7 @@ val publish :
   Nats.Subject.t ->
   string ->
   (unit, Error.t) result
-(** [publish connection ...] has the same reconnect and no-replay contract as
+(** [publish connection ...] has the same reconnect-buffer contract as
     {!publish_msg}. *)
 
 val subscribe :
@@ -170,16 +184,20 @@ val subscribe :
     subscription, such as a pull-reply inbox, that is terminated with
     [Disconnected] rather than restored after a transport loss. The default is
     [true], preserving ordinary subscription replay. A blocked subscription read
-    and an in-flight drain receive [Disconnected]; deliveries already queued or
-    accepted by the server before the drain barrier remain available before the
-    terminal marker. [pending_messages] and [pending_bytes] optionally constrain
-    queued deliveries; each value must be positive or [-1], where [-1] disables
-    that endpoint-specific limit. A connection's own bounded queue capacity
-    remains in force. Subscription requests made while reconnecting fail with
-    [Disconnected]; unsubscribe and auto-unsubscribe requests are deferred until
-    [Reconnected]. Subscription setup is cancellation-safe: if cancellation
-    arrives after the server subscription is created but before setup returns,
-    the subscription is revoked before cancellation is re-raised. *)
+    receives [Disconnected] during a transient transport loss; an in-flight
+    drain remains pending and re-establishes its server barrier after reconnect.
+    Deliveries already queued or accepted by the server before the drain barrier
+    remain available before the terminal marker. [pending_messages] and
+    [pending_bytes] optionally constrain queued deliveries; each value must be
+    positive or [-1], where [-1] disables that endpoint-specific limit. A
+    connection's own bounded queue capacity remains in force. A subscription
+    requested while reconnecting is registered immediately in the local replay
+    state; its [SUB] is emitted as part of the replacement handshake.
+    Unsubscribe and auto-unsubscribe update that local intent without writing a
+    separate wire command until a live connection is available. Subscription
+    setup is cancellation-safe: if cancellation arrives after the server
+    subscription is created but before setup returns, the subscription is
+    revoked before cancellation is re-raised. *)
 
 module Request : sig
   type t
@@ -198,7 +216,11 @@ val request_async :
 (** [request_async ?timeout connection message] starts a request and returns
     once its private reply subscription is installed. The request remains owned
     by [connection]'s switch until it replies, times out, is cancelled, or the
-    connection terminates. *)
+    connection terminates. A request started during reconnect is represented in
+    the replay state and its publish uses the bounded reconnect buffer. A
+    request already in flight is not published again after a transport loss; it
+    remains pending until its reply, timeout, cancellation, or final connection
+    termination. *)
 
 val request :
   ?timeout:Mtime.Span.t ->
@@ -228,6 +250,14 @@ val request_msg_retry :
     [retry_attempts] is rejected with [Invalid_retry_attempts]. *)
 
 val flush : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
+(** [flush connection] during reconnect queues the protocol [PING] behind the
+    replacement handshake and waits for its [PONG]. A flush that was already
+    waiting when the transport failed receives [Disconnected]. *)
+
 val drain : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
+(** [drain connection] closes the connection and returns
+    [Connection_reconnecting] when called during transport recovery, matching
+    the Go client's reconnecting-connection behavior. *)
+
 val close : t -> (unit, Error.t) result
 val events : t -> Event_stream.t

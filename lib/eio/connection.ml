@@ -9,6 +9,7 @@ module Config = struct
     read_chunk_size : int;
     inbox_prefix : Nats.Subject.t;
     max_reconnect_attempts : int option;
+    reconnect_buffer_size : int option;
     reconnect_delay : Mtime.Span.t;
     reconnect_max_delay : Mtime.Span.t;
     reconnect_jitter : Mtime.Span.t;
@@ -25,6 +26,7 @@ module Config = struct
   let default_span = Mtime.Span.(5 * s)
   let default_reconnect_delay = Mtime.Span.(1 * s)
   let default_reconnect_max_delay = Mtime.Span.(30 * s)
+  let default_reconnect_buffer_size = 8 * 1024 * 1024
 
   let validate_capacity name value =
     if value > 0 then Ok value
@@ -38,6 +40,12 @@ module Config = struct
     | None -> Ok None
     | Some value when value >= 0 -> Ok (Some value)
     | Some value -> Error (Error.Invalid_reconnect_attempts value)
+
+  let validate_reconnect_buffer_size value =
+    if Int.equal value 0 then Ok (Some default_reconnect_buffer_size)
+    else if Int.equal value (-1) then Ok None
+    else if value > 0 then Ok (Some value)
+    else Error (Error.Invalid_reconnect_buffer_size value)
 
   let validate_reconnect_delays initial maximum =
     match validate_timeout "reconnect delay" initial with
@@ -54,6 +62,7 @@ module Config = struct
       ?(command_capacity = 128) ?(subscription_capacity = 256)
       ?(event_capacity = 64) ?(read_capacity = 4) ?(read_chunk_size = 65536)
       ?(max_reconnect_attempts = Some 3)
+      ?(reconnect_buffer_size = default_reconnect_buffer_size)
       ?(reconnect_delay = default_reconnect_delay)
       ?(reconnect_max_delay = default_reconnect_max_delay)
       ?(reconnect_jitter = Mtime.Span.zero) ?random ?tls ?(tls_required = false)
@@ -90,6 +99,9 @@ module Config = struct
           let* max_reconnect_attempts =
             validate_reconnect_attempts max_reconnect_attempts
           in
+          let* reconnect_buffer_size =
+            validate_reconnect_buffer_size reconnect_buffer_size
+          in
           let* reconnect_delay, reconnect_max_delay =
             validate_reconnect_delays reconnect_delay reconnect_max_delay
           in
@@ -114,6 +126,7 @@ module Config = struct
               read_chunk_size;
               inbox_prefix;
               max_reconnect_attempts;
+              reconnect_buffer_size;
               reconnect_delay;
               reconnect_max_delay;
               reconnect_jitter;
@@ -652,6 +665,7 @@ and command =
       promise : (unit, Error.t) result Eio.Promise.t;
       resolver : (unit, Error.t) result Eio.Promise.u;
     }
+  | Resume_subscription_drain of subscription_drain_waiter
   | Cancel_subscription_drain of { sid : int }
   | Request of {
       message : Nats.Message.t;
@@ -734,6 +748,9 @@ type t = {
   mutable eof_seen : bool;
   mutable closed : bool;
   mutable reconnecting : bool;
+  reconnect_pending : string Queue.t;
+  mutable reconnect_pending_bytes : int;
+  mutable reconnect_publish_state : Nats.Client.t option;
   mutable reconnect_signal : (unit, Error.t) result Eio.Promise.t;
   mutable reconnect_signal_u : (unit, Error.t) result Eio.Promise.u;
   mutable reconnect_attempts : int;
@@ -744,7 +761,6 @@ type t = {
   mutable connect_info_ready : bool;
   mutable pending_commands : int;
   mutable active_request_setup : (int, Error.t) result Eio.Promise.u option;
-  deferred_commands : command Queue.t;
   mutable handshake_deadline : Mtime.t option;
   mutable timer_generation : int;
   mutable scheduled_deadline : Mtime.t option;
@@ -929,6 +945,7 @@ let fail_command error = function
   | Auto_unsubscribe { resolver; _ } -> fail_waiter resolver error
   | Drain_subscription { subscription; _ } ->
       Subscription.fail_pending_drain subscription error
+  | Resume_subscription_drain _ -> ()
   | Cancel_subscription_drain _ -> ()
   | Request { setup; _ } -> resolve_unit setup (Error error)
   | Cancel_request _ -> ()
@@ -936,6 +953,10 @@ let fail_command error = function
   | Flush { resolver; _ } -> fail_waiter resolver error
   | Drain { resolver; _ } -> fail_waiter resolver error
   | Close { resolver } -> resolve_unit resolver (Ok ())
+
+let clear_reconnect_pending t =
+  Queue.clear t.reconnect_pending;
+  t.reconnect_pending_bytes <- 0
 
 let fail_pending_commands t =
   let rec loop () =
@@ -947,9 +968,6 @@ let fail_pending_commands t =
     | Some (Input_ready | Timer _) -> loop ()
   in
   loop ();
-  while not (Queue.is_empty t.deferred_commands) do
-    fail_command Error.Closed (Queue.take t.deferred_commands)
-  done;
   t.pending_commands <- 0
 
 let fail_requests t error =
@@ -958,8 +976,6 @@ let fail_requests t error =
   in
   Hashtbl.clear t.requests;
   List.iter (fun (_sid, waiter) -> fail_waiter waiter.resolver error) requests
-
-let request_sids t = Hashtbl.fold (fun sid _ acc -> sid :: acc) t.requests []
 
 let fail_subscription_drains t error =
   let waiters =
@@ -979,6 +995,8 @@ let finish t error =
     let suppress_disconnect = t.reconnecting in
     t.closed <- true;
     t.reconnecting <- false;
+    clear_reconnect_pending t;
+    t.reconnect_publish_state <- None;
     resolve_reconnect t (Error error);
     Event_stream.end_control_sequence t.events;
     fail_active_request_setup t error;
@@ -993,10 +1011,13 @@ let finish t error =
     | Error.Invalid_pending_limit _ | Error.Command_queue_full _
     | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
     | Error.Invalid_reconnect_attempts _ | Error.Invalid_retry_attempts _
-    | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
-    | Error.Invalid_timeout _ | Error.No_responders | Error.Auth _ ->
+    | Error.Invalid_reconnect_buffer_size _ | Error.Invalid_reconnect_delay _
+    | Error.Invalid_reconnect_jitter _ | Error.Invalid_timeout _
+    | Error.No_responders | Error.Reconnect_buffer_exceeded _ | Error.Auth _ ->
         ()
-    | Error.Protocol _ | Error.Draining | Error.Closed -> ());
+    | Error.Protocol _ | Error.Connection_reconnecting | Error.Draining
+    | Error.Closed ->
+        ());
     close_subscriptions t error;
     fail_requests t error;
     fail_subscription_drains t error;
@@ -1052,10 +1073,18 @@ let unsubscribe_and_forget t sid =
       t.state <- Nats.Client.forget_subscription t.state sid;
       Error error
 
-let release_deferred_commands t =
-  while not (Queue.is_empty t.deferred_commands) do
-    Eio.Stream.add t.work (Command (Queue.take t.deferred_commands))
-  done
+let reconnect_pending_output t =
+  if Queue.is_empty t.reconnect_pending then None
+  else
+    let output = Buffer.create t.reconnect_pending_bytes in
+    Queue.iter (Buffer.add_string output) t.reconnect_pending;
+    clear_reconnect_pending t;
+    Some (Buffer.contents output)
+
+let flush_reconnect_pending t =
+  match reconnect_pending_output t with
+  | None -> Ok ()
+  | Some output -> write_outputs t [ output ]
 
 let push_reconnect_core_events t =
   let events =
@@ -1113,17 +1142,25 @@ let handle_event t event =
   | Nats.Event.Connected ->
       t.handshake_deadline <- None;
       if t.reconnecting then
-        match push_reconnect_core_events t with
+        match flush_reconnect_pending t with
         | Error error -> Error error
-        | Ok () ->
-            if Event_stream.push_control t.events Event.Reconnected then (
-              attach_replayed_subscriptions t;
-              Event_stream.end_control_sequence t.events;
-              t.reconnecting <- false;
-              resolve_reconnect t (Ok ());
-              release_deferred_commands t;
-              Ok ())
-            else Error (Error.Slow_consumer Error.Events)
+        | Ok () -> (
+            match push_reconnect_core_events t with
+            | Error error -> Error error
+            | Ok () ->
+                if Event_stream.push_control t.events Event.Reconnected then (
+                  attach_replayed_subscriptions t;
+                  Hashtbl.iter
+                    (fun _sid (waiter : subscription_drain_waiter) ->
+                      Eio.Stream.add t.work
+                        (Command (Resume_subscription_drain waiter)))
+                    t.subscription_drains;
+                  Event_stream.end_control_sequence t.events;
+                  t.reconnecting <- false;
+                  t.reconnect_publish_state <- None;
+                  resolve_reconnect t (Ok ());
+                  Ok ())
+                else Error (Error.Slow_consumer Error.Events))
       else if not t.connect_sent then Ok ()
       else if Eio.Promise.is_resolved t.ready_promise then Ok ()
       else (
@@ -1343,6 +1380,7 @@ let consume_pending t length =
 
 let apply_incoming t =
   let was_established = Eio.Promise.is_resolved t.ready_promise in
+  let previous_state = t.state in
   let was_draining =
     match Nats.Client.phase t.state with
     | Nats.Client.Draining -> true
@@ -1374,8 +1412,10 @@ let apply_incoming t =
                 | Ok () -> (
                     consume_pending t consumed;
                     if Nats.Client.phase t.state = Nats.Client.Closed then
-                      if was_established && not was_draining then
-                        Error Error.Disconnected
+                      if was_established && not was_draining then (
+                        if Option.is_none t.reconnect_publish_state then
+                          t.reconnect_publish_state <- Some previous_state;
+                        Error Error.Disconnected)
                       else (
                         finish t Error.Disconnected;
                         Ok ())
@@ -1389,24 +1429,6 @@ let apply_incoming t =
       in
       loop ()
 
-let fail_recovery_commands t error =
-  let close_requested = ref false in
-  let rec loop () =
-    match Eio.Stream.take_nonblocking t.work with
-    | None -> ()
-    | Some (Command (Close { resolver })) ->
-        resolve_unit resolver (Ok ());
-        close_requested := true;
-        loop ()
-    | Some (Command command) ->
-        fail_command error command;
-        loop ()
-    | Some (Input_ready | Timer _) -> loop ()
-  in
-  loop ();
-  t.pending_commands <- 0;
-  !close_requested
-
 let fail_barriers t error =
   Queue.iter
     (function
@@ -1415,8 +1437,7 @@ let fail_barriers t error =
             waiter.completed <- true;
             fail_waiter waiter.resolver error)
       | Drain_waiter waiter -> fail_waiter waiter.resolver error
-      | Subscription_drain_waiter waiter ->
-          Subscription.complete_drain_waiter waiter (Error error))
+      | Subscription_drain_waiter waiter -> waiter.server_flushed <- false)
     t.barriers;
   Queue.clear t.barriers
 
@@ -1432,7 +1453,7 @@ let invalidate_timer t =
   t.timer_generation <- t.timer_generation + 1;
   t.scheduled_deadline <- None
 
-let reset_reconnect_attempt t =
+let reset_reconnect_attempt ?(preserve_pending_pings = false) t =
   (match t.current_endpoint with
   | None -> ()
   | Some endpoint -> t.pool := Nats.Endpoint.Pool.failed !(t.pool) endpoint);
@@ -1448,7 +1469,12 @@ let reset_reconnect_attempt t =
   t.reconnect_deadline <- None;
   invalidate_timer t;
   close_transport t.flow;
-  t.state <- Nats.Client.prepare_reconnect t.state
+  t.state <- Nats.Client.prepare_reconnect ~preserve_pending_pings t.state
+
+let preserve_reconnect_publish_state t =
+  match t.reconnect_publish_state with
+  | Some _ -> ()
+  | None -> t.reconnect_publish_state <- Some t.state
 
 let reconnect_limit_reached t =
   match t.config.Config.max_reconnect_attempts with
@@ -1513,7 +1539,7 @@ let start_reconnect_attempt t =
       Ok ()
 
 let retry_reconnect t error =
-  reset_reconnect_attempt t;
+  reset_reconnect_attempt ~preserve_pending_pings:true t;
   schedule_reconnect t error
 
 let recover_transport t initial_error =
@@ -1522,7 +1548,6 @@ let recover_transport t initial_error =
       if Subscription.replay_on_reconnect subscription then
         Subscription.detach subscription)
     t.subscriptions;
-  let request_ids = request_sids t in
   let non_reconnecting_sids =
     Hashtbl.fold
       (fun sid subscription acc ->
@@ -1536,17 +1561,14 @@ let recover_transport t initial_error =
       t.state <- Nats.Client.forget_subscription t.state sid)
     non_reconnecting_sids;
   fail_active_request_setup t Error.Disconnected;
-  fail_requests t Error.Disconnected;
-  fail_subscription_drains t Error.Disconnected;
   fail_barriers t Error.Disconnected;
-  let close_requested = fail_recovery_commands t Error.Disconnected in
+  preserve_reconnect_publish_state t;
   reset_reconnect_attempt t;
   t.reconnect_attempts <- 0;
   t.reconnect_wait <- t.config.Config.reconnect_delay;
   t.reconnect_deadline <- None;
   t.handshake_deadline <- None;
-  if close_requested then Error Error.Closed
-  else if reconnect_limit_reached t then Error initial_error
+  if reconnect_limit_reached t then Error initial_error
   else (
     Event_stream.begin_control_sequence t.events;
     if not (Event_stream.push_control t.events Event.Disconnected) then (
@@ -1554,15 +1576,108 @@ let recover_transport t initial_error =
       Error (Error.Slow_consumer Error.Events))
     else (
       t.reconnecting <- true;
-      let state = Nats.Client.prepare_reconnect t.state in
-      t.state <-
-        List.fold_left
-          (fun state sid -> Nats.Client.forget_subscription state sid)
-          state request_ids;
       start_reconnect_attempt t))
+
+let enqueue_reconnect_output t output =
+  Queue.add output t.reconnect_pending;
+  t.reconnect_pending_bytes <- t.reconnect_pending_bytes + String.length output
+
+let enqueue_reconnect_publish_output t message =
+  match t.reconnect_publish_state with
+  | None -> Error Error.Disconnected
+  | Some state -> (
+      match Nats.Client.outgoing state (Nats.Client.Publish message) with
+      | Error error -> Error (command_error error)
+      | Ok transition -> (
+          match t.config.Config.reconnect_buffer_size with
+          | Some limit when Int.compare t.reconnect_pending_bytes limit >= 0 ->
+              Error (Error.Reconnect_buffer_exceeded { limit })
+          | None | Some _ ->
+              List.iter (enqueue_reconnect_output t) transition.output;
+              Ok ()))
+
+let enqueue_reconnect_publish t message resolver =
+  match enqueue_reconnect_publish_output t message with
+  | Ok () ->
+      resolve_unit resolver (Ok ());
+      Ok ()
+  | Error error ->
+      fail_waiter resolver error;
+      Ok ()
+
+type subscription_drain_setup =
+  | Drain_subscription_closed
+  | Drain_subscription_timeout
+  | Drain_subscription_ready of subscription_drain_waiter
+
+let arm_subscription_drain t ~sid ~timeout ~subscription ~promise ~resolver =
+  match Hashtbl.find_opt t.subscriptions sid with
+  | None -> Drain_subscription_closed
+  | Some subscription -> (
+      match Mtime.add_span (now t) timeout with
+      | None -> Drain_subscription_timeout
+      | Some deadline ->
+          let waiter =
+            {
+              sid;
+              promise;
+              resolver;
+              deadline;
+              server_flushed = false;
+              done_seen = false;
+              completed = false;
+              on_complete =
+                (fun result ->
+                  Subscription.record_drain_result subscription result;
+                  Subscription.terminate_after_drain subscription;
+                  Subscription.clear_drain_state subscription;
+                  t.state <- Nats.Client.forget_subscription t.state sid;
+                  Hashtbl.remove t.subscription_drains sid;
+                  Hashtbl.remove t.subscriptions sid);
+            }
+          in
+          Subscription.arm_drain subscription waiter;
+          Hashtbl.replace t.subscription_drains sid waiter;
+          Drain_subscription_ready waiter)
+
+let resume_subscription_drain t (waiter : subscription_drain_waiter) =
+  if waiter.completed then Ok ()
+  else
+    match Hashtbl.find_opt t.subscriptions waiter.sid with
+    | None ->
+        Subscription.complete_drain_waiter waiter (Error Error.Closed);
+        Ok ()
+    | Some subscription -> (
+        match
+          Nats.Client.outgoing t.state
+            (Nats.Client.Drain_subscription { sid = waiter.sid })
+        with
+        | Error (Nats.Error.Unknown_subscription _) ->
+            t.state <- Nats.Client.forget_subscription t.state waiter.sid;
+            close_subscription t waiter.sid Error.Closed;
+            Ok ()
+        | Error error ->
+            t.state <- Nats.Client.forget_subscription t.state waiter.sid;
+            close_subscription t waiter.sid (command_error error);
+            Ok ()
+        | Ok transition -> (
+            (* Go suppresses the UNSUB issued by a drain while reconnecting,
+               then flushes the replayed subscription state. Keep the pure
+               drain origin and its local state transition, but do not send a
+               second server mutation after replay. *)
+            let transition = { transition with output = [] } in
+            match apply_transition t transition with
+            | Error error ->
+                t.state <- Nats.Client.forget_subscription t.state waiter.sid;
+                Subscription.complete_drain subscription waiter (Error error);
+                Error error
+            | Ok () ->
+                Queue.add (Subscription_drain_waiter waiter) t.barriers;
+                Ok ()))
 
 let apply_outgoing t command =
   match command with
+  | Resume_subscription_drain waiter -> resume_subscription_drain t waiter
   | Publish { message; resolver } -> (
       match Nats.Client.outgoing t.state (Nats.Client.Publish message) with
       | Error error ->
@@ -1719,59 +1834,37 @@ let apply_outgoing t command =
               resolve_unit resolver (Ok ());
               Ok ()))
   | Drain_subscription { sid; timeout; subscription; promise; resolver } -> (
-      match Hashtbl.find_opt t.subscriptions sid with
-      | None ->
+      match
+        arm_subscription_drain t ~sid ~timeout ~subscription ~promise ~resolver
+      with
+      | Drain_subscription_closed ->
           Subscription.fail_pending_drain subscription Error.Closed;
           Ok ()
-      | Some subscription -> (
-          match Mtime.add_span (now t) timeout with
-          | None ->
-              Subscription.fail_pending_drain subscription Error.Timeout;
+      | Drain_subscription_timeout ->
+          Subscription.fail_pending_drain subscription Error.Timeout;
+          Ok ()
+      | Drain_subscription_ready waiter -> (
+          match
+            Nats.Client.outgoing t.state
+              (Nats.Client.Drain_subscription { sid })
+          with
+          | Error (Nats.Error.Unknown_subscription _) ->
+              t.state <- Nats.Client.forget_subscription t.state sid;
+              close_subscription t sid Error.Closed;
               Ok ()
-          | Some deadline -> (
-              let waiter =
-                {
-                  sid;
-                  promise;
-                  resolver;
-                  deadline;
-                  server_flushed = false;
-                  done_seen = false;
-                  completed = false;
-                  on_complete =
-                    (fun result ->
-                      Subscription.record_drain_result subscription result;
-                      Subscription.terminate_after_drain subscription;
-                      Subscription.clear_drain_state subscription;
-                      t.state <- Nats.Client.forget_subscription t.state sid;
-                      Hashtbl.remove t.subscription_drains sid;
-                      Hashtbl.remove t.subscriptions sid);
-                }
-              in
-              Subscription.arm_drain subscription waiter;
-              Hashtbl.replace t.subscription_drains sid waiter;
-              match
-                Nats.Client.outgoing t.state
-                  (Nats.Client.Drain_subscription { sid })
-              with
-              | Error (Nats.Error.Unknown_subscription _) ->
-                  t.state <- Nats.Client.forget_subscription t.state sid;
-                  close_subscription t sid Error.Closed;
-                  Ok ()
+          | Error error ->
+              t.state <- Nats.Client.forget_subscription t.state sid;
+              close_subscription t sid (command_error error);
+              Ok ()
+          | Ok unsubscribe_transition -> (
+              match apply_transition t unsubscribe_transition with
               | Error error ->
                   t.state <- Nats.Client.forget_subscription t.state sid;
-                  close_subscription t sid (command_error error);
-                  Ok ()
-              | Ok unsubscribe_transition -> (
-                  match apply_transition t unsubscribe_transition with
-                  | Error error ->
-                      t.state <- Nats.Client.forget_subscription t.state sid;
-                      Subscription.complete_drain subscription waiter
-                        (Error error);
-                      Error error
-                  | Ok () ->
-                      Queue.add (Subscription_drain_waiter waiter) t.barriers;
-                      Ok ()))))
+                  Subscription.complete_drain subscription waiter (Error error);
+                  Error error
+              | Ok () ->
+                  Queue.add (Subscription_drain_waiter waiter) t.barriers;
+                  Ok ())))
   | Cancel_subscription_drain { sid } -> (
       match Hashtbl.find_opt t.subscriptions sid with
       | None -> Ok ()
@@ -1843,38 +1936,57 @@ let apply_outgoing t command =
                                   ~headers:(Nats.Message.headers message)
                                   (Nats.Message.payload message)
                               in
-                              match
-                                Nats.Client.outgoing t.state
-                                  (Nats.Client.Publish message)
-                              with
-                              | Error error -> (
-                                  Hashtbl.remove t.requests sid;
-                                  resolve_setup t setup
-                                    (Error (command_error error));
-                                  match unsubscribe_and_forget t sid with
-                                  | Ok () -> Ok ()
-                                  | Error error -> Error error)
-                              | Ok transition -> (
-                                  match apply_transition t transition with
-                                  | Error error ->
-                                      Hashtbl.remove t.requests sid;
-                                      t.state <-
-                                        Nats.Client.forget_subscription t.state
-                                          sid;
-                                      resolve_setup t setup (Error error);
-                                      Error error
-                                  | Ok () ->
-                                      resolve_setup t setup (Ok sid);
-                                      Ok ()))))))))
+                              if t.reconnecting then (
+                                match
+                                  enqueue_reconnect_publish_output t message
+                                with
+                                | Error error ->
+                                    Hashtbl.remove t.requests sid;
+                                    t.state <-
+                                      Nats.Client.forget_subscription t.state
+                                        sid;
+                                    resolve_setup t setup (Error error);
+                                    Ok ()
+                                | Ok () ->
+                                    resolve_setup t setup (Ok sid);
+                                    Ok ())
+                              else
+                                match
+                                  Nats.Client.outgoing t.state
+                                    (Nats.Client.Publish message)
+                                with
+                                | Error error -> (
+                                    Hashtbl.remove t.requests sid;
+                                    resolve_setup t setup
+                                      (Error (command_error error));
+                                    match unsubscribe_and_forget t sid with
+                                    | Ok () -> Ok ()
+                                    | Error error -> Error error)
+                                | Ok transition -> (
+                                    match apply_transition t transition with
+                                    | Error error ->
+                                        Hashtbl.remove t.requests sid;
+                                        t.state <-
+                                          Nats.Client.forget_subscription
+                                            t.state sid;
+                                        resolve_setup t setup (Error error);
+                                        Error error
+                                    | Ok () ->
+                                        resolve_setup t setup (Ok sid);
+                                        Ok ()))))))))
   | Cancel_request { sid } -> (
       match Hashtbl.find_opt t.requests sid with
       | None -> Ok ()
       | Some waiter -> (
           Hashtbl.remove t.requests sid;
           fail_waiter waiter.resolver Error.Closed;
-          match unsubscribe_and_forget t sid with
-          | Error error -> Error error
-          | Ok () -> Ok ()))
+          if t.reconnecting then (
+            t.state <- Nats.Client.forget_subscription t.state sid;
+            Ok ())
+          else
+            match unsubscribe_and_forget t sid with
+            | Error error -> Error error
+            | Ok () -> Ok ()))
   | Unsubscribe { sid; resolver } -> (
       match Nats.Client.outgoing t.state (Nats.Client.Unsubscribe { sid }) with
       | Error error ->
@@ -1966,9 +2078,13 @@ let expire_requests t current =
         | Some waiter -> (
             Hashtbl.remove t.requests sid;
             fail_waiter waiter.resolver Error.Timeout;
-            match unsubscribe_and_forget t sid with
-            | Error error -> Error error
-            | Ok () -> loop rest))
+            if t.reconnecting then (
+              t.state <- Nats.Client.forget_subscription t.state sid;
+              loop rest)
+            else
+              match unsubscribe_and_forget t sid with
+              | Error error -> Error error
+              | Ok () -> loop rest))
   in
   loop expired
 
@@ -2104,10 +2220,12 @@ let recoverable_transport_error = function
   | Error.Invalid_pending_limit _ | Error.Command_queue_full _
   | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
   | Error.Invalid_reconnect_attempts _ | Error.Invalid_retry_attempts _
-  | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
-  | Error.Invalid_timeout _ | Error.Tls_required | Error.Tls_unexpected_input
-  | Error.Tls _ | Error.Timeout | Error.Slow_consumer _ | Error.Auth _
-  | Error.Protocol _ | Error.No_responders | Error.Draining | Error.Closed ->
+  | Error.Invalid_reconnect_buffer_size _ | Error.Invalid_reconnect_delay _
+  | Error.Invalid_reconnect_jitter _ | Error.Invalid_timeout _
+  | Error.Tls_required | Error.Tls_unexpected_input | Error.Tls _
+  | Error.Timeout | Error.Slow_consumer _ | Error.Auth _ | Error.Protocol _
+  | Error.No_responders | Error.Reconnect_buffer_exceeded _
+  | Error.Connection_reconnecting | Error.Draining | Error.Closed ->
       false
 
 let reconnectable_attempt_error = function
@@ -2118,10 +2236,11 @@ let reconnectable_attempt_error = function
   | Error.Invalid_pending_limit _ | Error.Command_queue_full _
   | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
   | Error.Invalid_reconnect_attempts _ | Error.Invalid_retry_attempts _
-  | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
-  | Error.Invalid_timeout _ | Error.Tls_required | Error.Tls_unexpected_input
-  | Error.Slow_consumer _ | Error.Protocol _ | Error.No_responders
-  | Error.Draining | Error.Closed ->
+  | Error.Invalid_reconnect_buffer_size _ | Error.Invalid_reconnect_delay _
+  | Error.Invalid_reconnect_jitter _ | Error.Invalid_timeout _
+  | Error.Tls_required | Error.Tls_unexpected_input | Error.Slow_consumer _
+  | Error.Protocol _ | Error.No_responders | Error.Reconnect_buffer_exceeded _
+  | Error.Connection_reconnecting | Error.Draining | Error.Closed ->
       false
 
 let apply_timer t generation =
@@ -2135,13 +2254,11 @@ let apply_timer t generation =
           Mtime.compare current deadline >= 0
       | _ -> false
     in
-    let barrier_due =
+    let drain_barrier_due =
       match Queue.peek_opt t.barriers with
       | None -> false
-      | Some (Flush_waiter waiter) ->
-          (not waiter.completed) && Mtime.compare current waiter.deadline >= 0
       | Some (Drain_waiter waiter) -> Mtime.compare current waiter.deadline >= 0
-      | Some (Subscription_drain_waiter _) -> false
+      | Some (Flush_waiter _) | Some (Subscription_drain_waiter _) -> false
     in
     let reconnect_due =
       match t.reconnect_deadline with
@@ -2159,7 +2276,7 @@ let apply_timer t generation =
         | Ok () -> ()
         | Error error -> finish t error
       else finish t Error.Timeout
-    else if barrier_due then finish t Error.Timeout
+    else if drain_barrier_due then finish t Error.Timeout
     else (
       expire_subscription_drains t current;
       if expire_barriers t current then finish t Error.Timeout
@@ -2174,21 +2291,58 @@ let apply_timer t generation =
                 if Nats.Client.phase t.state = Nats.Client.Closed then
                   finish t Error.Timeout)))
 
+let apply_reconnect_flush t timeout resolver =
+  match Nats.Client.outgoing t.state Nats.Client.Flush with
+  | Error error ->
+      fail_waiter resolver (command_error error);
+      Ok ()
+  | Ok transition -> (
+      List.iter (enqueue_reconnect_output t) transition.output;
+      t.state <- transition.state;
+      match Mtime.add_span (now t) timeout with
+      | None ->
+          fail_waiter resolver Error.Timeout;
+          Error Error.Timeout
+      | Some deadline ->
+          Queue.add
+            (Flush_waiter { resolver; deadline; completed = false })
+            t.barriers;
+          Ok ())
+
 let apply_command t command =
-  if not t.reconnecting then apply_outgoing t command
+  if not t.reconnecting then
+    match command with
+    | Resume_subscription_drain waiter -> resume_subscription_drain t waiter
+    | _ -> apply_outgoing t command
   else
     match command with
+    | Publish { message; resolver } ->
+        enqueue_reconnect_publish t message resolver
     | Close { resolver } ->
         resolve_unit resolver (Ok ());
         finish t Error.Closed;
         Ok ()
-    | (Unsubscribe _ | Auto_unsubscribe _) as command ->
-        Queue.add command t.deferred_commands;
-        t.pending_commands <- t.pending_commands + 1;
+    | Drain { resolver } ->
+        fail_waiter resolver Error.Connection_reconnecting;
+        finish t Error.Closed;
         Ok ()
-    | _ ->
-        fail_command Error.Disconnected command;
-        Ok ()
+    | Flush { timeout; resolver } -> apply_reconnect_flush t timeout resolver
+    | Resume_subscription_drain waiter -> resume_subscription_drain t waiter
+    | Drain_subscription { sid; timeout; subscription; promise; resolver } -> (
+        match
+          arm_subscription_drain t ~sid ~timeout ~subscription ~promise
+            ~resolver
+        with
+        | Drain_subscription_closed ->
+            Subscription.fail_pending_drain subscription Error.Closed;
+            Ok ()
+        | Drain_subscription_timeout ->
+            Subscription.fail_pending_drain subscription Error.Timeout;
+            Ok ()
+        | Drain_subscription_ready _ -> Ok ())
+    | ( Subscribe _ | Request _ | Auto_unsubscribe _ | Cancel_request _
+      | Unsubscribe _ | Cancel_subscription_drain _ ) as command ->
+        apply_outgoing t command
 
 let handle_transport_error t error =
   if t.reconnecting && reconnectable_attempt_error error then
@@ -2203,7 +2357,9 @@ let rec owner_loop t =
       match Eio.Stream.take t.work with
       | Command command -> (
           (match command with
-          | Cancel_request _ | Cancel_subscription_drain _ -> ()
+          | Cancel_request _ | Cancel_subscription_drain _
+          | Resume_subscription_drain _ ->
+              ()
           | _ -> t.pending_commands <- t.pending_commands - 1);
           (match command with
           | Request { setup; _ } -> t.active_request_setup <- Some setup
@@ -2281,6 +2437,9 @@ let create ~sw ~clock ~config ~(dial : dial) ~pool ~current_endpoint ~tls_active
       eof_seen = false;
       closed = false;
       reconnecting = false;
+      reconnect_pending = Queue.create ();
+      reconnect_pending_bytes = 0;
+      reconnect_publish_state = None;
       reconnect_signal;
       reconnect_signal_u;
       reconnect_attempts = 0;
@@ -2291,7 +2450,6 @@ let create ~sw ~clock ~config ~(dial : dial) ~pool ~current_endpoint ~tls_active
       connect_info_ready = false;
       pending_commands = 0;
       active_request_setup = None;
-      deferred_commands = Queue.create ();
       handshake_deadline;
       timer_generation = 0;
       scheduled_deadline = None;
@@ -2438,9 +2596,11 @@ let initial_connect_retryable = function
   | Error.Invalid_pending_limit _ | Error.Command_queue_full _
   | Error.Invalid_chunk_size _ | Error.Invalid_inbox_prefix _
   | Error.Invalid_reconnect_attempts _ | Error.Invalid_retry_attempts _
-  | Error.Invalid_reconnect_delay _ | Error.Invalid_reconnect_jitter _
-  | Error.Invalid_timeout _ | Error.Slow_consumer _ | Error.Protocol _
-  | Error.No_responders | Error.Draining | Error.Closed ->
+  | Error.Invalid_reconnect_buffer_size _ | Error.Invalid_reconnect_delay _
+  | Error.Invalid_reconnect_jitter _ | Error.Invalid_timeout _
+  | Error.Slow_consumer _ | Error.Protocol _ | Error.No_responders
+  | Error.Reconnect_buffer_exceeded _ | Error.Connection_reconnecting
+  | Error.Draining | Error.Closed ->
       false
 
 let connect ~sw ~net ~clock ?(config = Config.default) endpoints =

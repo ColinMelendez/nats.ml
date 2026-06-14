@@ -36,6 +36,7 @@ type subscription = {
   subject : Subject.Filter.t;
   queue_group : Queue_group.t option;
   remaining : int option;
+  delivered : int;
 }
 
 type delivery = { sid : int; message : Message.t; status : Op.status option }
@@ -53,10 +54,13 @@ val phase : t -> phase
 val info : t -> Info.t option
 val subscriptions : t -> subscription list
 
-val prepare_reconnect : t -> t
+val prepare_reconnect : ?preserve_pending_pings:bool -> t -> t
 (** [prepare_reconnect state] resets connection negotiation while preserving
-    client-assigned subscription ids and their replay intent. Use it after an
-    unexpected transport loss, before receiving the next server [INFO]. *)
+    client-assigned subscription ids and their replay intent. By default it
+    discards old protocol barriers; [preserve_pending_pings] keeps barriers
+    queued during an ongoing reconnect across a failed redial attempt. Use it
+    after an unexpected transport loss, before receiving the next server [INFO].
+*)
 
 val forget_subscription : t -> int -> t
 (** [forget_subscription state sid] removes the local replay intent for [sid]
@@ -64,6 +68,10 @@ val forget_subscription : t -> int -> t
     subscriptions, such as a request inbox whose request has failed. *)
 
 val outgoing : t -> command -> (transition, Error.t) result
+(** [outgoing] records subscription intent and flush barriers while the core is
+    negotiating a connection. Their wire operations are emitted by the later
+    [Connect] transition; publishes still require the adapter's reconnect buffer
+    because their payload bytes are not replayed from core state. *)
 
 val incoming :
   ?eod:bool ->

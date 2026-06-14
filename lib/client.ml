@@ -97,6 +97,7 @@ type subscription = {
   subject : Subject.Filter.t;
   queue_group : Queue_group.t option;
   remaining : int option;
+  delivered : int;
 }
 
 type ping_origin = Liveness | Flush | Drain | Subscription_drain of int
@@ -166,13 +167,16 @@ let phase value = value.phase
 let info value = value.info
 let subscriptions value = List.rev value.subscriptions
 
-let prepare_reconnect state =
+let prepare_reconnect ?(preserve_pending_pings = false) state =
+  let pending_pings =
+    if preserve_pending_pings then state.pending_pings else empty_ping_queue
+  in
   {
     state with
     phase = Awaiting_info;
     info = None;
     draining_subscriptions = [];
-    pending_pings = empty_ping_queue;
+    pending_pings;
     pending_liveness_pings = 0;
     next_ping = None;
   }
@@ -266,13 +270,19 @@ let incoming_message (state : t) now sid message status =
   match find_subscription sid state.subscriptions with
   | None -> Ok (empty_transition state)
   | Some subscription ->
+      let delivered = subscription.delivered + 1 in
       let subscriptions =
         match subscription.remaining with
-        | None -> state.subscriptions
+        | None ->
+            List.map
+              (fun (value : subscription) ->
+                if Int.equal value.sid sid then { value with delivered }
+                else value)
+              state.subscriptions
         | Some 1 -> remove_subscription sid state.subscriptions
         | Some remaining ->
             let replacement =
-              { subscription with remaining = Some (remaining - 1) }
+              { subscription with remaining = Some (remaining - 1); delivered }
             in
             List.map
               (fun (value : subscription) ->
@@ -463,13 +473,13 @@ let outgoing_connect state ~(credentials : Connect.t) ~tls_required =
                     in
                     match subscription.remaining with
                     | None -> replay @ operations
-                    | Some max_messages ->
+                    | Some remaining ->
                         (replay
                         @ [
                             Op.Unsub
                               {
                                 sid = subscription.sid;
-                                max_messages = Some max_messages;
+                                max_messages = Some remaining;
                               };
                           ])
                         @ operations)
@@ -517,67 +527,90 @@ let outgoing_publish state message =
         | Ok output -> Ok { (empty_transition state) with output = [ output ] })
 
 let outgoing_subscribe state subject queue_group =
-  match require_connected state with
-  | Error error -> Error error
-  | Ok () -> (
-      let sid = state.next_sid in
+  let sid = state.next_sid in
+  let subscription =
+    { sid; subject; queue_group; remaining = None; delivered = 0 }
+  in
+  let state =
+    {
+      state with
+      next_sid = sid + 1;
+      subscriptions = subscription :: state.subscriptions;
+    }
+  in
+  match state.phase with
+  | Awaiting_info | Awaiting_connect ->
+      Ok
+        {
+          state;
+          output = [];
+          events = [];
+          deliveries = [];
+          subscription_id = Some sid;
+        }
+  | Connected -> (
       let operation = Op.Sub { subject; queue_group; sid } in
       match encode_with_state state operation with
       | Error error -> Error error
       | Ok output ->
-          let subscription = { sid; subject; queue_group; remaining = None } in
           Ok
             {
-              state =
-                {
-                  state with
-                  next_sid = sid + 1;
-                  subscriptions = subscription :: state.subscriptions;
-                };
+              state;
               output = [ output ];
               events = [];
               deliveries = [];
               subscription_id = Some sid;
             })
+  | Draining -> Error Error.Draining
+  | Closed -> Error Error.Closed
 
 let outgoing_unsubscribe state sid max_messages =
-  match require_connected state with
-  | Error error -> Error error
-  | Ok () -> (
-      if sid <= 0 then Error (Error.Invalid_subscription_id sid)
-      else
-        match find_subscription sid state.subscriptions with
-        | None -> Error (Error.Unknown_subscription { sid })
-        | Some _ -> (
-            let operation = Op.Unsub { sid; max_messages } in
+  if sid <= 0 then Error (Error.Invalid_subscription_id sid)
+  else
+    match find_subscription sid state.subscriptions with
+    | None -> Error (Error.Unknown_subscription { sid })
+    | Some subscription -> (
+        let subscriptions, wire_max_messages =
+          match max_messages with
+          | None -> (remove_subscription sid state.subscriptions, None)
+          | Some max_messages ->
+              if subscription.delivered >= max_messages then
+                (remove_subscription sid state.subscriptions, None)
+              else
+                ( List.map
+                    (fun (value : subscription) ->
+                      if Int.equal value.sid sid then
+                        {
+                          value with
+                          remaining = Some (max_messages - value.delivered);
+                        }
+                      else value)
+                    state.subscriptions,
+                  Some max_messages )
+        in
+        let state =
+          {
+            state with
+            subscriptions;
+            draining_subscriptions =
+              List.filter
+                (fun value -> not (Int.equal value sid))
+                state.draining_subscriptions;
+          }
+        in
+        match state.phase with
+        | Awaiting_info | Awaiting_connect ->
+            Ok { (empty_transition state) with output = [] }
+        | Connected -> (
+            let operation =
+              Op.Unsub { sid; max_messages = wire_max_messages }
+            in
             match encode_with_state state operation with
             | Error error -> Error error
             | Ok output ->
-                let subscriptions =
-                  match max_messages with
-                  | None -> remove_subscription sid state.subscriptions
-                  | Some max_messages ->
-                      List.map
-                        (fun (subscription : subscription) ->
-                          if Int.equal subscription.sid sid then
-                            { subscription with remaining = Some max_messages }
-                          else subscription)
-                        state.subscriptions
-                in
-                Ok
-                  {
-                    (empty_transition
-                       {
-                         state with
-                         subscriptions;
-                         draining_subscriptions =
-                           List.filter
-                             (fun value -> not (Int.equal value sid))
-                             state.draining_subscriptions;
-                       })
-                    with
-                    output = [ output ];
-                  }))
+                Ok { (empty_transition state) with output = [ output ] })
+        | Draining -> Error Error.Draining
+        | Closed -> Error Error.Closed)
 
 let outgoing_drain_subscription state sid =
   match require_connected state with
@@ -616,7 +649,7 @@ let outgoing_drain_subscription state sid =
 
 let outgoing_flush state =
   match state.phase with
-  | Connected | Draining -> (
+  | Awaiting_info | Awaiting_connect | Connected | Draining -> (
       match encode_with_state state Op.Ping with
       | Error error -> Error error
       | Ok output ->
@@ -630,7 +663,6 @@ let outgoing_flush state =
               with
               output = [ output ];
             })
-  | Awaiting_info | Awaiting_connect -> Error Error.Not_connected
   | Closed -> Error Error.Closed
 
 let outgoing_drain state =

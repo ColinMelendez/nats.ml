@@ -12,6 +12,7 @@ type t =
   | Invalid_chunk_size of int
   | Invalid_inbox_prefix of Nats.Subject.error
   | Invalid_reconnect_attempts of int
+  | Invalid_reconnect_buffer_size of int
   | Invalid_retry_attempts of int
   | Invalid_reconnect_delay of {
       initial : Mtime.Span.t;
@@ -22,8 +23,10 @@ type t =
   | Tls_required
   | Tls_unexpected_input
   | Tls of exn
+  | Connection_reconnecting
   | Timeout
   | No_responders
+  | Reconnect_buffer_exceeded of { limit : int }
   | Io of exn
   | Slow_consumer of slow_consumer
   | Disconnected
