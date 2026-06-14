@@ -25,7 +25,7 @@ marked as covered.
 | JetStream publishing | Covered, including async futures, retries, TTL/schedule headers, atomic and fast batches | Shared async acknowledgement multiplexing is a throughput optimization, not a capability gap |
 | JetStream consumption | Covered: pull, push, ordered, fetch, no-wait, heartbeats, flow control, priority, and continuous consumption | Go callback/channel receive shapes and threshold/error-handler tuning are represented by direct Eio iteration and structured results |
 | Key-Value | Covered: CRUD, CAS, history, ordinary and ordered watches, listers, managers, policy fields, composition, TTL, and purge-marker cleanup | Ordinary and ordered watch behavior remain separate contracts; live cluster failure coverage remains acceptance work |
-| Object Store | Covered: streaming CRUD, links, metadata, watches, listing, sealing, managers, file helpers, and Go interop | No material data-plane gap; broader cluster failure matrices remain acceptance work |
+| Object Store | Covered: streaming CRUD, links, metadata, watches, listing, sealing, managers, file helpers, and Go interop; the six-mode single-server authentication/TLS matrix passes all 18 pinned-release cases | No material data-plane gap; broader cluster and failure-injection matrices remain acceptance work |
 | Services | Covered for the pinned `micro` surface and lifecycle matrices | Future server/SDK versions and transport-specific integration hooks remain separate work |
 
 ## Core, authentication, and transport
@@ -191,8 +191,10 @@ structured filesystem errors.
 
 The `scripts/runtest-interop-object-store.sh` runner exercises the pinned Go
 peer for content and metadata exchange, updates, links, listing, tombstone
-behavior, and sealing. Additional cluster/failure-injection coverage belongs
-to the acceptance program, not to an unimplemented Object Store API.
+behavior, and sealing. Its matrix wrapper passes the same six anonymous,
+token, and username/password plaintext/TLS modes across the three pinned
+releases. Additional cluster/failure-injection coverage belongs to the
+acceptance program, not to an unimplemented Object Store API.
 
 ## Services
 

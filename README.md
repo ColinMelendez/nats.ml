@@ -311,12 +311,14 @@ between Go and OCaml. Its matrix covers the same six anonymous/authenticated
 plaintext/TLS modes across all three pinned releases; all 18 baseline cases
 pass. The Object Store interop runner uses the same official Go peer to
 exchange chunked content and metadata, updates, links, listing, tombstones,
-and sealing. The dedicated
+and sealing. Its six-mode single-server authentication/TLS matrix passes all
+18 cases across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. The dedicated
 `./scripts/runtest-interop-key-value-cluster.sh` runner now covers replicated
 ordered-watch recovery after seed loss, elected-leader loss, and durable seed
 restart in anonymous plaintext mode. Broader authenticated or failure
-topologies remain separate acceptance work; the dedicated auth matrix covers
-the corresponding Core authentication and TLS contracts.
+topologies remain separate acceptance work for KV and Object Store cluster
+behavior; the single-server Object Store authentication/TLS contract is now
+covered by the matrix above.
 The separate JetStream reconnect runner uses a file-backed stream and durable
 Push consumers on one persistent server container, kills and restarts that
 container, and verifies both the OCaml and Go Push legs recover and exchange

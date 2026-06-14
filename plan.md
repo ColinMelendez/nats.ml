@@ -121,7 +121,9 @@ failure isolation, statistics, and service-local draining. It also exercises
 two-instance queue-group routing and aggregate worker statistics, verifies
 Service endpoint and monitoring recovery across a two-server reconnect, and
 exercises chunked content, metadata, links, listing, deletion and tombstones,
-watches, sealing, and cleanup. Push reconnect restoration is
+watches, sealing, and cleanup. Its six-mode single-server authentication/TLS
+matrix passes all 18 cases across `nats:2.10.22`, `nats:2.12.15`, and
+`nats:2.14.5`. Push reconnect restoration is
 implemented through replayable subscription
 recovery, including durable confirmation and ephemeral recreation. Its
 cross-SDK authenticated/TLS restart matrix now covers NKey, JWT,
@@ -994,8 +996,12 @@ semantics before calling the feature complete.
   updates, and structured operation deadlines.
 - Completed cross-SDK data-plane slice: the dedicated Go peer runner exchanges
   chunked content and metadata, applies updates, resolves object and bucket
-  links, checks listing and tombstones, and validates sealing. The wider
-  authenticated, TLS, and cluster-failure matrix remains acceptance work.
+  links, checks listing and tombstones, and validates sealing. Its six-mode
+  single-server authentication/TLS matrix passes all 18 cases across
+  `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. Stream updates omit
+  default values for version-gated fields absent from an older server's INFO,
+  preserving Object Store sealing compatibility on the pinned 2.12 release.
+  Cluster and failure-injection coverage remains acceptance work.
 - Keep transfer chunks incremental; never require a whole object as one
   `string`.
 - Preserve the metadata rollup as the commit point and define cancellation,
@@ -1019,11 +1025,12 @@ semantics before calling the feature complete.
   single-server authentication/TLS matrix.
 - The Object Store interop runner covers chunked content, metadata, links,
   listing, deletion and tombstones, updates, sealing, and cleanup against the
-  official Go peer.
+  official Go peer. Its six-mode single-server authentication/TLS matrix
+  passes all 18 cases across the three pinned releases.
 - Large Object Store transfer, metadata, replacement/deletion ordering,
   interrupted-transfer cleanup, listing/watch boundaries, links, rename,
-  sealing, and bucket configuration updates are covered locally; the wider
-  authenticated, TLS, and cluster-failure matrix remains acceptance work.
+  sealing, and bucket configuration updates are covered locally; broader
+  cluster and failure-injection coverage remains acceptance work.
 - No direct dependence by these modules on a private socket or private
   connection lifecycle.
 
