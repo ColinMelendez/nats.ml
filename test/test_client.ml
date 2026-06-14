@@ -174,8 +174,7 @@ let () =
               | Ok _ -> fail "expected CONNECT"
               | Error error -> fail_with Nats.Codec.pp_error error)
           | _ -> fail "expected one CONNECT output");
-      test "gates commands by phase and preserves queue subscription identity"
-        (fun () ->
+      test "gates publishes and queues subscription intent by phase" (fun () ->
           let subject = Nats.Subject.literal "orders.created" in
           let message = Nats.Message.v ~subject "payload" in
           let filter =
@@ -194,13 +193,21 @@ let () =
             (function
             | Nats.Error.Not_connected -> true
             | _ -> false);
-          expect_error
-            (Nats.Client.outgoing client
-               (Nats.Client.Subscribe { subject = filter; queue_group = None }))
-            (function Nats.Error.Not_connected -> true | _ -> false);
-          expect_error (Nats.Client.outgoing client Nats.Client.Flush) (function
-            | Nats.Error.Not_connected -> true
-            | _ -> false);
+          let queued =
+            expect_client
+              (Nats.Client.outgoing client
+                 (Nats.Client.Subscribe { subject = filter; queue_group = None }))
+          in
+          (match queued.output with
+          | [] -> ()
+          | _ -> fail "a pre-connect subscription wrote wire output");
+          let flushed =
+            expect_client (Nats.Client.outgoing queued.state Nats.Client.Flush)
+          in
+          equal string "PING\r\n"
+            (match flushed.output with
+            | [ output ] -> output
+            | _ -> fail "expected a queued pre-connect PING");
           expect_error
             (Nats.Client.outgoing client
                (Nats.Client.Connect
@@ -460,6 +467,94 @@ let () =
           in
           let delivered = incoming limited.state wire in
           equal int 0 (List.length (Nats.Client.subscriptions delivered.state)));
+      test "auto-unsubscribe replay accounts for deliveries before the limit"
+        (fun () ->
+          let connected = connected_client () in
+          let filter =
+            match Nats.Subject.Filter.of_string "orders.*" with
+            | Ok value -> value
+            | Error error -> fail_with Nats.Subject.pp_error error
+          in
+          let subscribed =
+            expect_client
+              (Nats.Client.outgoing connected.state
+                 (Nats.Client.Subscribe { subject = filter; queue_group = None }))
+          in
+          let message =
+            Nats.Message.v ~subject:(Nats.Subject.literal "orders.created") "x"
+          in
+          let wire =
+            match Nats.Codec.encode (Nats.Op.Msg { sid = 1; message }) with
+            | Ok value -> value
+            | Error error -> fail_with Nats.Codec.pp_error error
+          in
+          let delivered = incoming subscribed.state wire in
+          let limited =
+            expect_client
+              (Nats.Client.outgoing delivered.state
+                 (Nats.Client.Auto_unsubscribe { sid = 1; max_messages = 2 }))
+          in
+          (match limited.output with
+          | [ output ] -> (
+              match operation output with
+              | Nats.Op.Unsub { sid = 1; max_messages = Some 2 } -> ()
+              | _ -> fail "expected the original auto-unsubscribe limit")
+          | _ -> fail "expected an auto-unsubscribe operation");
+          (match Nats.Client.subscriptions limited.state with
+          | [ { sid = 1; remaining = Some 1; delivered = 1; _ } ] -> ()
+          | _ -> fail "expected one remaining delivery after auto-unsubscribe");
+          let reconnecting = Nats.Client.prepare_reconnect limited.state in
+          let info = incoming reconnecting info_wire in
+          let reconnected =
+            expect_client
+              (Nats.Client.outgoing info.state
+                 (Nats.Client.Connect
+                    {
+                      credentials = Nats.Client.Connect.v ();
+                      tls_required = false;
+                    }))
+          in
+          match reconnected.output with
+          | [ _connect; _subscribe; unsubscribe ] -> (
+              match operation unsubscribe with
+              | Nats.Op.Unsub { sid = 1; max_messages = Some 1 } -> ()
+              | _ -> fail "expected replay of the undelivered remainder")
+          | _ -> fail "expected CONNECT, SUB, and adjusted UNSUB replay");
+      test "auto-unsubscribe at an already reached limit removes the intent"
+        (fun () ->
+          let connected = connected_client () in
+          let filter =
+            match Nats.Subject.Filter.of_string "orders.*" with
+            | Ok value -> value
+            | Error error -> fail_with Nats.Subject.pp_error error
+          in
+          let subscribed =
+            expect_client
+              (Nats.Client.outgoing connected.state
+                 (Nats.Client.Subscribe { subject = filter; queue_group = None }))
+          in
+          let message =
+            Nats.Message.v ~subject:(Nats.Subject.literal "orders.created") "x"
+          in
+          let wire =
+            match Nats.Codec.encode (Nats.Op.Msg { sid = 1; message }) with
+            | Ok value -> value
+            | Error error -> fail_with Nats.Codec.pp_error error
+          in
+          let delivered = incoming subscribed.state wire in
+          let unsubscribed =
+            expect_client
+              (Nats.Client.outgoing delivered.state
+                 (Nats.Client.Auto_unsubscribe { sid = 1; max_messages = 1 }))
+          in
+          equal int 0
+            (List.length (Nats.Client.subscriptions unsubscribed.state));
+          match unsubscribed.output with
+          | [ output ] -> (
+              match operation output with
+              | Nats.Op.Unsub { sid = 1; max_messages = None } -> ()
+              | _ -> fail "expected an immediate UNSUB")
+          | _ -> fail "expected an immediate unsubscribe operation");
       test "reconnect preserves subscription ids and replay limits" (fun () ->
           let connected = connected_client () in
           let filter =
