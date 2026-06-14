@@ -4,11 +4,25 @@ set -eu
 script_dir=$(CDPATH=; export CDPATH; cd "$(dirname "$0")" && pwd)
 cd "$script_dir/.."
 
+runner_timeout=${NATS_TEST_RUN_TIMEOUT:-300}
+case "$runner_timeout" in
+  ""|*[!0-9]*)
+    echo "NATS_TEST_RUN_TIMEOUT must be a positive number of seconds" >&2
+    exit 1
+    ;;
+esac
+if [ "$runner_timeout" -lt 1 ]; then
+  echo "NATS_TEST_RUN_TIMEOUT must be a positive number of seconds" >&2
+  exit 1
+fi
+
 if [ "${NATS_INTEGRATION_SHELL-}" != 1 ]; then
   LC_ALL=C
   export LC_ALL
-  exec nix develop .#integration -c env \
-    NATS_INTEGRATION_SHELL=1 "$script_dir/runtest-interop-jetstream.sh" "$@"
+  exec nix develop .#integration -c timeout --preserve-status \
+    --signal=TERM --kill-after=5s \
+    "${runner_timeout}s" env NATS_INTEGRATION_SHELL=1 \
+    "$script_dir/runtest-interop-jetstream.sh" "$@"
 fi
 
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
@@ -17,13 +31,17 @@ tls_enabled=${NATS_TEST_TLS-0}
 auth_user=${NATS_TEST_USER-}
 auth_pass=${NATS_TEST_PASS-}
 auth_token=${NATS_TEST_TOKEN-}
+auth_mode=anonymous
 container=
 peer_pid=
 cert_dir=
-ready=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-jetstream-ready.XXXXXX")
-peer_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-jetstream-peer.XXXXXX")
-ocaml_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-jetstream-ocaml.XXXXXX")
-rm -f "$ready"
+ready=
+peer_log=
+ocaml_log=
+docker_error=
+server=
+container_image=
+configured_image=$image
 prefix="ocaml.interop.jetstream.$$"
 stream="OCAML_INTEROP_JS_$$"
 bucket="OCAML_INTEROP_KV_$$"
@@ -55,21 +73,82 @@ case "$jetstream_mode" in
     ;;
 esac
 
+# shellcheck disable=SC1091 # script_dir points at this file's directory.
+. "$script_dir/test-artifacts.sh"
+artifact_init "interop-jetstream-$jetstream_mode" "$$"
+
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap.
 cleanup() {
-  if [ -n "$peer_pid" ]; then
-    kill "$peer_pid" >/dev/null 2>&1 || true
-    wait "$peer_pid" >/dev/null 2>&1 || true
-  fi
+  status=$?
+  save_artifacts
+  stop_peer
+  save_artifacts
   if [ -n "$container" ]; then
     docker rm -f "$container" >/dev/null 2>&1 || true
   fi
   if [ -n "$cert_dir" ]; then
     rm -rf "$cert_dir"
   fi
-  rm -f "$ready" "$peer_log" "$ocaml_log"
+  for temporary in "$ready" "$peer_log" "$ocaml_log" "$docker_error"; do
+    if [ -n "$temporary" ]; then
+      rm -f "$temporary"
+    fi
+  done
 }
 
-trap cleanup EXIT INT TERM
+# shellcheck disable=SC2329 # Invoked indirectly by cleanup.
+save_artifacts() {
+  if [ "$status" -eq 0 ]; then
+    return 0
+  fi
+  if [ -n "$container" ]; then
+    container_image=$(docker inspect --format '{{.Image}}' "$container" \
+      2>/dev/null || true)
+  fi
+  artifact_save_file "$status" "$peer_log" go-peer.log
+  artifact_save_file "$status" "$ocaml_log" ocaml.log
+  artifact_save_file "$status" "$docker_error" docker-launcher.log
+  artifact_save_docker_log "$status" "$container" nats-server.log
+  artifact_save_docker_state "$status" "$container" nats-server.state
+  artifact_save_image "$status" "${container_image:-$configured_image}" \
+    nats-server.image
+  artifact_save_text "$status" run.txt \
+    "runner=interop-jetstream" "mode=$jetstream_mode" \
+    "image=$configured_image" "container_image=${container_image-}" \
+    "tls=$tls_enabled" "auth_mode=$auth_mode" \
+    "server=${server-}" "status=$status" \
+    "timeout_seconds=$runner_timeout"
+  if [ -n "$docker_error" ]; then
+    cat "$docker_error" >&2 || true
+  fi
+}
+
+# shellcheck disable=SC2329 # Invoked indirectly by cleanup.
+stop_peer() {
+  if [ -n "$peer_pid" ]; then
+    kill "$peer_pid" >/dev/null 2>&1 || true
+    attempt=0
+    while kill -0 "$peer_pid" >/dev/null 2>&1 && [ "$attempt" -lt 2 ]; do
+      attempt=$((attempt + 1))
+      sleep 1
+    done
+    if kill -0 "$peer_pid" >/dev/null 2>&1; then
+      kill -KILL "$peer_pid" >/dev/null 2>&1 || true
+    fi
+    wait "$peer_pid" >/dev/null 2>&1 || true
+    peer_pid=
+  fi
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+ready=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-jetstream-ready.XXXXXX")
+peer_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-jetstream-peer.XXXXXX")
+ocaml_log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-jetstream-ocaml.XXXXXX")
+docker_error=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-interop-jetstream-docker.XXXXXX")
+rm -f "$ready"
 
 case "$tls_enabled" in
   0|1) ;;
@@ -128,20 +207,20 @@ run_server() {
         ;;
     esac
     # shellcheck disable=SC2086 # auth_options intentionally expands to option words.
-    docker run --detach --rm $auth_options \
+    docker run --detach $auth_options \
       --volume "$cert_dir:/etc/nats/certs:ro" \
       --volume "$config_file:/etc/nats/nats.conf:ro" \
       --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf -js
   elif [ "$auth_mode" = token ]; then
-    docker run --detach --rm --publish 127.0.0.1::4222 \
+    docker run --detach --publish 127.0.0.1::4222 \
       "$image" --auth "$auth_token" -js
   elif [ "$auth_mode" = user_pass ]; then
-    docker run --detach --rm \
+    docker run --detach \
       --env NATS_TEST_USER --env NATS_TEST_PASS \
       --volume "$script_dir/nats-server-auth.conf:/etc/nats/nats.conf:ro" \
       --publish 127.0.0.1::4222 "$image" --config /etc/nats/nats.conf -js
   else
-    docker run --detach --rm --publish 127.0.0.1::4222 "$image" -js
+    docker run --detach --publish 127.0.0.1::4222 "$image" -js
   fi
 }
 
@@ -163,7 +242,7 @@ else
   unset NATS_TEST_TLS_CA
 fi
 
-container=$(run_server)
+container=$(run_server 2>"$docker_error")
 port=
 attempt=0
 while [ "$attempt" -lt 30 ]; do
@@ -250,6 +329,7 @@ if wait "$peer_pid"; then
 else
   peer_status=$?
 fi
+peer_pid=
 if [ "$status" -eq 0 ] && [ "$peer_status" -ne 0 ]; then
   status=$peer_status
 fi
@@ -261,6 +341,4 @@ else
   cat "$ocaml_log" >&2 || true
   cat "$peer_log" >&2 || true
 fi
-trap - EXIT
-cleanup
 exit "$status"

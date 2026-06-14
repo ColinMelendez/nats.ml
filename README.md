@@ -143,6 +143,14 @@ NATS_TEST_TLS=1 ./scripts/runtest-interop-service-failure.sh
 NATS_TEST_TLS=1 ./scripts/runtest-interop-service-parent-close.sh
 ```
 
+Once the integration shell is active, the single-node JetStream interop and
+cluster runners have a five-minute deadline by default. Set
+`NATS_TEST_RUN_TIMEOUT` to a positive number of seconds to adjust it. Set
+`NATS_TEST_ARTIFACT_DIR` to a caller-owned directory to preserve logs, Docker
+state, the image identity, and run metadata when a JetStream interop case
+fails. The JetStream matrix accepts `pull`, `push`, `ordered`, `kv`, and
+`object` scenarios; the default remains the smaller `pull,push` slice.
+
 The system-account cluster runner uses three ephemeral routed containers and
 the matrix repeats it over the three pinned NATS releases. These runners
 require the selected images to already be cached; they refuse to pull images

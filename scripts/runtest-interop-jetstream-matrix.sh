@@ -10,7 +10,7 @@ modes=${NATS_INTEROP_JETSTREAM_MATRIX_MODES:-anonymous,anonymous-tls}
 
 case "$scenarios" in
   ""|,*|*,|*,,*)
-    echo "NATS_INTEROP_JETSTREAM_MATRIX_SCENARIOS must contain pull, push, ordered, and/or kv with no empty entries" >&2
+    echo "NATS_INTEROP_JETSTREAM_MATRIX_SCENARIOS must contain pull, push, ordered, kv, and/or object with no empty entries" >&2
     exit 1
     ;;
 esac
@@ -29,10 +29,10 @@ fi
 scenario_list=
 for scenario do
   case "$scenario" in
-    pull|push|ordered|kv)
+    pull|push|ordered|kv|object)
       ;;
     *)
-      echo "unknown JetStream interop matrix scenario: $scenario (expected pull, push, ordered, or kv)" >&2
+      echo "unknown JetStream interop matrix scenario: $scenario (expected pull, push, ordered, kv, or object)" >&2
       exit 1
       ;;
   esac
