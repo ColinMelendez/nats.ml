@@ -104,10 +104,16 @@ let consumer_response_named_with_opt_start_seq ~sid ~policy ~headers_only
     | None -> ""
     | Some value -> Format.asprintf ",\"opt_start_seq\":%Ld" value
   in
+  let filter_subject =
+    if String.equal policy "last_per_subject" then
+      ",\"filter_subject\":\"$KV.users.>\""
+    else ""
+  in
   let payload =
     Format.asprintf
-      {|{"stream_name":"KV_users","name":"%s","config":{"deliver_policy":"%s","ack_policy":"none","replay_policy":"instant"%s%s%s}%s}|}
-      name policy deliver_subject headers_only opt_start_seq pending
+      {|{"stream_name":"KV_users","name":"%s","config":{"deliver_policy":"%s","ack_policy":"none","replay_policy":"instant"%s%s%s%s}%s}|}
+      name policy deliver_subject headers_only filter_subject opt_start_seq
+      pending
   in
   response_wire_with_sid ~sid payload
 

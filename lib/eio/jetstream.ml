@@ -37,7 +37,6 @@ module Error = struct
     | Invalid_consumer_pause_until of string
     | Invalid_consumer_priority_group of string
     | Invalid_consumer_priority_timestamp of string
-    | Invalid_consumer_priority_update
     | Invalid_consumer_policy of { field : string; value : string }
 
   type api = {
@@ -180,9 +179,6 @@ module Error = struct
         Format.fprintf ppf "invalid consumer priority group %S" value
     | Invalid_consumer_priority_timestamp value ->
         Format.fprintf ppf "invalid consumer priority timestamp %S" value
-    | Invalid_consumer_priority_update ->
-        Format.pp_print_string ppf
-          "consumer priority groups and policy cannot be changed by update"
     | Invalid_consumer_policy { field; value } ->
         Format.fprintf ppf "invalid consumer %s policy %S" field value
 
@@ -2479,7 +2475,7 @@ module Stream = struct
       unknown = Jsont.Json.object' [];
     }
 
-  let wire_config_for_update ~current value =
+  let wire_config_for_update ~(current : wire_config) value =
     let subjects =
       List.map Nats.Subject.Filter.to_string (Config.subjects value)
     in
@@ -2541,7 +2537,7 @@ module Stream = struct
                 (Config.subject_delete_marker_ttl value)));
       allow_rollup = Config.allow_rollup value;
       allow_direct = Config.allow_direct value;
-      deny_delete = Config.deny_delete value;
+      deny_delete = current.deny_delete || Config.deny_delete value;
       deny_purge = current.deny_purge || Config.deny_purge value;
       first_sequence = Config.first_sequence value;
       consumer_limits =
@@ -3395,6 +3391,14 @@ module Consumer = struct
       | Some value when Mtime.Span.compare value Mtime.Span.zero > 0 -> Ok ()
       | Some _ -> Error error
 
+    let validate_minimum_span field minimum = function
+      | None -> Ok ()
+      | Some value when Mtime.Span.compare value minimum >= 0 -> Ok ()
+      | Some _ ->
+          Error
+            (Error.Invalid_consumer_policy
+               { field; value = "is below the server minimum" })
+
     let normalize_span = function
       | Some value when Int.equal (Mtime.Span.compare value Mtime.Span.zero) 0
         ->
@@ -3508,6 +3512,134 @@ module Consumer = struct
                  })
         | _ -> Ok ()
       in
+      let* () =
+        match deliver_policy with
+        | Last_per_subject
+          when Option.is_none filter_subject && Int.equal (List.length filter_subjects) 0
+          ->
+            Error
+              (Error.Invalid_consumer_policy
+                 {
+                   field = "deliver_policy";
+                   value = "last_per_subject requires a subject filter";
+                 })
+        | _ -> Ok ()
+      in
+      let* () =
+        if
+          List.exists
+            (fun value ->
+              Mtime.Span.compare value Mtime.Span.zero < 0)
+            backoff
+        then Error (Error.Invalid_consumer_span { field = "backoff" })
+        else Ok ()
+      in
+      let* () =
+        match (max_deliver, backoff) with
+        | Some value, _ :: _ when value > 0 && List.length backoff > value ->
+            Error
+              (Error.Invalid_consumer_policy
+                 {
+                   field = "backoff";
+                   value = "cannot contain more entries than max_deliver";
+                 })
+        | _ -> Ok ()
+      in
+      let* () =
+        match (ack_policy, deliver_subject) with
+        | Flow_control, None ->
+            Error
+              (Error.Invalid_consumer_policy
+                 { field = "ack_policy"; value = "requires deliver_subject" })
+        | _ -> Ok ()
+      in
+      let* () =
+        match ack_policy with
+        | Flow_control ->
+            let invalid_max_deliver =
+              match max_deliver with
+              | Some value -> value > 0
+              | None -> false
+            in
+            let invalid_max_ack_pending =
+              match max_ack_pending with
+              | Some value -> value < 0
+              | None -> false
+            in
+            if Option.is_some ack_wait then
+              Error
+                (Error.Invalid_consumer_policy
+                   {
+                     field = "ack_wait";
+                     value = "cannot be set with flow_control acknowledgement";
+                   })
+            else if List.length backoff > 0 then
+              Error
+                (Error.Invalid_consumer_policy
+                   {
+                     field = "backoff";
+                     value = "cannot be set with flow_control acknowledgement";
+                   })
+            else if invalid_max_deliver then
+              Error
+                (Error.Invalid_consumer_policy
+                   {
+                     field = "max_deliver";
+                     value =
+                       "must be unlimited with flow_control acknowledgement";
+                   })
+            else if invalid_max_ack_pending then
+              Error
+                (Error.Invalid_consumer_policy
+                   {
+                     field = "max_ack_pending";
+                     value =
+                       "cannot be negative with flow_control acknowledgement";
+                   })
+            else Ok ()
+        | _ -> Ok ()
+      in
+      let* () =
+        match (deliver_subject, flow_control, idle_heartbeat) with
+        | None, Some true, _ ->
+            Error
+              (Error.Invalid_consumer_policy
+                 { field = "flow_control"; value = "requires deliver_subject" })
+        | None, _, Some _ ->
+            Error
+              (Error.Invalid_consumer_policy
+                 {
+                   field = "idle_heartbeat";
+                   value = "requires deliver_subject";
+                 })
+        | Some _, Some true, None when not (match ack_policy with Flow_control -> true | _ -> false) ->
+            Error
+              (Error.Invalid_consumer_policy
+                 {
+                   field = "idle_heartbeat";
+                   value = "required when flow_control is enabled";
+                 })
+        | _ -> Ok ()
+      in
+      let* () =
+        match (deliver_subject, max_waiting) with
+        | Some _, Some value when value > 0 ->
+            Error
+              (Error.Invalid_consumer_policy
+                 { field = "max_waiting"; value = "requires pull consumer" })
+        | _ -> Ok ()
+      in
+      let* () =
+        match (deliver_subject, ack_policy, max_ack_pending) with
+        | Some _, No_ack, Some value when value > 0 ->
+            Error
+              (Error.Invalid_consumer_policy
+                 {
+                   field = "max_ack_pending";
+                   value = "requires an acknowledgement policy";
+                 })
+        | _ -> Ok ()
+      in
       let* () = validate_sample_frequency sample_frequency in
       let* () = validate_rate_limit rate_limit in
       let* () = validate_replicas replicas in
@@ -3598,11 +3730,25 @@ module Consumer = struct
           (Error.Invalid_consumer_span { field = "idle_heartbeat" })
           idle_heartbeat
       in
+      let* () =
+        match deliver_subject with
+        | Some _ ->
+            validate_minimum_span "idle_heartbeat" Mtime.Span.(100 * ms)
+              idle_heartbeat
+        | None -> Ok ()
+      in
       let* () = validate_limit "max_deliver" max_deliver in
       let* () = validate_limit "max_ack_pending" max_ack_pending in
       let* () = validate_limit "max_waiting" max_waiting in
       let* () = validate_limit "max_batch" max_batch in
       let* () = validate_limit "max_bytes" max_bytes in
+      let* () =
+        match deliver_subject with
+        | None ->
+            validate_minimum_span "max_expires" Mtime.Span.(1 * ms)
+              max_expires
+        | Some _ -> Ok ()
+      in
       Ok
         {
           name;
@@ -4004,6 +4150,10 @@ module Consumer = struct
       rebuild_priority value ~priority_groups
         ~priority_policy:value.priority_policy
         ~priority_timeout:value.priority_timeout
+
+    let with_priority value ~groups ~policy ~timeout =
+      rebuild_priority value ~priority_groups:groups ~priority_policy:policy
+        ~priority_timeout:timeout
 
     let with_priority_policy value priority_policy =
       rebuild_priority value ~priority_groups:value.priority_groups
@@ -5148,43 +5298,9 @@ module Consumer = struct
                               priority_groups;
                             }))))
 
-  let rec equal_string_lists left right =
-    match (left, right) with
-    | [], [] -> true
-    | left :: left_tail, right :: right_tail ->
-        String.equal left right && equal_string_lists left_tail right_tail
-    | _ -> false
-
-  let normalized_priority_policy = function
-    | None | Some "" | Some "none" -> None
-    | Some value -> Some value
-
-  let validate_priority_update ~(current : wire_config) value =
-    let current_groups = Option.value ~default:[] current.priority_groups in
-    let desired_groups = Config.priority_groups value in
-    let current_policy = normalized_priority_policy current.priority_policy in
-    let desired_policy =
-      priority_policy_to_wire (Config.priority_policy value)
-    in
-    let same_policy =
-      match (current_policy, desired_policy) with
-      | None, None -> true
-      | Some current, Some desired -> String.equal current desired
-      | None, Some _ | Some _, None -> false
-    in
-    if equal_string_lists current_groups desired_groups && same_policy then
-      Ok ()
-    else Error (Error.Invalid_config Error.Invalid_consumer_priority_update)
-
-  let wire_config_for_update ~current value =
-    let metadata = Config.metadata value in
+  let wire_config_for_update ~(current : wire_config) value =
     let value = wire_config value in
-    let priority_timeout =
-      match normalized_priority_policy current.priority_policy with
-      | Some "pinned_client" ->
-          Some (Option.value ~default:0L value.priority_timeout)
-      | _ -> current.priority_timeout
-    in
+    let priority_timeout = Some (Option.value ~default:0L value.priority_timeout) in
     {
       value with
       name =
@@ -5205,9 +5321,7 @@ module Consumer = struct
         Some (Option.value ~default:"0%" value.sample_frequency);
       rate_limit = Some (Option.value ~default:0L value.rate_limit);
       replicas = Some (Option.value ~default:0 value.replicas);
-      metadata =
-        Some
-          (Option.value ~default:String_map.empty (metadata_to_wire metadata));
+      metadata = Some (Option.value ~default:String_map.empty value.metadata);
       max_ack_pending = Some (Option.value ~default:0 value.max_ack_pending);
       max_waiting = Some (Option.value ~default:0 value.max_waiting);
       max_batch = Some (Option.value ~default:0 value.max_batch);
@@ -5216,8 +5330,8 @@ module Consumer = struct
       inactive_threshold =
         Some (Option.value ~default:0L value.inactive_threshold);
       pause_until = current.pause_until;
-      priority_groups = current.priority_groups;
-      priority_policy = current.priority_policy;
+      priority_groups = value.priority_groups;
+      priority_policy = value.priority_policy;
       priority_timeout;
       unknown = current.unknown;
     }
@@ -6055,6 +6169,7 @@ module Consumer = struct
       mutable state : state;
       mutable terminal_seen : bool;
       mutable worker_switch : Eio.Switch.t option;
+      mutable hook : Eio.Switch.hook option;
     }
 
     type options = {
@@ -6109,6 +6224,13 @@ module Consumer = struct
     let worker_failure value error =
       finish value (Some error)
 
+    let remove_hook value =
+      match value.hook with
+      | None -> ()
+      | Some hook ->
+          value.hook <- None;
+          ignore (Eio.Switch.try_remove_hook hook)
+
     let fail_worker value =
       match value.worker_switch with
       | None -> ()
@@ -6133,6 +6255,7 @@ module Consumer = struct
             | Draining | Closed | Failed _ -> false)
       in
       fail_worker value;
+      remove_hook value;
       if should_signal then (
         Eio.Stream.add value.queue (Finished None);
         Eio.Condition.broadcast value.changed)
@@ -6214,8 +6337,14 @@ module Consumer = struct
                     state = Open;
                     terminal_seen = false;
                     worker_switch = None;
+                    hook = None;
                   }
                 in
+                let hook =
+                  Eio.Switch.on_release_cancellable sw (fun () ->
+                      request_stop value ~drain:false)
+                in
+                value.hook <- Some hook;
                 let ready, resolve_ready = Eio.Promise.create () in
                 let options =
                   {
@@ -6230,12 +6359,13 @@ module Consumer = struct
                     stop_after;
                   }
                 in
-                Eio.Fiber.fork ~sw (fun () ->
+                Eio.Fiber.fork_daemon ~sw (fun () ->
                     try
                       Eio.Switch.run (fun worker_sw ->
                           Eio.Promise.resolve resolve_ready worker_sw;
-                          worker_loop value ~sw:worker_sw consumer options)
-                    with Stop -> ());
+                          worker_loop value ~sw:worker_sw consumer options);
+                      `Stop_daemon
+                    with Stop -> `Stop_daemon);
                 value.worker_switch <- Some (Eio.Promise.await ready);
                 Ok value)
 
@@ -6254,6 +6384,11 @@ module Consumer = struct
                 | Open | Draining | Failed _ -> result := Some (Ok message))
             | Finished error ->
                 value.terminal_seen <- true;
+                let error =
+                  match (error, state value) with
+                  | Some _, Closed -> None
+                  | error, _ -> error
+                in
                 let next_state =
                   match error with None -> Closed | Some _ -> state value
                 in
@@ -6371,7 +6506,7 @@ module Consumer = struct
                     | Error error -> Error error))))
 
   let create ?timeout stream config =
-    create_internal ?timeout ~action:None stream config
+    create_internal ?timeout ~action:(Some "create") stream config
 
   let create_or_update ?timeout stream config =
     create_internal ?timeout ~action:(Some "") stream config
@@ -6576,46 +6711,43 @@ module Consumer = struct
                 match response.config with
                 | None -> Error (Error.Missing_field "config")
                 | Some current -> (
-                    match validate_priority_update ~current config with
+                    let subject =
+                      api_subject consumer.jetstream
+                        [
+                          "CONSUMER";
+                          "CREATE";
+                          Stream.name consumer.stream;
+                          consumer.name;
+                        ]
+                    in
+                    let request =
+                      {
+                        stream_name = Stream.name consumer.stream;
+                        config = wire_config_for_update ~current config;
+                        action = Some "update";
+                      }
+                    in
+                    match encode create_request_codec request with
                     | Error error -> Error error
-                    | Ok () -> (
-                        let subject =
-                          api_subject consumer.jetstream
-                            [
-                              "CONSUMER";
-                              "CREATE";
-                              Stream.name consumer.stream;
-                              consumer.name;
-                            ]
-                        in
-                        let request =
-                          {
-                            stream_name = Stream.name consumer.stream;
-                            config = wire_config_for_update ~current config;
-                            action = Some "update";
-                          }
-                        in
-                        match encode create_request_codec request with
+                    | Ok payload -> (
+                        match
+                          request_msg ?timeout consumer.jetstream
+                            (Nats.Message.v ~subject payload)
+                        with
                         | Error error -> Error error
-                        | Ok payload -> (
-                            match
-                              request_msg ?timeout consumer.jetstream
-                                (Nats.Message.v ~subject payload)
-                            with
+                        | Ok message -> (
+                            match decode_response message with
                             | Error error -> Error error
-                            | Ok message -> (
-                                match decode_response message with
+                            | Ok response -> (
+                                match
+                                  info_of_response ~stream:consumer.stream
+                                    ~expected_name:consumer.name response
+                                with
                                 | Error error -> Error error
-                                | Ok response -> (
-                                    match
-                                      info_of_response ~stream:consumer.stream
-                                        ~expected_name:consumer.name response
-                                    with
-                                    | Error error -> Error error
-                                    | Ok info ->
-                                        consumer.pause_until :=
-                                          Info.pause_until info;
-                                        Ok info))))))))
+                                | Ok info ->
+                                    consumer.pause_until :=
+                                      Info.pause_until info;
+                                    Ok info)))))))
 
   let delete ?timeout consumer =
     let subject =
@@ -6657,7 +6789,7 @@ module Consumer = struct
       mutable heartbeat_deadline : Mtime.t option;
       mutable state : state;
       mutable hook : Eio.Switch.hook option;
-      owns_consumer : bool;
+      mutable owned_consumer : consumer option;
       initial_pending : int64;
     }
 
@@ -6679,30 +6811,45 @@ module Consumer = struct
           Error Error.Push_closed
       | _, error -> connection_error push error
 
+    let is_missing_consumer = function
+      | Error.Consumer_deleted | Error.Consumer_not_found -> true
+      | Error.Api { err_code = Some 10014; _ } -> true
+      | _ -> false
+
+    let delete_owned_consumer push =
+      match push.owned_consumer with
+      | None -> Ok ()
+      | Some consumer -> (
+          match Eio.Cancel.protect (fun () -> delete consumer) with
+          | Ok () ->
+              push.owned_consumer <- None;
+              Ok ()
+          | Error error when is_missing_consumer error ->
+              push.owned_consumer <- None;
+              Ok ()
+          | Error error -> Error error)
+
     let close push =
-      match push.state with
-      | Closed -> Ok ()
-      | Open | Failed _ -> (
-          push.state <- Closed;
-          Option.iter
-            (fun hook -> ignore (Eio.Switch.try_remove_hook hook))
-            push.hook;
-          push.hook <- None;
-          let subscription_result =
-            match release_subscription push.subscription with
-            | None -> Ok ()
-            | Some error -> Error (Error.Connection error)
-          in
-          let consumer_result =
-            if push.owns_consumer then
-              match Eio.Cancel.protect (fun () -> delete push.consumer) with
-              | Ok () -> Ok ()
-              | Error error -> Error error
-            else Ok ()
-          in
-          match subscription_result with
-          | Error error -> Error error
-          | Ok () -> consumer_result)
+      let first_close =
+        match push.state with
+        | Closed -> false
+        | Open | Failed _ ->
+            push.state <- Closed;
+            Option.iter
+              (fun hook -> ignore (Eio.Switch.try_remove_hook hook))
+              push.hook;
+            push.hook <- None;
+            true
+      in
+      let subscription_result =
+        if first_close then
+          match release_subscription push.subscription with
+          | None -> Ok ()
+          | Some error -> Error (Error.Connection error)
+        else Ok ()
+      in
+      let consumer_result = delete_owned_consumer push in
+      match subscription_result with Error error -> Error error | Ok () -> consumer_result
 
     let heartbeat_missed push =
       match push.heartbeat_deadline with
@@ -6734,11 +6881,6 @@ module Consumer = struct
       | Error.Connection Core_error.Disconnected -> true
       | _ -> false
 
-    let is_missing_consumer = function
-      | Error.Consumer_deleted -> true
-      | Error.Api { err_code = Some 10014; _ } -> true
-      | _ -> false
-
     let next_stream_sequence sequence =
       if Int64.equal sequence Int64.max_int then Int64.max_int
       else Int64.add sequence 1L
@@ -6752,6 +6894,7 @@ module Consumer = struct
       in
       match
         Config.v
+          ?name:(Config.name push.config)
           ?durable_name:(Config.durable_name push.config)
           ?description:(Config.description push.config)
           ?deliver_subject:(Config.deliver_subject push.config)
@@ -6851,6 +6994,7 @@ module Consumer = struct
                           | Error error -> Error error
                           | Ok consumer ->
                               push.consumer <- consumer;
+                              push.owned_consumer <- Some consumer;
                               push.config <- config;
                               push.recovery_pending <- false;
                               reset_heartbeat push;
@@ -7045,7 +7189,7 @@ module Consumer = struct
             heartbeat_deadline_at connection (Config.idle_heartbeat config);
           state = Open;
           hook = None;
-          owns_consumer;
+          owned_consumer = if owns_consumer then Some consumer else None;
           initial_pending;
         }
       in

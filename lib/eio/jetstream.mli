@@ -36,7 +36,6 @@ module Error : sig
     | Invalid_consumer_pause_until of string
     | Invalid_consumer_priority_group of string
     | Invalid_consumer_priority_timestamp of string
-    | Invalid_consumer_priority_update
     | Invalid_consumer_policy of { field : string; value : string }
 
   type api = {
@@ -533,12 +532,14 @@ module Stream : sig
         are accepted by the stream. *)
 
     val with_deny_delete : t -> bool -> (t, error) result
-    (** [with_deny_delete config value] replaces whether deleting the stream's
-        messages through the stream API is rejected. *)
+    (** [with_deny_delete config value] sets whether deleting the stream's
+        messages through the stream API is rejected. Once the server has set
+        this flag, it cannot be cleared by an update. *)
 
     val with_deny_purge : t -> bool -> (t, error) result
-    (** [with_deny_purge config value] replaces whether purging the stream is
-        rejected. *)
+    (** [with_deny_purge config value] sets whether purging the stream is
+        rejected. Once the server has set this flag, it cannot be cleared by
+        an update. *)
 
     val with_first_sequence : t -> int64 option -> (t, error) result
     (** [with_first_sequence config value] replaces the initial retained
@@ -550,7 +551,8 @@ module Stream : sig
         defaults. *)
 
     val with_sealed : t -> bool -> (t, error) result
-    (** [with_sealed config value] replaces the stream sealed flag. *)
+    (** [with_sealed config value] sets the stream sealed flag. Once the server
+        has sealed the stream, it cannot be unsealed by an update. *)
   end
 
   module Info : sig
@@ -752,6 +754,12 @@ module Consumer : sig
       ?mem_storage:bool ->
       unit ->
       (t, error) result
+    (** [v] validates the complete consumer policy before encoding it. A
+        push idle heartbeat must be at least 100 ms, and a pull
+        [max_expires] limit must be at least 1 ms. [Last_per_subject] requires
+        either a singular or multi-subject filter. Priority groups and policy
+        must be supplied together; a priority timeout is valid only with
+        [Pinned_client]. Other server-defaulted fields remain optional. *)
 
     val name : t -> string option
     val durable_name : t -> string option
@@ -831,7 +839,8 @@ module Consumer : sig
     (** [with_deliver_group config value] replaces the push queue group. *)
 
     val with_idle_heartbeat : t -> Mtime.Span.t option -> (t, error) result
-    (** [with_idle_heartbeat config value] replaces the idle heartbeat. *)
+    (** [with_idle_heartbeat config value] replaces the idle heartbeat. A
+        push value below 100 ms is rejected. *)
 
     val with_flow_control : t -> bool option -> (t, error) result
     (** [with_flow_control config value] replaces flow control. *)
@@ -871,12 +880,26 @@ module Consumer : sig
 
     val with_priority_groups : t -> string list -> (t, error) result
     (** [with_priority_groups config groups] replaces the priority group names.
-        Priority groups are pull-only; each name is at most sixteen ASCII
-        letters, digits, [/], [_], [-], or [=] characters. *)
+        The existing policy and timeout are preserved. Priority groups are
+        pull-only; each name is at most sixteen ASCII letters, digits, [/],
+        [_], [-], or [=] characters. Use {!with_priority} to change the groups and
+        policy atomically. *)
+
+    val with_priority :
+      t ->
+      groups:string list ->
+      policy:priority_policy option ->
+      timeout:Mtime.Span.t option ->
+      (t, error) result
+    (** [with_priority config ~groups ~policy ~timeout] replaces the complete
+        priority configuration atomically. Pass [~groups:[] ~policy:None
+        ~timeout:None] to clear priority configuration. *)
 
     val with_priority_policy : t -> priority_policy option -> (t, error) result
     (** [with_priority_policy config policy] replaces the priority policy. A
-        policy requires at least one priority group. *)
+        policy requires at least one priority group; the existing groups and
+        timeout are preserved. Use {!with_priority} to change the groups and
+        policy atomically. *)
 
     val with_priority_timeout : t -> Mtime.Span.t option -> (t, error) result
     (** [with_priority_timeout config timeout] replaces the pinned-client grace
@@ -912,7 +935,8 @@ module Consumer : sig
     (** [with_max_batch config value] replaces the pull batch limit. *)
 
     val with_max_expires : t -> Mtime.Span.t option -> (t, error) result
-    (** [with_max_expires config value] replaces the pull expiry limit. *)
+    (** [with_max_expires config value] replaces the pull expiry limit. A
+        positive value below 1 ms is rejected. *)
 
     val with_max_bytes : t -> int option -> (t, error) result
     (** [with_max_bytes config value] replaces the pull byte limit. *)
@@ -999,9 +1023,12 @@ module Consumer : sig
       returns a handle for it. *)
 
   val create :
-    ?timeout:Mtime.Span.t -> stream -> Config.t -> (t, Error.t) result
-  (** [create ?timeout stream config] creates a server-side consumer and returns
-      its name. *)
+      ?timeout:Mtime.Span.t -> stream -> Config.t -> (t, Error.t) result
+  (** [create ?timeout stream config] requests the server's create-only action
+      and returns the resulting consumer handle. A conflicting named consumer
+      is reported by the server rather than updated; an identical existing
+      configuration may still be treated as an idempotent create by the
+      server. Use [create_or_update] when replacement semantics are intended. *)
 
   val create_or_update :
     ?timeout:Mtime.Span.t -> stream -> Config.t -> (t, Error.t) result
@@ -1020,7 +1047,9 @@ module Consumer : sig
       changed only by {!pause} and {!resume}. The consumer identity remains tied
       to [name consumer]; a supplied durable name must match it, while an
       omitted durable name retains an existing durable identity. Concurrent
-      changes use last-writer-wins semantics. *)
+      changes use last-writer-wins semantics. Priority groups and policy are
+      replaced with the values in [config]; immutable fields are rejected by
+      the server. *)
 
   val pause :
     ?timeout:Mtime.Span.t -> t -> until:Ptime.t -> (Pause.t, Error.t) result
@@ -1210,7 +1239,9 @@ module Consumer : sig
         it when [sw] releases. A replayable delivery subscription is restored
         after transport recovery; durable consumers are checked with [info],
         while missing ephemeral consumers are recreated from their last
-        configuration. The session is single-owner: do not call [next] or
+        configuration. A configured public name is retained, and every
+        replacement becomes owned by the session for cleanup. The session is
+        single-owner: do not call [next] or
         [next_with_timeout] concurrently on one value. Cancellation of a blocked
         read propagates without closing the session; explicitly call [close]
         when the session is no longer needed. *)
@@ -1221,8 +1252,13 @@ module Consumer : sig
         names are rejected. A five-minute inactive threshold and memory storage
         are supplied when absent. The delivery subscription is installed before
         the consumer is created, so retained messages cannot race the initial
-        subscription. The consumer is deleted when [close] is called or [sw]
-        releases. *)
+        subscription. An explicit public name must be unique to the caller;
+        create-only semantics reject a conflicting existing configuration, but
+        the server may treat an identical configuration as an idempotent
+        create. The consumer is deleted when [close] is called. Switch release
+        also attempts cleanup, but that asynchronous
+        cleanup is best effort; call [close] and inspect its result when
+        deletion must be confirmed. *)
 
     val consumer : t -> consumer
     (** [consumer push] is the current server-side consumer. An ephemeral
@@ -1259,8 +1295,9 @@ module Consumer : sig
         rule as [next]. *)
 
     val close : t -> (unit, Error.t) result
-    (** [close push] stops the subscription, deletes an owned consumer, and is
-        idempotent. *)
+    (** [close push] stops the subscription and deletes an owned consumer. It is
+        idempotent; if owned-consumer deletion fails, a later call retries that
+        cleanup. *)
   end
 
   module Ordered : sig

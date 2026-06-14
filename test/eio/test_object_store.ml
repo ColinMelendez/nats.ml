@@ -355,7 +355,7 @@ let object_ordered_delivery_wire ~sid ~stream_sequence ~consumer_sequence
 let object_push_create_wire ~sid ~subject ~pending =
   let payload =
     Format.asprintf
-      {|{"stream_name":"OBJ_assets","name":"watch-1","config":{"deliver_subject":"%s","deliver_policy":"last_per_subject","ack_policy":"none","replay_policy":"instant","idle_heartbeat":5000000000,"flow_control":true},"num_pending":%Ld}|}
+      {|{"stream_name":"OBJ_assets","name":"watch-1","config":{"deliver_subject":"%s","deliver_policy":"last_per_subject","ack_policy":"none","replay_policy":"instant","filter_subject":"$O.assets.M.>","idle_heartbeat":5000000000,"flow_control":true},"num_pending":%Ld}|}
       subject pending
   in
   response_wire_with_sid ~sid payload
