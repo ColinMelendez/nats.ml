@@ -654,6 +654,11 @@ fi
     exit 1
   fi
 
+  # Let both clients finish processing the baseline barrier before removing
+  # the selected server. Authentication and TLS handshakes can otherwise make
+  # the kill race the final control response rather than exercise recovery.
+  sleep 2
+
   if [ "$failure_mode" = leader ]; then
     if ! wait_for_file "$kill_ready_file" "leader failure trigger"; then
       exit 1

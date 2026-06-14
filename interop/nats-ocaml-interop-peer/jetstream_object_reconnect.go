@@ -387,7 +387,8 @@ func runJetStreamObjectReconnectPeer(config options) error {
 		return fmt.Errorf("replicated Go object after failover was %q, expected %q", goPayload, "from-go-before")
 	}
 
-	recoveryMessage, err := recoveryMessages.wait("OCaml Object Store recovery readiness")
+	recoveryMessage, err := recoveryMessages.waitWithTimeout(
+		"OCaml Object Store recovery readiness", objectReconnectWait)
 	if err != nil {
 		return err
 	}
@@ -418,7 +419,8 @@ func runJetStreamObjectReconnectPeer(config options) error {
 		return err
 	}
 
-	afterMessage, err := afterMessages.wait("OCaml post-failover Object Store object")
+	afterMessage, err := afterMessages.waitWithTimeout(
+		"OCaml post-failover Object Store object", objectReconnectWait)
 	if err != nil {
 		return err
 	}

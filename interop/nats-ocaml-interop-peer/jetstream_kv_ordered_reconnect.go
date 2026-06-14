@@ -49,7 +49,11 @@ func (control *keyValueControl) receive(message *nats.Msg) {
 }
 
 func (control *keyValueControl) wait(label string) (*nats.Msg, error) {
-	timer := time.NewTimer(waitTimeout)
+	return control.waitWithTimeout(label, waitTimeout)
+}
+
+func (control *keyValueControl) waitWithTimeout(label string, timeout time.Duration) (*nats.Msg, error) {
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	for {
 		select {

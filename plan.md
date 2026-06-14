@@ -1011,10 +1011,14 @@ semantics before calling the feature complete.
   and a three-node file-backed stream to verify cross-SDK content and metadata
   visibility, post-failure writes and reads, cleanup, seed loss, elected-leader
   loss, and durable seed restart. All nine cases pass across the three pinned
-  releases. Authenticated, multi-node, changed-advertisement, and broader
+  releases. Multi-node, changed-advertisement, and broader
   management-operation failure topologies remain acceptance work.
   Its companion matrix wrapper repeats the nine default cells and supports
-  bounded image and failure-mode selection.
+  bounded image and failure-mode selection. Thin authenticated companion
+  wrappers now select this Object Store scenario in the existing NKey/JWT/mTLS
+  cluster matrix; the five credential/TLS modes across seed, leader, and
+  restart failures passed all 45 cells across nats-server 2.10.22, 2.12.15,
+  and 2.14.5.
 - Keep transfer chunks incremental; never require a whole object as one
   `string`.
 - Preserve the metadata rollup as the commit point and define cancellation,

@@ -7,3 +7,4 @@ result
 compile_commands.json
 scripts/.nats-tls.*
 scripts/.nats-interop-tls.*
+scripts/.nats-interop-auth.*

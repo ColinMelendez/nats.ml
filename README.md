@@ -131,6 +131,8 @@ against a pinned `nats-server` Docker image is available with:
 ./scripts/runtest-interop-key-value-cluster.sh
 ./scripts/runtest-interop-object-store-cluster.sh
 ./scripts/runtest-interop-object-store-cluster-matrix.sh
+./scripts/runtest-interop-auth-object-store-cluster.sh
+./scripts/runtest-interop-auth-object-store-cluster-matrix.sh
 ./scripts/runtest-interop-jetstream-cluster-matrix.sh
 ./scripts/runtest-interop-auth-jetstream-cluster.sh
 ./scripts/runtest-interop-auth-jetstream-cluster-matrix.sh
@@ -328,8 +330,11 @@ reads, cleanup, seed loss, elected-leader loss, and durable seed restart in
 anonymous plaintext mode. Its nine cases pass across the three pinned releases;
 the companion matrix repeats those cases by default and accepts
 `NATS_SERVER_IMAGES` or `NATS_INTEROP_OBJECT_STORE_CLUSTER_MODES` for a bounded
-sweep. Authenticated, multi-node, and changed-advertisement scenarios remain
-separate acceptance work.
+sweep. Multi-node and changed-advertisement scenarios remain separate
+acceptance work. The authenticated companion wrappers reuse the
+NKey/JWT/mTLS cluster matrix and select the same Object Store scenario; their
+five credential/TLS modes across three failure modes and three releases have
+passed all 45 cells (15 per release).
 The separate JetStream reconnect runner uses a file-backed stream and durable
 Push consumers on one persistent server container, kills and restarts that
 container, and verifies both the OCaml and Go Push legs recover and exchange
