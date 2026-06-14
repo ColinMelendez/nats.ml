@@ -298,7 +298,9 @@ val get :
     writing end-of-data to [writer]. Object links are followed; bucket links are
     rejected as byte sources. When [timeout] is supplied, it is one absolute
     deadline covering metadata lookup, link resolution, chunk recovery, and
-    streaming; ordered-consumer cleanup is best effort and does not extend it. *)
+    streaming; ordered-consumer cleanup is best effort and does not extend it.
+    On a verification or transport error, [writer] may contain a valid prefix
+    and does not receive end-of-data. *)
 
 val get_string :
   ?timeout:Mtime.Span.t ->
@@ -318,11 +320,14 @@ val get_file :
   (Info.t, Error.t) result
 (** [get_file ?include_deleted ?max_links bucket name path] writes the object
     to [path], replacing or creating the file. The object is verified before
-    end-of-data is written; filesystem failures return {!Error.File}. *)
+    end-of-data is written; filesystem failures return {!Error.File}. A failed
+    transfer may leave a partial file because the destination is opened before
+    streaming begins. *)
 
 val delete : ?timeout:Mtime.Span.t -> t -> Name.t -> (unit, Error.t) result
 (** [delete bucket name] publishes a deleted metadata marker and purges the
-    object's chunks. *)
+    object's chunks. Repeating the operation for an existing tombstone is
+    idempotent and retries purging the tombstone's object chunks. *)
 
 module Watch : sig
   type delivery = New | Last_per_subject | All
@@ -337,7 +342,8 @@ module Watch : sig
     bucket ->
     (t, Error.t) result
   (** [v ~sw bucket] watches metadata subjects and emits [Initial_done] after
-      the retained snapshot selected by [delivery]. *)
+      the retained snapshot selected by [delivery]. An empty retained snapshot
+      emits [Initial_done] immediately. *)
 
   val next : t -> (event, Error.t) result
   val next_with_timeout : timeout:Mtime.Span.t -> t -> (event, Error.t) result

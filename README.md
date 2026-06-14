@@ -9,7 +9,10 @@ and Services; NATS Streaming/STAN is intentionally out of scope.
 
 The research and architecture proposal is in
 [`docs/design.md`](docs/design.md). The phased implementation roadmap is in
-[`plan.md`](plan.md).
+[`plan.md`](plan.md). API stability records are kept in
+[`docs/core-api-review.md`](docs/core-api-review.md),
+[`docs/jetstream-api-review.md`](docs/jetstream-api-review.md), and
+[`docs/durable-feature-api-review.md`](docs/durable-feature-api-review.md).
 
 ## Capability comparisons
 

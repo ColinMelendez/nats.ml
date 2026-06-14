@@ -959,7 +959,8 @@ let put ?timeout value meta reader =
                           in
                           let cleanup_result =
                             match old with
-                            | Some old_info when not (Info.deleted old_info)
+                            | Some old_info
+                              when not (String.equal (Info.nuid old_info) "")
                               -> (
                                 match remaining_timeout value deadline with
                                 | Error _ ->
@@ -1457,6 +1458,8 @@ module Watch = struct
     connection : Connection.t;
     ignore_deletes : bool;
     mutable initial : initial;
+    initial_pending : int64;
+    mutable initial_received : int64;
   }
 
   let map_error = function
@@ -1495,17 +1498,25 @@ module Watch = struct
         | Error error -> Error (map_error error)
         | Ok push ->
             let initial_pending =
-              match delivery with
-              | New -> None
-              | Last_per_subject | All ->
-                  Some (Jetstream.Consumer.Push.initial_pending push)
+              Jetstream.Consumer.Push.initial_pending push
             in
             let initial =
-              match initial_pending with
-              | None | Some 0L -> Marker
-              | Some _ -> Retained
+              match delivery with
+              | New -> Marker
+              | Last_per_subject | All when Int64.equal initial_pending 0L ->
+                  Marker
+              | Last_per_subject | All -> Retained
             in
-            Ok { value; push; connection; ignore_deletes; initial })
+            Ok
+              {
+                value;
+                push;
+                connection;
+                ignore_deletes;
+                initial;
+                initial_pending;
+                initial_received = 0L;
+              })
 
   let next_message watch deadline =
     match deadline with
@@ -1535,7 +1546,15 @@ module Watch = struct
                   let initial_complete =
                     match watch.initial with
                     | Retained ->
-                        Int64.equal (Jetstream.Msg.num_pending message) 0L
+                        if
+                          Int64.compare watch.initial_received Int64.max_int < 0
+                        then
+                          watch.initial_received <-
+                            Int64.add watch.initial_received 1L;
+                        Int64.compare watch.initial_received
+                          watch.initial_pending
+                        >= 0
+                        || Int64.equal (Jetstream.Msg.num_pending message) 0L
                     | Marker | Live -> false
                   in
                   if initial_complete then watch.initial <- Marker;
@@ -1632,7 +1651,8 @@ let delete ?timeout value name =
   | Ok info_timeout -> (
       match read_info_raw ?timeout:info_timeout value name with
       | Error error -> Error error
-      | Ok info when Info.deleted info -> Ok ()
+      | Ok info when String.equal (Info.nuid info) "" ->
+          Error (Error.Invalid_metadata "nuid")
       | Ok info -> (
           let wire =
             wire_of_object ~bucket:value.bucket ~name:(Info.name info)

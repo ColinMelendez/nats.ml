@@ -322,6 +322,14 @@ let object_info_wire ~sid ~name ~nuid ~size ~chunks ~digest ~chunk_size =
   in
   direct_response_wire ~sid ~bucket:"assets" ~name payload
 
+let object_deleted_info_wire ~sid ~name ~nuid =
+  let payload =
+    Format.asprintf
+      {|{"name":"%s","bucket":"assets","nuid":"%s","size":0,"chunks":0,"digest":"","deleted":true,"options":{"max_chunk_size":2}}|}
+      name nuid
+  in
+  direct_response_wire ~sid ~bucket:"assets" ~name payload
+
 let object_link_info_wire ~sid ~name ~target =
   let payload =
     Format.asprintf
@@ -1503,6 +1511,52 @@ let () =
                        (Nats_eio.Object_store.Info.name second))
               | _ -> fail "list returned the wrong snapshot");
               Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "list returns an empty snapshot without waiting for metadata"
+        (fun () ->
+          let create_response, create_response_u = Eio.Promise.create () in
+          let info_response, info_response_u = Eio.Promise.create () in
+          let delete_response, delete_response_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await create_response;
+                `Await info_response;
+                `Await delete_response;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_object_ok
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"assets")
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.list bucket));
+              wait_for_trace_count ~trace ~needle:"CONSUMER.CREATE.OBJ_assets"
+                ~count:1;
+              let subject = trace_json_string ~trace ~field:"deliver_subject" in
+              Eio.Promise.resolve create_response_u
+                (Ok (object_push_create_wire ~sid:2 ~subject ~pending:0L));
+              wait_for_trace_count ~trace
+                ~needle:"CONSUMER.INFO.OBJ_assets.watch-1" ~count:1;
+              Eio.Promise.resolve info_response_u
+                (Ok (object_push_create_wire ~sid:3 ~subject ~pending:0L));
+              wait_for_trace_count ~trace
+                ~needle:"CONSUMER.DELETE.OBJ_assets.watch-1" ~count:1;
+              Eio.Promise.resolve delete_response_u
+                (Ok (response_wire_with_sid ~sid:4 "{}"));
+              match Eio.Promise.await result with
+              | Ok [] -> ()
+              | Ok _ -> fail "empty Object Store list returned metadata"
+              | Error error ->
+                  fail
+                    (Format.asprintf "%a\ntrace:\n%s"
+                       Nats_eio.Object_store.Error.pp error
+                       (Buffer.contents trace))));
       test "seal updates the backing stream and reports sealed status"
         (fun () ->
           let first_info, first_info_u = Eio.Promise.create () in
@@ -1683,6 +1737,55 @@ let () =
               Eio.Promise.resolve purge_u
                 (Ok (response_wire_with_sid ~sid:3 {|{"purged":3}|}));
               match Eio.Promise.await result_p with
+              | Ok () -> ()
+              | Error error ->
+                  fail
+                    (Format.asprintf "%a\ntrace:\n%s"
+                       Nats_eio.Object_store.Error.pp error
+                       (Buffer.contents trace))));
+      test "delete retries cleanup for a tombstoned object" (fun () ->
+          let info_response, info_response_u = Eio.Promise.create () in
+          let metadata, metadata_u = Eio.Promise.create () in
+          let purge, purge_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await info_response;
+                `Await metadata;
+                `Await purge;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let bucket =
+                expect_object_ok
+                  (Nats_eio.Object_store.bind jetstream ~bucket:"assets")
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Object_store.delete bucket
+                       (object_name "images/cat.png")));
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.DIRECT.GET.OBJ_assets" ~count:1;
+              Eio.Promise.resolve info_response_u
+                (Ok
+                   (object_deleted_info_wire ~sid:1 ~name:"images/cat.png"
+                      ~nuid:"old-nuid"));
+              wait_for_trace_count ~trace ~needle:"PUB $O.assets.M." ~count:1;
+              require_trace ~trace ~needle:"deleted\\\":true";
+              Eio.Promise.resolve metadata_u
+                (Ok
+                   (response_wire_with_sid ~sid:2
+                      {|{"stream":"OBJ_assets","seq":12}|}));
+              wait_for_trace_count ~trace ~needle:"STREAM.PURGE.OBJ_assets"
+                ~count:1;
+              require_trace ~trace ~needle:"$O.assets.C.old-nuid";
+              Eio.Promise.resolve purge_u
+                (Ok (response_wire_with_sid ~sid:3 {|{"purged":0}|}));
+              match Eio.Promise.await result with
               | Ok () -> ()
               | Error error ->
                   fail

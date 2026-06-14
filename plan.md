@@ -1040,6 +1040,21 @@ Stabilize KV and Object Store independently if their release cadence or
 dependency surface diverges. Require a review of streaming/backpressure and
 revision semantics before documenting them as stable.
 
+#### Current review status
+
+- Completed: the public Key-Value and Object Store API review is recorded in
+  [`docs/durable-feature-api-review.md`](docs/durable-feature-api-review.md).
+  It checks switch ownership, Bytesrw transfer boundaries, cancellation,
+  retained-snapshot markers, revision/CAS semantics, ordered-watch recovery,
+  metadata commit ordering, tombstone cleanup, and structured error outcomes.
+- Resolved: Object Store empty-snapshot termination, repeated tombstone-delete
+  cleanup, and replacement cleanup for prior tombstone NUIDs are covered by
+  focused mock-transport regressions. File-transfer partial-result behavior is
+  now explicit in the public documentation.
+- Remaining before a release claim: live KV/Object Store cluster and
+  failure-injection coverage, broader authenticated topologies, and the final
+  acceptance evidence described in the production-readiness program.
+
 ## Phase 6 — Services over Core NATS
 
 ### Goal
