@@ -936,6 +936,26 @@ Stabilize JetStream separately from Core. Require an outside review of the
 consumer/ack model, metadata ownership, JSON error model, and cancellation
 semantics before calling the feature complete.
 
+#### Current review status
+
+- Completed: the public JetStream API review is recorded in
+  `docs/jetstream-api-review.md`. The review checked ownership, cancellation,
+  read-modify-write configuration semantics, structured errors, unknown JSON
+  preservation, and the direct-style consumer surfaces against the pinned
+  server behavior, the official Go SDK, focused mock tests, OpenCode review,
+  and a high-effort `gpt-5.6-sol` review.
+- Resolved: daemon-owned `Consume` lifecycle, monotonic stream safety flags,
+  local consumer-mode validation and its public contract, create-only consumer
+  requests for owned Push paths, retryable owned Push cleanup including named
+  ephemeral recovery, and consumer priority-group/policy replacement during
+  update, including the atomic public combinator and clear-path coverage for
+  coupled priority fields. Switch-release cleanup is documented as best effort;
+  explicit `close` remains the confirming operation.
+- Remaining before a broad compatibility claim: choose whether to expose a
+  server capability/version projection or publish an explicit supported
+  feature matrix; expand the live authenticated/TLS and cluster-failure
+  acceptance work already listed above.
+
 ## Phase 5 — Key-Value and Object Store
 
 ### Workstream 5A — Key-Value

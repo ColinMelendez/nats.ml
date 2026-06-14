@@ -231,8 +231,8 @@ endpoint does not mutate it.
 Concurrent updates intentionally use last-writer-wins semantics.
 
 Priority-group consumers are pull-only and are modeled as an extension of the
-same consumer configuration and pull session. A configuration names one
-validated group and selects `overflow`, `pinned_client`, or
+same consumer configuration and pull session. A configuration names one or
+more validated groups and selects `overflow`, `pinned_client`, or
 `prioritized` policy; overflow thresholds and prioritized levels belong to an
 individual pull request, not to the consumer handle. The public request
 surface follows the server's JSON fields (`group`, `min_pending`,
@@ -246,11 +246,13 @@ application state. A 423 pin-mismatch status clears the local identifier and
 causes the outstanding pull or fetch request to retry without it; the explicit
 `Consumer.unpin` operation uses the server's `CONSUMER.UNPIN` endpoint. INFO
 projections expose the group's configured name, pinned client id, and pin
-timestamp. Priority policy and group identity are preserved across consumer
-updates; changing that identity through the typed update API fails rather than
-silently changing failover semantics. Multiple priority groups are represented
-and tracked independently, while transparent priority-pull restoration after
-transport recovery remains outside this slice.
+timestamp. Priority policy and group identity are replaced together by the
+typed update API; `Config.with_priority` is the atomic combinator for adding,
+replacing, or clearing the coupled fields. Multiple priority groups are
+represented and tracked independently, while transparent priority-pull
+restoration after transport recovery remains outside this slice. Other
+immutable consumer fields remain server-owned and are rejected by the server
+when changed.
 
 The wire behavior is based on the [NATS priority groups
 documentation](https://docs.nats.io/learn/jetstream/priority-groups) and
