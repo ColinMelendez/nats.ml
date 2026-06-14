@@ -346,6 +346,14 @@ let object_ordered_create_wire ~sid ~name () =
   in
   response_wire_with_sid ~sid payload
 
+let object_get_push_create_wire ~sid ~subject ~name ~pending =
+  let payload =
+    Format.asprintf
+      {|{"stream_name":"OBJ_assets","name":"%s","config":{"deliver_subject":"%s","deliver_policy":"all","ack_policy":"none","replay_policy":"instant","filter_subject":"$O.assets.C.%s","idle_heartbeat":5000000000,"flow_control":true},"num_pending":%Ld}|}
+      name subject "test-nuid" pending
+  in
+  response_wire_with_sid ~sid payload
+
 let object_ordered_delivery_wire ~sid ~stream_sequence ~consumer_sequence
     ~pending ~consumer ?(nuid = "test-nuid") payload =
   let reply_to =
@@ -1084,6 +1092,9 @@ let () =
       test "get streams ordered chunks and verifies the digest" (fun () ->
           let info_response, info_response_u = Eio.Promise.create () in
           let create_response, create_response_u = Eio.Promise.create () in
+          let consumer_info_response, consumer_info_response_u =
+            Eio.Promise.create ()
+          in
           let first_delivery, first_delivery_u = Eio.Promise.create () in
           let second_delivery, second_delivery_u = Eio.Promise.create () in
           let third_delivery, third_delivery_u = Eio.Promise.create () in
@@ -1094,6 +1105,7 @@ let () =
                 `Return info_wire;
                 `Await info_response;
                 `Await create_response;
+                `Await consumer_info_response;
                 `Await first_delivery;
                 `Await second_delivery;
                 `Await third_delivery;
@@ -1129,25 +1141,35 @@ let () =
                    (direct_response_wire ~sid:1 ~bucket:"assets"
                       ~name:"images/cat.png"
                       {|{"name":"images/cat.png","bucket":"assets","nuid":"test-nuid","size":5,"chunks":3,"digest":"SHA-256=NrvlDtloQdEEQ7y2cNZVTwo0t2G-Z-ycSorSwMRMpCw=","options":{"max_chunk_size":2}}|}));
-              wait_for_trace_count ~trace ~needle:"CONSUMER.CREATE.OBJ_assets"
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.CONSUMER.CREATE.OBJ_assets "
                 ~count:1;
-              let consumer = trace_consumer_name ~trace ~occurrence:1 in
+              let consumer = "get-1" in
+              let subject = trace_json_string ~trace ~field:"deliver_subject" in
               Eio.Promise.resolve create_response_u
-                (Ok (object_ordered_create_wire ~sid:2 ~name:consumer ()));
+                (Ok
+                   (object_get_push_create_wire ~sid:3 ~subject ~name:consumer
+                      ~pending:3L));
+              wait_for_trace_count ~trace
+                ~needle:("CONSUMER.INFO.OBJ_assets." ^ consumer) ~count:1;
+              Eio.Promise.resolve consumer_info_response_u
+                (Ok
+                   (object_get_push_create_wire ~sid:4 ~subject ~name:consumer
+                      ~pending:3L));
               yield_n 5;
               Eio.Promise.resolve first_delivery_u
                 (Ok
-                   (object_ordered_delivery_wire ~sid:3 ~stream_sequence:1L
+                   (object_ordered_delivery_wire ~sid:2 ~stream_sequence:1L
                       ~consumer ~consumer_sequence:1L ~pending:2L "ab"));
               yield_n 5;
               Eio.Promise.resolve second_delivery_u
                 (Ok
-                   (object_ordered_delivery_wire ~sid:3 ~stream_sequence:2L
+                   (object_ordered_delivery_wire ~sid:2 ~stream_sequence:2L
                       ~consumer ~consumer_sequence:2L ~pending:1L "cd"));
               yield_n 5;
               Eio.Promise.resolve third_delivery_u
                 (Ok
-                   (object_ordered_delivery_wire ~sid:3 ~stream_sequence:3L
+                   (object_ordered_delivery_wire ~sid:2 ~stream_sequence:3L
                       ~consumer ~consumer_sequence:3L ~pending:0L "e"));
               wait_for_trace_count ~trace ~needle:"CONSUMER.DELETE.OBJ_assets"
                 ~count:1;
@@ -1168,12 +1190,13 @@ let () =
               require_trace ~trace ~needle:"$O.assets.C.test-nuid";
               require_trace ~trace
                 ~needle:"filter_subject\\\":\\\"$O.assets.C.test-nuid\\\""));
-      test "get deadline survives ordered consumer recreation" (fun () ->
+      test "get deadline covers push consumer setup and delivery" (fun () ->
           let info_response, info_response_u = Eio.Promise.create () in
           let create_response, create_response_u = Eio.Promise.create () in
-          let gap_delivery, gap_delivery_u = Eio.Promise.create () in
+          let consumer_info_response, consumer_info_response_u =
+            Eio.Promise.create ()
+          in
           let delete_response, delete_response_u = Eio.Promise.create () in
-          let recreate_response, recreate_response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
           with_connection_traced_clock
             ~reads:
@@ -1181,9 +1204,8 @@ let () =
                 `Return info_wire;
                 `Await info_response;
                 `Await create_response;
-                `Await gap_delivery;
+                `Await consumer_info_response;
                 `Await delete_response;
-                `Await recreate_response;
                 `Await hold;
               ]
             (fun ~sw ~trace ~clock connection ->
@@ -1213,26 +1235,25 @@ let () =
                       ~digest:
                         "SHA-256=NrvlDtloQdEEQ7y2cNZVTwo0t2G-Z-ycSorSwMRMpCw="
                       ~chunk_size:3));
-              wait_for_trace_count ~trace ~needle:"CONSUMER.CREATE.OBJ_assets"
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.CONSUMER.CREATE.OBJ_assets "
                 ~count:1;
-              let consumer = trace_consumer_name ~trace ~occurrence:1 in
+              let consumer = "get-1" in
+              let subject = trace_json_string ~trace ~field:"deliver_subject" in
               Eio.Promise.resolve create_response_u
-                (Ok (object_ordered_create_wire ~sid:2 ~name:consumer ()));
-              wait_for_trace_count ~trace ~needle:"CONSUMER.MSG.NEXT.OBJ_assets"
-                ~count:1;
-              Eio.Promise.resolve gap_delivery_u
                 (Ok
-                   (object_ordered_delivery_wire ~sid:3 ~stream_sequence:1L
-                      ~consumer ~consumer_sequence:2L ~pending:1L "ab"));
-              wait_for_trace_count ~trace ~needle:"CONSUMER.DELETE.OBJ_assets"
-                ~count:1;
-              Eio.Promise.resolve delete_response_u
-                (Ok (response_wire_with_sid ~sid:4 "{}"));
-              wait_for_trace_count ~trace ~needle:"CONSUMER.CREATE.OBJ_assets"
-                ~count:2;
+                   (object_get_push_create_wire ~sid:3 ~subject ~name:consumer
+                      ~pending:0L));
+              wait_for_trace_count ~trace
+                ~needle:("CONSUMER.INFO.OBJ_assets." ^ consumer) ~count:1;
+              Eio.Promise.resolve consumer_info_response_u
+                (Ok
+                   (object_get_push_create_wire ~sid:4 ~subject ~name:consumer
+                      ~pending:0L));
               Eio.Time.Mono.sleep clock 0.02;
               wait_for_trace_count ~trace ~needle:"CONSUMER.DELETE.OBJ_assets"
-                ~count:2;
+                ~count:1;
+              yield_n 5;
               (match Eio.Promise.peek result with
               | Some
                   (Error
@@ -1250,19 +1271,18 @@ let () =
                        "object get remained pending after its deadline; trace:\n\
                        %s"
                        (Buffer.contents trace)));
-              let recreated_consumer =
-                trace_consumer_name ~trace ~occurrence:2
-              in
-              Eio.Promise.resolve recreate_response_u
-                (Ok
-                   (object_ordered_create_wire ~sid:5 ~name:recreated_consumer
-                      ()));
+              Eio.Promise.resolve delete_response_u
+                (Ok (response_wire_with_sid ~sid:5 "{}"));
+              yield_n 5;
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "get follows object links before streaming target chunks" (fun () ->
           let alias_info, alias_info_u = Eio.Promise.create () in
           let target_info, target_info_u = Eio.Promise.create () in
           let create_response, create_response_u = Eio.Promise.create () in
+          let consumer_info_response, consumer_info_response_u =
+            Eio.Promise.create ()
+          in
           let delivery, delivery_u = Eio.Promise.create () in
           let delete_response, delete_response_u = Eio.Promise.create () in
           with_connection_traced
@@ -1272,6 +1292,7 @@ let () =
                 `Await alias_info;
                 `Await target_info;
                 `Await create_response;
+                `Await consumer_info_response;
                 `Await delivery;
                 `Await delete_response;
               ]
@@ -1306,15 +1327,25 @@ let () =
                       ~digest:
                         "SHA-256=dppObQADGJx-lsXZt-gQoNEcOhKDJSfslLD4bSd_Uco="
                       ~chunk_size:2));
-              wait_for_trace_count ~trace ~needle:"CONSUMER.CREATE.OBJ_assets"
+              wait_for_trace_count ~trace
+                ~needle:"PUB $JS.API.CONSUMER.CREATE.OBJ_assets "
                 ~count:1;
-              let consumer = trace_consumer_name ~trace ~occurrence:1 in
+              let consumer = "get-1" in
+              let subject = trace_json_string ~trace ~field:"deliver_subject" in
               Eio.Promise.resolve create_response_u
-                (Ok (object_ordered_create_wire ~sid:3 ~name:consumer ()));
+                (Ok
+                   (object_get_push_create_wire ~sid:4 ~subject ~name:consumer
+                      ~pending:1L));
+              wait_for_trace_count ~trace
+                ~needle:("CONSUMER.INFO.OBJ_assets." ^ consumer) ~count:1;
+              Eio.Promise.resolve consumer_info_response_u
+                (Ok
+                   (object_get_push_create_wire ~sid:5 ~subject ~name:consumer
+                      ~pending:1L));
               yield_n 5;
               Eio.Promise.resolve delivery_u
                 (Ok
-                   (object_ordered_delivery_wire ~sid:4 ~nuid:"target-nuid"
+                   (object_ordered_delivery_wire ~sid:3 ~nuid:"target-nuid"
                       ~consumer ~stream_sequence:1L ~consumer_sequence:1L
                       ~pending:0L "xy"));
               wait_for_trace_count ~trace ~needle:"CONSUMER.DELETE.OBJ_assets"

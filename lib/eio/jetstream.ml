@@ -6833,6 +6833,19 @@ module Consumer = struct
               Ok ()
           | Error error -> Error error)
 
+    let release_owned_consumer push =
+      match push.owned_consumer with
+      | None -> Ok ()
+      | Some consumer -> (
+          match delete_async consumer with
+          | Ok () ->
+              push.owned_consumer <- None;
+              Ok ()
+          | Error error when is_missing_consumer error ->
+              push.owned_consumer <- None;
+              Ok ()
+          | Error error -> Error error)
+
     let close push =
       let first_close =
         match push.state with
@@ -6853,6 +6866,28 @@ module Consumer = struct
         else Ok ()
       in
       let consumer_result = delete_owned_consumer push in
+      match subscription_result with Error error -> Error error | Ok () -> consumer_result
+
+    let release push =
+      let first_close =
+        match push.state with
+        | Closed -> false
+        | Open | Failed _ ->
+            push.state <- Closed;
+            Option.iter
+              (fun hook -> ignore (Eio.Switch.try_remove_hook hook))
+              push.hook;
+            push.hook <- None;
+            true
+      in
+      let subscription_result =
+        if first_close then
+          match release_subscription push.subscription with
+          | None -> Ok ()
+          | Some error -> Error (Error.Connection error)
+        else Ok ()
+      in
+      let consumer_result = release_owned_consumer push in
       match subscription_result with Error error -> Error error | Ok () -> consumer_result
 
     let heartbeat_missed push =
@@ -7227,7 +7262,7 @@ module Consumer = struct
                     ~initial_pending:(Info.num_pending info) ~consumer
                     ~subscription ~config))
 
-    let create ~sw (stream : Stream.t) config =
+    let create ~sw ?timeout (stream : Stream.t) config =
       if Option.is_some (Config.durable_name config) then
         Error
           (Error.Invalid_config
@@ -7238,104 +7273,190 @@ module Consumer = struct
                 }))
       else
         let connection = stream.jetstream.connection in
-        let config =
-          {
-            config with
-            deliver_subject =
-              (match Config.deliver_subject config with
-              | Some subject -> Some subject
-              | None -> Some (Connection.fresh_inbox connection));
-            inactive_threshold =
-              (match config.inactive_threshold with
-              | Some threshold -> Some threshold
-              | None -> Some Mtime.Span.(5 * min));
-            mem_storage =
-              (match config.mem_storage with
-              | Some value -> Some value
-              | None -> Some true);
-          }
+        let deadline_result =
+          match timeout with
+          | None -> Ok None
+          | Some timeout
+            when Mtime.Span.compare timeout Mtime.Span.zero <= 0 ->
+              Error (Error.Connection (Core_error.Invalid_timeout "push"))
+          | Some timeout ->
+              Ok
+                (Some
+                   (match Mtime.add_span (Connection.now connection) timeout with
+                   | Some deadline -> deadline
+                   | None -> Mtime.max_stamp))
         in
-        match Config.deliver_subject config with
-        | None -> assert false
-        | Some subject -> (
-            let filter =
-              Nats.Subject.Filter.literal (Nats.Subject.to_string subject)
+        let remaining_timeout deadline =
+          match deadline with
+          | None -> Ok None
+          | Some deadline ->
+              let now = Connection.now connection in
+              if Mtime.compare now deadline >= 0 then
+                Error (Error.Connection Core_error.Timeout)
+              else Ok (Some (Mtime.span now deadline))
+        in
+        match deadline_result with
+        | Error error -> Error error
+        | Ok deadline ->
+            let config =
+              {
+                config with
+                deliver_subject =
+                  (match Config.deliver_subject config with
+                  | Some subject -> Some subject
+                  | None -> Some (Connection.fresh_inbox connection));
+                inactive_threshold =
+                  (match config.inactive_threshold with
+                  | Some threshold -> Some threshold
+                  | None -> Some Mtime.Span.(5 * min));
+                mem_storage =
+                  (match config.mem_storage with
+                  | Some value -> Some value
+                  | None -> Some true);
+              }
             in
-            match
-              Connection.subscribe connection
-                ?queue_group:(Config.deliver_group config)
-                filter
-            with
-            | Error error -> Error (Error.Connection error)
-            | Ok subscription ->
-                let active_subscription = ref subscription in
-                let created_consumer = ref None in
-                let transferred = ref false in
-                let cleanup () =
-                  if not !transferred then (
-                    transferred := true;
-                    ignore (release_subscription !active_subscription);
-                    match !created_consumer with
-                    | None -> ()
-                    | Some consumer ->
-                        ignore (Eio.Cancel.protect (fun () -> delete consumer)))
+            match Config.deliver_subject config with
+            | None -> assert false
+            | Some subject ->
+                let filter =
+                  Nats.Subject.Filter.literal (Nats.Subject.to_string subject)
                 in
-                Fun.protect ~finally:cleanup (fun () ->
-                    match create stream config with
-                    | Error error -> Error error
-                    | Ok consumer -> (
-                        created_consumer := Some consumer;
-                        match info consumer with
+                (match
+                   Connection.subscribe connection
+                     ?queue_group:(Config.deliver_group config)
+                     filter
+                 with
+                | Error error -> Error (Error.Connection error)
+                | Ok subscription ->
+                    let active_subscription = ref subscription in
+                    let created_consumer = ref None in
+                    let transferred = ref false in
+                    let cleanup_consumer consumer =
+                      match remaining_timeout deadline with
+                      | Ok timeout ->
+                          ignore
+                            (Eio.Cancel.protect (fun () ->
+                                 ignore (delete ?timeout consumer)))
+                      | Error _ ->
+                          ignore
+                            (Eio.Cancel.protect (fun () ->
+                                 ignore (delete_async consumer)))
+                    in
+                    let cleanup () =
+                      if not !transferred then (
+                        transferred := true;
+                        ignore (release_subscription !active_subscription);
+                        match !created_consumer with
+                        | None -> ()
+                        | Some consumer -> cleanup_consumer consumer)
+                    in
+                    Fun.protect ~finally:cleanup (fun () ->
+                        match remaining_timeout deadline with
                         | Error error -> Error error
-                        | Ok info -> (
-                            let actual_config = Info.config info in
-                            match Config.deliver_subject actual_config with
-                            | None -> Error Error.Not_push_consumer
-                            | Some actual_subject -> (
-                                let subscription_result =
-                                  if
-                                    Nats.Subject.equal subject actual_subject
-                                    && option_equal Nats.Queue_group.equal
-                                         (Config.deliver_group config)
-                                         (Config.deliver_group actual_config)
-                                  then Ok !active_subscription
-                                  else
-                                    match
-                                      Connection.subscribe connection
-                                        ?queue_group:
-                                          (Config.deliver_group actual_config)
-                                        (Nats.Subject.Filter.literal
-                                           (Nats.Subject.to_string
-                                              actual_subject))
-                                    with
-                                    | Error error ->
-                                        Error (Error.Connection error)
-                                    | Ok replacement -> (
-                                        active_subscription := replacement;
-                                        match
-                                          release_subscription subscription
-                                        with
-                                        | None -> Ok replacement
-                                        | Some error ->
-                                            Error (Error.Connection error))
-                                in
-                                match subscription_result with
-                                | Error error -> Error error
-                                | Ok subscription -> (
-                                    let initial_pending =
-                                      match created_pending consumer with
-                                      | Some value -> value
-                                      | None -> Info.num_pending info
-                                    in
-                                    match
-                                      make ~sw ~owns_consumer:true
-                                        ~initial_pending ~consumer ~subscription
-                                        ~config:actual_config
-                                    with
-                                    | Error error -> Error error
-                                    | Ok push ->
-                                        transferred := true;
-                                        Ok push))))))
+                        | Ok timeout ->
+                            begin
+                              match create ?timeout stream config with
+                              | Error error -> Error error
+                              | Ok consumer ->
+                                  created_consumer := Some consumer;
+                                  match remaining_timeout deadline with
+                                  | Error error -> Error error
+                                  | Ok timeout ->
+                                      begin
+                                        match info ?timeout consumer with
+                                        | Error error -> Error error
+                                        | Ok info ->
+                                            let actual_config =
+                                              Info.config info
+                                            in
+                                            begin
+                                              match
+                                                Config.deliver_subject
+                                                  actual_config
+                                              with
+                                              | None ->
+                                                  Error Error.Not_push_consumer
+                                              | Some actual_subject ->
+                                                  let subscription_result =
+                                                    if
+                                                      Nats.Subject.equal subject
+                                                        actual_subject
+                                                      && option_equal
+                                                           Nats.Queue_group.equal
+                                                           (Config.deliver_group
+                                                              config)
+                                                           (Config.deliver_group
+                                                              actual_config)
+                                                    then Ok !active_subscription
+                                                    else
+                                                      match
+                                                        Connection.subscribe
+                                                          connection
+                                                          ?queue_group:
+                                                            (Config.deliver_group
+                                                               actual_config)
+                                                          (Nats.Subject.Filter
+                                                           .literal
+                                                             (Nats.Subject
+                                                              .to_string
+                                                                actual_subject))
+                                                      with
+                                                      | Error error ->
+                                                          Error
+                                                            (Error.Connection
+                                                               error)
+                                                      | Ok replacement ->
+                                                          active_subscription :=
+                                                            replacement;
+                                                          begin
+                                                            match
+                                                              release_subscription
+                                                                subscription
+                                                            with
+                                                            | None ->
+                                                                Ok replacement
+                                                            | Some error ->
+                                                                Error
+                                                                  (Error.Connection
+                                                                     error)
+                                                          end
+                                                  in
+                                                  begin
+                                                    match subscription_result with
+                                                    | Error error -> Error error
+                                                    | Ok subscription ->
+                                                        let initial_pending =
+                                                          match
+                                                            created_pending
+                                                              consumer
+                                                          with
+                                                          | Some value -> value
+                                                          | None ->
+                                                              Info.num_pending
+                                                                info
+                                                        in
+                                                        begin
+                                                          match
+                                                            make ~sw
+                                                              ~owns_consumer:
+                                                                true
+                                                              ~initial_pending
+                                                              ~consumer
+                                                              ~subscription
+                                                              ~config:
+                                                                actual_config
+                                                          with
+                                                          | Error error ->
+                                                              Error error
+                                                          | Ok push ->
+                                                              transferred :=
+                                                                true;
+                                                              Ok push
+                                                        end
+                                                  end
+                                            end
+                                      end
+                            end))
 
     let consumer push = push.consumer
     let initial_pending push = push.initial_pending
@@ -7803,109 +7924,125 @@ module Consumer = struct
           | Error error -> Error error
           | Ok () -> delete_result
 
-    let v ~sw ?batch ?expires ?idle_heartbeat ?max_bytes
+    let v ~sw ?timeout ?batch ?expires ?idle_heartbeat ?max_bytes
         ?(deliver_policy = Config.All) ?filter_subject ?(filter_subjects = [])
         ?(replay_policy = Config.Instant) ?(headers_only = false)
         ?inactive_threshold ?max_reset_attempts ?(metadata = []) ?name_prefix
         (stream : stream) =
-      let batch = Option.value batch ~default:1 in
-      let expires = Option.value expires ~default:default_expires in
-      let idle_heartbeat =
-        Option.value idle_heartbeat ~default:default_idle_heartbeat
+      let deadline_result =
+        match timeout with
+        | None -> Ok None
+        | Some timeout when Mtime.Span.compare timeout Mtime.Span.zero <= 0 ->
+            Error (Error.Connection (Core_error.Invalid_timeout "ordered"))
+        | Some timeout ->
+            Ok
+              (Some
+                 (match Mtime.add_span (Connection.now stream.jetstream.connection) timeout with
+                 | Some deadline -> deadline
+                 | None -> Mtime.max_stamp))
       in
-      let inactive_threshold =
-        Option.value inactive_threshold ~default:default_inactive_threshold
-      in
-      let max_reset_attempts =
-        match max_reset_attempts with
-        | None | Some 0 -> Ok None
-        | Some value when value > 0 -> Ok (Some value)
-        | Some value ->
-            Error
-              (Error.Invalid_config
-                 (Error.Invalid_consumer_policy
-                    {
-                      field = "max_reset_attempts";
-                      value = Int.to_string value;
-                    }))
-      in
-      let filter_subjects_result =
-        match (filter_subject, filter_subjects) with
-        | Some _, _ :: _ ->
-            Error
-              (Error.Invalid_config
-                 (Error.Invalid_consumer_policy
-                    {
-                      field = "filter_subjects";
-                      value = "exclusive with filter_subject";
-                    }))
-        | _ -> Ok filter_subjects
-      in
-      let name_prefix_result =
-        match name_prefix with
-        | None ->
-            Ok (Some (generated_name_prefix stream.jetstream.connection))
-        | Some prefix when String.equal prefix "" ->
-            Error
-              (Error.Invalid_config
-                 (Error.Invalid_consumer_policy
-                    { field = "name_prefix"; value = "must not be empty" }))
-        | Some prefix -> (
-            match Config.v ~name:(prefix ^ "_1") () with
-            | Ok _ -> Ok (Some prefix)
-            | Error error -> Error (Error.Invalid_config error))
-      in
-      match
-        validate_fetch ~batch ~expires ~max_bytes
-          ~idle_heartbeat:(Some idle_heartbeat) ~group:None ~min_pending:None
-          ~min_ack_pending:None ~priority:None
-      with
+      match deadline_result with
       | Error error -> Error error
-      | Ok () -> (
-          match (max_reset_attempts, filter_subjects_result, name_prefix_result)
+      | Ok deadline ->
+          let batch = Option.value batch ~default:1 in
+          let expires = Option.value expires ~default:default_expires in
+          let idle_heartbeat =
+            Option.value idle_heartbeat ~default:default_idle_heartbeat
+          in
+          let inactive_threshold =
+            Option.value inactive_threshold ~default:default_inactive_threshold
+          in
+          let max_reset_attempts =
+            match max_reset_attempts with
+            | None | Some 0 -> Ok None
+            | Some value when value > 0 -> Ok (Some value)
+            | Some value ->
+                Error
+                  (Error.Invalid_config
+                     (Error.Invalid_consumer_policy
+                        {
+                          field = "max_reset_attempts";
+                          value = Int.to_string value;
+                        }))
+          in
+          let filter_subjects_result =
+            match (filter_subject, filter_subjects) with
+            | Some _, _ :: _ ->
+                Error
+                  (Error.Invalid_config
+                     (Error.Invalid_consumer_policy
+                        {
+                          field = "filter_subjects";
+                          value = "exclusive with filter_subject";
+                        }))
+            | _ -> Ok filter_subjects
+          in
+          let name_prefix_result =
+            match name_prefix with
+            | None ->
+                Ok (Some (generated_name_prefix stream.jetstream.connection))
+            | Some prefix when String.equal prefix "" ->
+                Error
+                  (Error.Invalid_config
+                     (Error.Invalid_consumer_policy
+                        { field = "name_prefix"; value = "must not be empty" }))
+            | Some prefix -> (
+                match Config.v ~name:(prefix ^ "_1") () with
+                | Ok _ -> Ok (Some prefix)
+                | Error error -> Error (Error.Invalid_config error))
+          in
+          match
+            validate_fetch ~batch ~expires ~max_bytes
+              ~idle_heartbeat:(Some idle_heartbeat) ~group:None ~min_pending:None
+              ~min_ack_pending:None ~priority:None
           with
-          | Error error, _, _ | _, Error error, _ | _, _, Error error ->
-              Error error
-          | Ok max_reset_attempts, Ok filter_subjects, Ok name_prefix ->
-          let ordered =
-            {
-              stream;
-              connection = stream.jetstream.connection;
-              sw;
-              batch;
-              expires;
-              idle_heartbeat;
-              max_bytes;
-              initial_pending = None;
-              initial_pending_captured = false;
-              initial_deliver_policy = deliver_policy;
-              filter_subject;
-              filter_subjects;
-              replay_policy;
-              headers_only;
-              inactive_threshold;
-              max_reset_attempts;
-              metadata;
-              name_prefix;
-              generation = 0;
-              consumer = None;
-              pull = None;
-              consumer_sequence = 0L;
-              stream_sequence = None;
-              state = Open;
-              hook = None;
-            }
-          in
-          let hook =
-            Eio.Switch.on_release_cancellable sw (fun () ->
-                Eio.Cancel.protect (fun () -> ignore (release ordered)))
-          in
-          ordered.hook <- Some hook;
-          match create_generation ordered ~deadline:None with
-          | Error error ->
-              ignore (close ordered);
-              Error error
-          | Ok () -> Ok ordered)
+          | Error error -> Error error
+          | Ok () -> (
+              match
+                (max_reset_attempts, filter_subjects_result, name_prefix_result)
+              with
+              | Error error, _, _ | _, Error error, _ | _, _, Error error ->
+                  Error error
+              | Ok max_reset_attempts, Ok filter_subjects, Ok name_prefix ->
+                  let ordered =
+                    {
+                      stream;
+                      connection = stream.jetstream.connection;
+                      sw;
+                      batch;
+                      expires;
+                      idle_heartbeat;
+                      max_bytes;
+                      initial_pending = None;
+                      initial_pending_captured = false;
+                      initial_deliver_policy = deliver_policy;
+                      filter_subject;
+                      filter_subjects;
+                      replay_policy;
+                      headers_only;
+                      inactive_threshold;
+                      max_reset_attempts;
+                      metadata;
+                      name_prefix;
+                      generation = 0;
+                      consumer = None;
+                      pull = None;
+                      consumer_sequence = 0L;
+                      stream_sequence = None;
+                      state = Open;
+                      hook = None;
+                    }
+                  in
+                  let hook =
+                    Eio.Switch.on_release_cancellable sw (fun () ->
+                        Eio.Cancel.protect (fun () -> ignore (release ordered)))
+                  in
+                  ordered.hook <- Some hook;
+                  match create_generation ordered ~deadline with
+                  | Error error ->
+                      ignore (close ordered);
+                      Error error
+                  | Ok () -> Ok ordered)
 
     let initial_pending ordered = ordered.initial_pending
 

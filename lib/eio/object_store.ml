@@ -1138,83 +1138,146 @@ let get_content ~deadline (value : t) info writer =
           Nats.Subject.Filter.literal
             (chunk_subject value.bucket (Info.nuid info))
         in
-        match
-          Jetstream.Consumer.Ordered.v ~sw ~batch:1 ?expires:None
-            ?filter_subject:(Some filter) value.stream
-        with
-        | Error error -> Error (map_jetstream_error error)
-        | Ok ordered -> (
-            let digest = ref (Digestif.SHA256.init ()) in
-            let size = ref 0L in
-            let chunks = ref 0L in
-            let result = ref None in
-            let next_message () =
-              match remaining_timeout value deadline with
-              | Error error -> Error error
-              | Ok None -> (
-                  match Jetstream.Consumer.Ordered.next ordered with
-                  | Ok message -> Ok message
-                  | Error error -> Error (map_jetstream_error error))
-              | Ok (Some timeout) -> (
+        let connection = Jetstream.connection value.jetstream in
+        let retry_timeout = Mtime.Span.(5 * s) in
+        let make_config () =
+          let deliver_subject = Connection.fresh_inbox connection in
+          Jetstream.Consumer.Config.v ~deliver_subject
+            ~deliver_policy:Jetstream.Consumer.Config.All
+            ~ack_policy:Jetstream.Consumer.Config.No_ack ~filter_subject:filter
+            ~idle_heartbeat:Mtime.Span.(5 * s)
+            ~flow_control:true ~headers_only:false
+            ~inactive_threshold:Mtime.Span.(5 * min)
+            ~mem_storage:true ()
+        in
+        let is_timeout = function
+          | Error.Connection Core_error.Timeout -> true
+          | _ -> false
+        in
+        let digest = ref (Digestif.SHA256.init ()) in
+        let size = ref 0L in
+        let chunks = ref 0L in
+        let rec read_attempt () =
+          match remaining_timeout value deadline with
+          | Error error -> Error error
+          | Ok timeout -> (
+              let setup_timeout =
+                match timeout with
+                | None -> None
+                | Some timeout ->
+                    Some
+                      (if Mtime.Span.compare timeout retry_timeout > 0 then
+                         retry_timeout
+                       else timeout)
+              in
+              match make_config () with
+              | Error error ->
+                  Error
+                    (map_jetstream_error (Jetstream.Error.Invalid_config error))
+              | Ok config -> (
                   match
-                    Jetstream.Consumer.Ordered.next_with_timeout ~timeout
-                      ordered
+                    Jetstream.Consumer.Push.create ~sw ?timeout:setup_timeout
+                      value.stream config
                   with
-                  | Ok message -> Ok message
-                  | Error error -> Error (map_jetstream_error error))
-            in
-            let read_chunks () =
-              while
-                Int64.compare !chunks expected_chunks < 0
-                && Option.is_none !result
-              do
-                match next_message () with
-                | Error error -> result := Some (Error error)
-                | Ok message ->
-                    let actual_subject =
-                      Nats.Subject.to_string (Jetstream.Msg.subject message)
-                    in
-                    let expected_subject =
-                      chunk_subject value.bucket (Info.nuid info)
-                    in
-                    if not (String.equal actual_subject expected_subject) then
-                      result :=
-                        Some
-                          (Error (Error.Invalid_chunk_subject actual_subject))
-                    else
-                      let payload = Jetstream.Msg.payload message in
-                      Bytesrw.Bytes.Writer.write_string writer payload;
-                      digest := Digestif.SHA256.feed_string !digest payload;
-                      size :=
-                        Int64.add !size (Int64.of_int (String.length payload));
-                      chunks := Int64.add !chunks 1L;
-                      if
-                        Int64.equal (Jetstream.Msg.num_pending message) 0L
-                        && Int64.compare !chunks expected_chunks < 0
-                      then
-                        result :=
-                          Some
-                            (Error
-                               (Error.Chunk_count_mismatch
-                                  {
-                                    expected = expected_chunks;
-                                    actual = !chunks;
-                                  }))
-              done
-            in
-            let result =
-              Fun.protect
-                ~finally:(fun () ->
-                  ignore
-                    (Eio.Cancel.protect (fun () ->
-                         ignore (Jetstream.Consumer.Ordered.release ordered))))
-                (fun () ->
-                  read_chunks ();
-                  match !result with
-                  | Some result -> result
-                  | None -> verify !digest !size !chunks)
-            in
-            match result with
+                  | Error error ->
+                      let error = map_jetstream_error error in
+                      if is_timeout error && Int64.equal !chunks 0L then
+                        read_attempt ()
+                      else Error error
+                  | Ok push -> (
+                      let next_message () =
+                        match remaining_timeout value deadline with
+                        | Error error -> Error error
+                        | Ok None -> (
+                            match Jetstream.Consumer.Push.next push with
+                            | Ok message -> Ok message
+                            | Error error -> Error (map_jetstream_error error))
+                        | Ok (Some timeout) -> (
+                            let timeout =
+                              if Mtime.Span.compare timeout retry_timeout > 0
+                              then retry_timeout
+                              else timeout
+                            in
+                            match
+                              Jetstream.Consumer.Push.next_with_timeout ~timeout
+                                push
+                            with
+                            | Ok message -> Ok message
+                            | Error error -> Error (map_jetstream_error error))
+                      in
+                      let result = ref None in
+                      let read_chunks () =
+                        while
+                          Int64.compare !chunks expected_chunks < 0
+                          && Option.is_none !result
+                        do
+                          match next_message () with
+                          | Error error -> result := Some (Error error)
+                          | Ok message ->
+                              let actual_subject =
+                                Nats.Subject.to_string
+                                  (Jetstream.Msg.subject message)
+                              in
+                              let expected_subject =
+                                chunk_subject value.bucket (Info.nuid info)
+                              in
+                              if
+                                not
+                                  (String.equal actual_subject expected_subject)
+                              then
+                                result :=
+                                  Some
+                                    (Error
+                                       (Error.Invalid_chunk_subject
+                                          actual_subject))
+                              else
+                                let payload = Jetstream.Msg.payload message in
+                                Bytesrw.Bytes.Writer.write_string writer payload;
+                                digest :=
+                                  Digestif.SHA256.feed_string !digest payload;
+                                size :=
+                                  Int64.add !size
+                                    (Int64.of_int (String.length payload));
+                                chunks := Int64.add !chunks 1L;
+                                if
+                                  Int64.equal
+                                    (Jetstream.Msg.num_pending message)
+                                    0L
+                                  && Int64.compare !chunks expected_chunks < 0
+                                then
+                                  result :=
+                                    Some
+                                      (Error
+                                         (Error.Chunk_count_mismatch
+                                            {
+                                              expected = expected_chunks;
+                                              actual = !chunks;
+                                            }))
+                        done
+                      in
+                      let result =
+                        Fun.protect
+                          ~finally:(fun () ->
+                            ignore
+                              (Eio.Cancel.protect (fun () ->
+                                   ignore
+                                     (Jetstream.Consumer.Push.release push))))
+                          (fun () ->
+                            read_chunks ();
+                            match !result with
+                            | Some result -> result
+                            | None -> Ok ())
+                      in
+                      match result with
+                      | Error error
+                        when is_timeout error && Int64.equal !chunks 0L ->
+                          read_attempt ()
+                      | result -> result)))
+        in
+        match read_attempt () with
+        | Error error -> Error error
+        | Ok () -> (
+            match verify !digest !size !chunks with
             | Error error -> Error error
             | Ok () ->
                 Bytesrw.Bytes.Writer.write_eod writer;

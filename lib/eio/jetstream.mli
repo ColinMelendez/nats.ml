@@ -1246,8 +1246,15 @@ module Consumer : sig
         read propagates without closing the session; explicitly call [close]
         when the session is no longer needed. *)
 
-    val create : sw:Eio.Switch.t -> Stream.t -> Config.t -> (t, Error.t) result
-    (** [create ~sw stream config] creates and owns an ephemeral push consumer.
+    val create :
+      sw:Eio.Switch.t ->
+      ?timeout:Mtime.Span.t ->
+      Stream.t ->
+      Config.t ->
+      (t, Error.t) result
+    (** [create ~sw ?timeout stream config] creates and owns an ephemeral push
+        consumer. [timeout] bounds the initial consumer creation and
+        configuration lookup.
         If [config] has no delivery subject, a fresh inbox is chosen. Durable
         names are rejected. A five-minute inactive threshold and memory storage
         are supplied when absent. The delivery subscription is installed before
@@ -1298,6 +1305,12 @@ module Consumer : sig
     (** [close push] stops the subscription and deletes an owned consumer. It is
         idempotent; if owned-consumer deletion fails, a later call retries that
         cleanup. *)
+
+    val release : t -> (unit, Error.t) result
+    (** [release push] stops the subscription and starts a best-effort delete
+        of an owned consumer without waiting for the server's response. It is
+        intended for deadline- and cancellation-sensitive cleanup; use [close]
+        when confirmed deletion is required. *)
   end
 
   module Ordered : sig
@@ -1306,6 +1319,7 @@ module Consumer : sig
 
     val v :
       sw:Eio.Switch.t ->
+      ?timeout:Mtime.Span.t ->
       ?batch:int ->
       ?expires:Mtime.Span.t ->
       ?idle_heartbeat:Mtime.Span.t ->
@@ -1321,7 +1335,9 @@ module Consumer : sig
       ?name_prefix:string ->
       stream ->
       (t, Error.t) result
-    (** [v ~sw stream] creates a client-managed ephemeral pull consumer. The
+    (** [v ~sw stream] creates a client-managed ephemeral pull consumer.
+        [timeout] bounds the initial consumer creation and pull-subscription
+        setup. The
         initial delivery policy defaults to [All], and [filter_subject] is
         exclusive with [filter_subjects]. Ordered sessions always use [No_ack],
         one-replica memory storage, and a five-minute inactive threshold unless
