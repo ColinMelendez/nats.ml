@@ -372,10 +372,15 @@ callback runs in the pure core.
 - `max_payload` from `INFO` is enforced before emitting a publish.
 - Header negotiation is enabled by default for the modern Core profile.
 - `flush` is a `PING`/`PONG` server barrier, not local socket-write success.
-- Core publishes are not silently replayed after reconnect.
+- New Core publishes use the Go-compatible bounded reconnect buffer during
+  transport recovery; already-submitted mutations are never blindly retried or
+  reconciled by the client.
 - Requests complete exactly once as response, no responders, timeout,
   cancellation, disconnect, or structured server error.
 - Connection drain and subscription drain are distinct operations.
+- Connection drain during reconnect closes and reports the reconnecting state,
+  matching the Go client rather than starting a drain against a replacement
+  transport.
 - The default slow-consumer policy never silently drops messages.
 - JetStream errors are defined in JetStream modules, not in the core error
   variant.
@@ -414,7 +419,7 @@ contract before implementing protocol behavior.
   protocol state and Eio resources.
 - Define Core errors separately from future JetStream errors.
 - Decide the initial header/version profile, configured/discovered server
-  representation, `max_payload` handling, and no-replay policy.
+  representation, `max_payload` handling, and reconnect-buffer/mutation policy.
 - Produce three to five signature-level caller examples: Core pub/sub,
   request/reply, queue worker drain, and pure transition driving.
 
@@ -633,9 +638,12 @@ cluster restart combinations remain later work.
   `Lame_duck_mode` event, and leaves the existing connection usable.
 - Dynamic `INFO` updates replace the discovered candidate set while retaining
   configured seeds; server discovery and endpoint rotation are observable.
-- No arbitrary Core publish is replayed after reconnect by default.
+- New Core publishes accepted during reconnect are flushed from the bounded
+  reconnect buffer after the replacement handshake; interrupted mutations are
+  not reconciled by the client.
 - Subscription drain delivers messages already queued or accepted by the server
-  before the drain barrier, then terminates.
+  before the drain barrier, then terminates; an in-flight subscription drain
+  survives transient reconnect and re-establishes that barrier after replay.
 - Connection drain rejects new work, flushes, closes, and resolves all
   waiters.
 - A full subscription reports structured slow-consumer failure and an event
@@ -1272,7 +1280,7 @@ JetStream acknowledgement/consumer model.
 Do not freeze these before their phase needs them:
 
 - NKey/JWT package boundary and private-key parsing;
-- optional Core reconnect buffering;
+- reconnect-buffer occupancy metrics and probes;
 - WebSocket and second-runtime package boundaries;
 - metrics/probe naming and payload policy.
 
@@ -1281,5 +1289,6 @@ single protocol-owner fiber, bounded subscription and event queues with
 explicit slow-consumer behavior, `Mtime.Span.t` as the public timeout type,
 unknown JetStream JSON-field preservation, Core-first stabilization,
 client-assigned sids,
-the `Op`/`Message` split, explicit deliveries, reader ownership, no silent
-publish replay, structured errors, and distinct drain/close semantics.
+the `Op`/`Message` split, explicit deliveries, reader ownership,
+Go-compatible bounded reconnect buffering without mutation reconciliation,
+structured errors, and distinct drain/close semantics.

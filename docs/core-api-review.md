@@ -50,9 +50,15 @@ already accepted the credentials. During reconnect, Core events from the failed
 transport are suppressed and the replacement `INFO`/`Connected` sequence is
 emitted as the reconnect control sequence.
 
-New publish and subscribe commands fail fast with `Disconnected` during that
-sequence; only unsubscribe and auto-unsubscribe commands are deferred. This is
-the explicit no-replay boundary for ordinary Core operations.
+New Core publishes follow the Go client's bounded reconnect-buffer contract:
+their encoded bytes are accepted while the replacement handshake is in flight
+and flushed after `CONNECT` and subscription replay. A subscription created in
+that interval records local intent immediately, while unsubscribe and
+auto-unsubscribe update that intent without separate wire commands. Existing
+request waiters are not retried as new publishes; they remain pending until a
+reply, timeout, cancellation, or final connection close. This keeps transport
+recovery stateful without making the client infer whether an interrupted
+mutation reached the server.
 
 ## Evidence
 

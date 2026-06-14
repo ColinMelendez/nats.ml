@@ -637,9 +637,13 @@ of:
 - connection close/drain;
 - a structured server error.
 
-Pending requests must not be silently replayed across reconnect. A future
-option may make selected requests retryable, but it must be opt-in and tied to
-an idempotency policy. Request timeout is an Eio waiter concern; the pure
+Pending requests must not be silently replayed across reconnect. Their reply
+waiters remain alive until the reply, timeout, cancellation, or final
+connection close; a request whose publish was already written is not emitted
+again. A request created during reconnect may use the bounded transport
+buffer, just as a normal publish does. A future option may make selected
+requests retryable, but it must be opt-in and tied to an idempotency policy.
+Request timeout is an Eio waiter concern; the pure
 `Client.timer` handles protocol liveness such as ping/stale detection and must
 not become a global timer for application RPCs. Response, timeout, disconnect,
 and cancellation races must complete each waiter exactly once.
@@ -656,22 +660,28 @@ and `Some 0` makes the transport loss terminal. The connection:
 3. send `CONNECT`, re-establish active subscriptions, and restore
    auto-unsubscribe state;
 4. expose the transition through `Event.t`;
-5. apply the explicit no-replay policy to buffered publishes.
+5. flush the bounded reconnect buffer after the replacement handshake and
+   subscription replay.
 
-The bridge fails pending requests and flush/drain barriers instead of silently
-replaying them. Unsubscribe and auto-unsubscribe commands received during the
-handshake are deferred until `Reconnected`; `close` wins over recovery. A
+The bridge keeps request waiters across a transient transport loss without
+re-emitting request publishes that may already have reached the server. Flush
+barriers that were already waiting at the loss fail; a new flush queues its
+`PING` in the reconnect buffer. Subscription intent and auto-unsubscribe
+limits updated during the handshake are reflected in the replacement replay.
+`close` wins over recovery. `drain` also closes and reports the reconnecting
+state instead of starting a drain against a transport that is not usable. A
 redial or handshake failure is retried when the configured policy permits it;
-exhaustion terminates the event stream with a structured error without
-emitting a second facade disconnect event. Any opt-in retryable request policy
+exhaustion terminates the event stream with a structured error without emitting
+a second facade disconnect event. Any idempotency-aware request retry policy
 remains a future extension.
 
 Buffered publish replay is inherently at-least-once at the transport boundary:
 a publish may have reached the server just before a disconnect and then be
-sent again. Therefore the default should not silently replay arbitrary Core
-publishes. If a reconnect buffer is enabled, the API must document the
-duplicate-delivery risk and provide size/overflow/error visibility. JetStream
-publish should use message ids when the caller needs deduplication.
+sent again. The Eio facade follows the Go default of a bounded 8 MiB reconnect
+buffer for new outbound publishes, exposes overflow as a structured error, and
+documents that acceptance means queued bytes rather than server receipt. There
+is no client-side reconciliation of interrupted mutations. JetStream publish
+should use message ids when the caller needs deduplication.
 
 `close` stops immediately and releases resources. `drain` rejects new
 publishes/subscriptions, lets existing subscription queues and pending output
@@ -680,8 +690,10 @@ request waiters deterministically. Subscription drain has the narrower meaning
 of unsubscribe while delivering already-received messages. In the Eio facade,
 it waits for the server's unsubscribe barrier, enqueues a terminal marker, and
 leaves already queued messages available to `next`/`iter`; it does not wait for
-a consumer fiber to observe those items. A timed-out drain retains its terminal
-result for subsequent calls rather than reporting a later false success.
+a consumer fiber to observe those items. A drain in progress across a transient
+transport loss remains pending and re-establishes its server barrier after
+subscription replay. A timed-out drain retains its terminal result for
+subsequent calls rather than reporting a later false success.
 
 ### Authentication and transports
 
@@ -900,7 +912,8 @@ second client runtime.
 - NATS Streaming/STAN compatibility.
 - A callback-only public API.
 - A protocol core that depends on Eio, Lwt, Unix, TLS, DNS, or a socket.
-- Silent publish replay across reconnect.
+- Blind replay or reconciliation of already-submitted mutations across
+  reconnect.
 - Unbounded buffering as the default slow-consumer policy.
 - An untyped “send an arbitrary JetStream JSON request” API as the primary UX.
 

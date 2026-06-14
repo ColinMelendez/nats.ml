@@ -41,6 +41,18 @@ ownership and receive APIs differ:
 - token, username/password, NKey, JWT/NKey, TLS, server-required TLS, and mTLS
   authentication paths.
 
+Reconnect follows the Go client's observable boundary: new publishes use a
+bounded 8 MiB pending buffer by default and are flushed after the replacement
+handshake and subscription replay; subscriptions created during recovery are
+registered in local replay state; existing request waiters remain pending but
+already-written request publishes are not re-emitted; and flushes already
+waiting at the transport loss fail while new flushes can be queued. The OCaml
+facade closes and returns `Connection_reconnecting` for a connection drain
+requested during recovery. Subscription drains remain pending across a
+transient transport loss and are re-established after the replacement
+subscription replay. The OCaml facade does not attempt mutation reconciliation
+or idempotency inference.
+
 Go exposes synchronous subscriptions, callbacks, and channels because those
 are natural Go concurrency forms. The OCaml surface uses `Subscription.next`,
 `iter`, and Eio switches instead. This is a runtime adaptation, not a missing
