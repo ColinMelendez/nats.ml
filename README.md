@@ -155,11 +155,12 @@ NATS_TEST_TLS=1 ./scripts/runtest-interop-service-failure.sh
 NATS_TEST_TLS=1 ./scripts/runtest-interop-service-parent-close.sh
 ```
 
-Once the integration shell is active, the single-node JetStream interop and
-cluster runners have a five-minute deadline by default. Set
+Once the integration shell is active, the Core/Services, single-node
+JetStream, and cluster interop runners have a five-minute deadline by default.
+Set
 `NATS_TEST_RUN_TIMEOUT` to a positive number of seconds to adjust it. Set
 `NATS_TEST_ARTIFACT_DIR` to a caller-owned directory to preserve logs, Docker
-state, the image identity, and run metadata when a JetStream interop case
+state, the image identity, and run metadata when an interop case
 fails. The JetStream matrix accepts `pull`, `push`, `ordered`, `kv`, and
 `object` scenarios; the default remains the smaller `pull,push` slice.
 
@@ -329,7 +330,17 @@ and sealing. Its six-mode single-server authentication/TLS matrix passes all
 ordered-watch recovery after seed loss, elected-leader loss, and durable seed
 restart in anonymous plaintext mode. Broader authenticated or failure
 topologies remain separate acceptance work for KV and Object Store cluster
-behavior. The dedicated `./scripts/runtest-interop-object-store-cluster.sh`
+behavior. Additional authenticated evidence and broader failure topologies
+remain separate acceptance work for the KV and Object Store cluster surfaces.
+The authenticated KV companion wrappers
+`./scripts/runtest-interop-auth-key-value-cluster.sh` and
+`./scripts/runtest-interop-auth-key-value-cluster-matrix.sh` now route the five
+generated NKey/JWT/TLS modes through the same three failure modes. The NKey
+seed smoke and isolated JWT restart cases pass; the full 45-cell KV sweep
+remains a release gate after a sequential run reached a server-side
+`JSInsufficientResourcesErr` on nats-server 2.12.15, while the same JWT restart
+case passed in isolation. The dedicated
+`./scripts/runtest-interop-object-store-cluster.sh`
 runner covers replicated Object Store content, metadata, cross-SDK writes and
 reads, cleanup, seed loss, elected-leader loss, and durable seed restart in
 anonymous plaintext mode. Its nine cases pass across the three pinned releases;

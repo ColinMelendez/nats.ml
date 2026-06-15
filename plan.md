@@ -241,6 +241,12 @@ and metadata recovery after seed loss, elected-leader loss, and durable seed
 restart; all nine cases pass across the three pinned releases. Authenticated,
 multi-node, changed-advertisement, and broader management-operation failure
 topologies remain in this workstream.
+The authenticated KV companion wrappers now route the same five generated
+NKey/JWT/TLS modes through the three failure modes and three pinned releases.
+An NKey seed smoke and an isolated JWT restart case pass. The full 45-cell KV
+sweep remains a release gate: a sequential run reached nats-server 2.12.15's
+`JSInsufficientResourcesErr` after earlier cells, while the same JWT restart
+case passed in isolation.
 
 #### D. Make cross-SDK behavior the wire-level oracle
 
@@ -1001,6 +1007,11 @@ semantics before calling the feature complete.
   retained snapshot marker, revision continuity, and ordered-watch recovery
   after seed loss, elected-leader loss, and durable seed restart. Broader
   server/version combinations beyond the pinned auth/TLS matrix remain.
+- Added the authenticated KV cluster wrappers, reusing the established
+  JetStream cluster matrix for NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS
+  across seed, leader, and restart failures. The first smoke and isolated
+  restart evidence pass; the full matrix remains pending because a sequential
+  run encountered nats-server 2.12.15's `JSInsufficientResourcesErr`.
 
 ### Workstream 5B — Object Store
 
@@ -1083,8 +1094,8 @@ revision semantics before documenting them as stable.
   cleanup, and replacement cleanup for prior tombstone NUIDs are covered by
   focused mock-transport regressions. File-transfer partial-result behavior is
   now explicit in the public documentation.
-- Remaining before a release claim: broader authenticated and multi-node KV/
-  Object Store failure coverage, plus the final acceptance evidence described
+- Remaining before a release claim: full authenticated and multi-node KV/
+  Object Store failure evidence, plus the final acceptance evidence described
   in the production-readiness program.
 
 ## Phase 6 — Services over Core NATS
