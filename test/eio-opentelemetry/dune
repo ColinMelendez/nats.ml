@@ -1,0 +1,9 @@
+(tests
+ (names test_observability)
+ (libraries
+  nats-eio-opentelemetry
+  nats-eio
+  eio
+  eio.mock
+  windtrap
+  opentelemetry))

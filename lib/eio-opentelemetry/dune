@@ -1,0 +1,4 @@
+(library
+ (name nats_eio_opentelemetry)
+ (public_name nats-eio-opentelemetry)
+ (libraries nats-eio eio mtime opentelemetry))

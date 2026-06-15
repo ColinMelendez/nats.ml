@@ -59,3 +59,21 @@
   mtime
   (eio_main :with-test)
   (windtrap :with-test)))
+
+(package
+ (name nats-eio-opentelemetry)
+ (synopsis "OpenTelemetry observations for the NATS Eio client")
+ (description
+  "An optional OpenTelemetry bridge for NATS Eio connection statistics and lifecycle events.")
+ (license ISC)
+ (authors "Colin <cwrmcolin@gmail.com>")
+ (maintainers "Colin <cwrmcolin@gmail.com>")
+ (depends
+  (ocaml (>= 5.5))
+  nats-eio
+  eio
+  mtime
+  opentelemetry
+  (alcobar :with-test)
+  (eio_main :with-test)
+  (windtrap :with-test)))

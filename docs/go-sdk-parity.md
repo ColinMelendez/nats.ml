@@ -237,9 +237,10 @@ surface:
 
 1. Extend the established live-server and Go-peer matrices to more cluster
    failure topologies and newer server/SDK releases.
-2. Extend the dependency-free observability boundary with optional tracing
-   bridges only when a concrete application requires them; keep them outside
-   the protocol waist.
+2. The optional `nats-eio-opentelemetry` package now bridges the dependency-free
+   observability boundary to cumulative connection metrics and payload-free
+   lifecycle spans. Message context propagation and redaction remain
+   application-owned rather than being inferred by the client.
 3. Re-audit future JetStream fields and server feature gates without silently
    changing the pinned parity claim.
 4. Keep alternative transports such as WebSocket out of this project scope

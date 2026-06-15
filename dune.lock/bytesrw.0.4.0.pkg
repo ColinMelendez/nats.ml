@@ -1,4 +1,4 @@
-(version 0.3.0)
+(version 0.4.0)
 
 (build
  (all_platforms
@@ -32,6 +32,6 @@
 
 (source
  (fetch
-  (url https://erratique.ch/software/bytesrw/releases/bytesrw-0.3.0.tbz)
+  (url https://erratique.ch/software/bytesrw/releases/bytesrw-0.4.0.tbz)
   (checksum
-   sha512=388858b0db210a62a16f56655746fdfadbc64b22c2abb5ed5a12b2872e4f8c34f045cdb953a5dda9b92f0003c7f9f34d70fa5b5bb19fd32fb6121bbaeb7ceba0)))
+   sha512=9b307eb85c99a38faad50a82e5fae652758548a527ce6db3dd09a21096b19a860e812a5a10bd30d8cc9b885a6482c068fe6ab3b653ca6bfb640293fe190025ee)))

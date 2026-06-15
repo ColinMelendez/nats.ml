@@ -1227,8 +1227,10 @@ Only pursue these after the core feature waves are stable and a concrete user
 needs them:
 
 - typed payload codec helpers and documentation examples;
-- the dependency-free `Connection.stats` snapshot and lifecycle event
-  observation boundary; optional tracing bridges remain separate integrations;
+- Completed: the dependency-free `Connection.stats` snapshot and lifecycle
+  event observation boundary, plus the optional `nats-eio-opentelemetry`
+  package for cumulative metrics and payload-free lifecycle spans. Message
+  context propagation and redaction remain application-owned;
 - a dedicated credential/NKey/JWT package if in-repo auth becomes too large;
 - alternative transports such as WebSocket (currently out of scope; revisit
   only if a concrete requirement justifies a separate adapter);
