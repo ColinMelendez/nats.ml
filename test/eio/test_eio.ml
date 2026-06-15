@@ -400,7 +400,7 @@ let () =
                     (Nats_eio.Connection.request connection subject "lookup"));
               yield_n 5;
               Eio.Promise.resolve response_one_u
-                (Ok "MSG _INBOX.test.0.0 1 5\r\nreply\r\n");
+                (Ok "HMSG _INBOX.test.0.0 1 12 17\r\nNATS/1.0\r\n\r\nreply\r\n");
               (match Eio.Promise.await result_one with
               | Ok message ->
                   equal string "reply" (Nats.Message.payload message)
@@ -439,7 +439,7 @@ let () =
                        Nats_eio.Error.pp error));
               let stats = Nats_eio.Connection.stats connection in
               equal int64 2L (Nats_eio.Connection.Stats.in_messages stats);
-              equal int64 35L (Nats_eio.Connection.Stats.in_bytes stats);
+              equal int64 47L (Nats_eio.Connection.Stats.in_bytes stats);
               equal int64 3L (Nats_eio.Connection.Stats.out_messages stats);
               equal int64 17L (Nats_eio.Connection.Stats.out_bytes stats);
               expect_ok (Nats_eio.Connection.close connection);

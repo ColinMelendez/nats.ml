@@ -67,8 +67,9 @@ module Stats = struct
       value.reconnects
 end
 
-let message_header_bytes ?status headers =
-  if Option.is_none status && Nats.Header.is_empty headers then 0L
+let message_header_bytes ?status ?(header_block = false) headers =
+  if (not header_block) && Option.is_none status && Nats.Header.is_empty headers
+  then 0L
   else
     let status_bytes =
       match status with
@@ -89,10 +90,10 @@ let message_header_bytes ?status headers =
     in
     Int64.of_int (10 + status_bytes + field_bytes + 2)
 
-let message_bytes ?status message =
+let message_bytes ?status ?(header_block = false) message =
   Int64.add
     (Int64.of_int (String.length (Nats.Message.payload message)))
-    (message_header_bytes ?status (Nats.Message.headers message))
+    (message_header_bytes ?status ~header_block (Nats.Message.headers message))
 
 module Config = struct
   type t = {
@@ -1322,7 +1323,8 @@ let handle_deliveries t deliveries =
     | [] -> Ok ()
     | (delivery : Nats.Client.delivery) :: rest -> (
         Stats.record_incoming t.stats
-          (message_bytes ?status:delivery.status delivery.message);
+          (message_bytes ?status:delivery.status
+             ~header_block:delivery.header_block delivery.message);
         match Hashtbl.find_opt t.requests delivery.sid with
         | Some waiter -> (
             Hashtbl.remove t.requests delivery.sid;

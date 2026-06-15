@@ -39,7 +39,14 @@ type subscription = {
   delivered : int;
 }
 
-type delivery = { sid : int; message : Message.t; status : Op.status option }
+type delivery = {
+  sid : int;
+  message : Message.t;
+  status : Op.status option;
+  header_block : bool;
+}
+(** A decoded application delivery. [header_block] is [true] when the server
+    sent an [HMSG] packet, including an empty [NATS/1.0] header block. *)
 
 type transition = {
   state : t;

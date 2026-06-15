@@ -140,7 +140,12 @@ type command =
   | Drain
   | Close
 
-type delivery = { sid : int; message : Message.t; status : Op.status option }
+type delivery = {
+  sid : int;
+  message : Message.t;
+  status : Op.status option;
+  header_block : bool;
+}
 
 type transition = {
   state : t;
@@ -266,7 +271,7 @@ let info_events info =
   if Info.lame_duck_mode info then [ Event.Info info; Event.Lame_duck_mode ]
   else [ Event.Info info ]
 
-let incoming_message (state : t) now sid message status =
+let incoming_message (state : t) now sid message status ~header_block =
   match find_subscription sid state.subscriptions with
   | None -> Ok (empty_transition state)
   | Some subscription ->
@@ -294,7 +299,7 @@ let incoming_message (state : t) now sid message status =
           state = touch { state with subscriptions } now;
           output = [];
           events = [];
-          deliveries = [ { sid; message; status } ];
+          deliveries = [ { sid; message; status; header_block } ];
           subscription_id = None;
         }
 
@@ -412,9 +417,10 @@ let handle_operation state now operation =
               deliveries = [];
               subscription_id = None;
             }
-      | Op.Msg { sid; message } -> incoming_message state now sid message None
+      | Op.Msg { sid; message } ->
+          incoming_message state now sid message None ~header_block:false
       | Op.Hmsg { sid; message; status } ->
-          incoming_message state now sid message status
+          incoming_message state now sid message status ~header_block:true
       | _ -> Error (Error.Unexpected_operation operation))
 
 let incoming ?(eod = false) state ~now reader =
