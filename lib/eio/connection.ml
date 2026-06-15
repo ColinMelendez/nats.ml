@@ -9,7 +9,7 @@ module Config = struct
     read_chunk_size : int;
     inbox_prefix : Nats.Subject.t;
     max_reconnect_attempts : int option;
-    reconnect_buffer_size : int option;
+    reconnect_buffer_size : int;
     reconnect_delay : Mtime.Span.t;
     reconnect_max_delay : Mtime.Span.t;
     reconnect_jitter : Mtime.Span.t;
@@ -42,9 +42,9 @@ module Config = struct
     | Some value -> Error (Error.Invalid_reconnect_attempts value)
 
   let validate_reconnect_buffer_size value =
-    if Int.equal value 0 then Ok (Some default_reconnect_buffer_size)
-    else if Int.equal value (-1) then Ok None
-    else if value > 0 then Ok (Some value)
+    if Int.equal value 0 then Ok default_reconnect_buffer_size
+    else if Int.equal value (-1) then Ok (-1)
+    else if value > 0 then Ok value
     else Error (Error.Invalid_reconnect_buffer_size value)
 
   let validate_reconnect_delays initial maximum =
@@ -1588,13 +1588,13 @@ let enqueue_reconnect_publish_output t message =
   | Some state -> (
       match Nats.Client.outgoing state (Nats.Client.Publish message) with
       | Error error -> Error (command_error error)
-      | Ok transition -> (
-          match t.config.Config.reconnect_buffer_size with
-          | Some limit when Int.compare t.reconnect_pending_bytes limit >= 0 ->
-              Error (Error.Reconnect_buffer_exceeded { limit })
-          | None | Some _ ->
-              List.iter (enqueue_reconnect_output t) transition.output;
-              Ok ()))
+      | Ok transition ->
+          let limit = t.config.Config.reconnect_buffer_size in
+          if Int.compare t.reconnect_pending_bytes limit >= 0 then
+            Error (Error.Reconnect_buffer_exceeded { limit })
+          else (
+            List.iter (enqueue_reconnect_output t) transition.output;
+            Ok ()))
 
 let enqueue_reconnect_publish t message resolver =
   match enqueue_reconnect_publish_output t message with

@@ -2477,8 +2477,39 @@ let () =
           | Ok _ -> ()
           | Error error ->
               fail
-                (Format.asprintf "unbounded reconnect buffer failed: %a"
+                (Format.asprintf "disabled reconnect buffer failed: %a"
                    Nats_eio.Error.pp error));
+      test "rejects reconnect publishes when buffering is disabled" (fun () ->
+          let disconnect, disconnect_u = Eio.Promise.create () in
+          let reconnect_info, reconnect_info_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          let config =
+            expect_ok
+              (Nats_eio.Connection.Config.v ~reconnect_buffer_size:(-1) ())
+          in
+          with_reconnecting_connection ~config
+            ~first_reads:[ `Return info_wire; `Await disconnect ]
+            ~second_reads:[ `Await reconnect_info; `Await hold ]
+            (fun ~sw:_ connection ->
+              let events = Nats_eio.Connection.events connection in
+              ignore (expect_core_event (Nats_eio.Event_stream.next events));
+              ignore (expect_core_event (Nats_eio.Event_stream.next events));
+              Eio.Promise.resolve disconnect_u (Error End_of_file);
+              yield_n 5;
+              (match
+                 Nats_eio.Connection.publish connection subject "disabled"
+               with
+              | Error (Nats_eio.Error.Reconnect_buffer_exceeded { limit = -1 })
+                ->
+                  ()
+              | Ok () -> fail "publish entered a disabled reconnect buffer"
+              | Error error ->
+                  fail
+                    (Format.asprintf "unexpected disabled-buffer error: %a"
+                       Nats_eio.Error.pp error));
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve reconnect_info_u (Ok info_wire);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
       test "rejects a TLS-required server without TLS configuration" (fun () ->
           Eio_mock.Backend.run_full @@ fun env ->
           let hold, hold_u = Eio.Promise.create () in

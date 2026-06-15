@@ -30,21 +30,21 @@ module Config : sig
       [max_reconnect_attempts] counts full candidate passes after a transport
       loss; [None] permits unlimited attempts. The default is [Some 3]. The
       [reconnect_buffer_size] option bounds bytes accepted from new Core
-      publishes while reconnecting; its default is 8 MiB and [-1] disables the
-      bound. A publish accepted into this buffer is written after [CONNECT] and
-      subscription replay succeeds, and can be lost or duplicated at a transport
-      failure. A value of [0] selects the default, matching the Go client. The
-      first redial is immediate; later attempts wait [reconnect_delay] (default
-      one second) and double up to [reconnect_max_delay] (default 30 seconds).
-      [reconnect_jitter] adds a bounded random offset to delayed reconnect
-      waits; it defaults to zero. [random] supplies the state used for that
-      sampling and defaults to a fresh self-initialized state. [tls] supplies
-      the client TLS configuration used when the server's initial [INFO]
-      requires TLS. Set [tls_required] to force the same upgrade when the server
-      does not advertise it. [auth] derives fresh CONNECT credentials from each
-      server [INFO], so nonce signers are called again after reconnect. The
-      caller must install a [Mirage_crypto_rng] generator before connecting with
-      TLS. *)
+      publishes while reconnecting; its default is 8 MiB and [-1] disables
+      reconnect buffering. A publish accepted into this buffer is written after
+      [CONNECT] and subscription replay succeeds, and can be lost or duplicated
+      at a transport failure. A value of [0] selects the default, matching the
+      Go client. The first redial is immediate; later attempts wait
+      [reconnect_delay] (default one second) and double up to
+      [reconnect_max_delay] (default 30 seconds). [reconnect_jitter] adds a
+      bounded random offset to delayed reconnect waits; it defaults to zero.
+      [random] supplies the state used for that sampling and defaults to a fresh
+      self-initialized state. [tls] supplies the client TLS configuration used
+      when the server's initial [INFO] requires TLS. Set [tls_required] to force
+      the same upgrade when the server does not advertise it. [auth] derives
+      fresh CONNECT credentials from each server [INFO], so nonce signers are
+      called again after reconnect. The caller must install a
+      [Mirage_crypto_rng] generator before connecting with TLS. *)
 
   val default : t
 end
