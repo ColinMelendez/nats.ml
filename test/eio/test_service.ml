@@ -318,8 +318,7 @@ let () =
           let endpoint =
             expect_endpoint
               (Nats_eio.Service.Endpoint.v ~name:"created" ~subject ~metadata:[]
-                 ~pending_limits
-                 (fun request ->
+                 ~pending_limits (fun request ->
                    ignore (Nats_eio.Service.Request.payload request);
                    Ok ()))
           in
@@ -768,10 +767,8 @@ let () =
                 (String.length (Nats_eio.Service.Stats.started reset_stats));
               (match Nats_eio.Service.Stats.endpoints reset_stats with
               | endpoint :: _ ->
-                  equal int64 0L
-                    (Nats_eio.Service.Stats.num_requests endpoint);
-                  equal int64 0L
-                    (Nats_eio.Service.Stats.num_errors endpoint);
+                  equal int64 0L (Nats_eio.Service.Stats.num_requests endpoint);
+                  equal int64 0L (Nats_eio.Service.Stats.num_errors endpoint);
                   equal string "" (Nats_eio.Service.Stats.last_error endpoint);
                   equal int64 0L
                     (Nats_eio.Service.Stats.processing_time endpoint)
@@ -836,7 +833,8 @@ let () =
                        then Some (Jsont.Json.string "ready")
                        else None)
                      ~error_handler:(fun _ -> incr error_calls)
-                     ~done_handler:(fun () -> incr done_calls) ())
+                     ~done_handler:(fun () -> incr done_calls)
+                     ())
               in
               let service =
                 expect_service (Nats_eio.Service.v ~sw ~clock connection config)
@@ -859,8 +857,8 @@ let () =
               Eio.Fiber.fork ~sw (fun () ->
                   List.iteri
                     (fun index resolver ->
-                      wait_for_trace_yields ~trace ~needle:"wrote \"PING\\r\\n\""
-                        ~expected:(index + 1);
+                      wait_for_trace_yields ~trace
+                        ~needle:"wrote \"PING\\r\\n\"" ~expected:(index + 1);
                       Eio.Promise.resolve resolver (Ok "PONG\r\n"))
                     pongs);
               let created =
@@ -902,9 +900,7 @@ let () =
                 | Some endpoint -> endpoint
                 | None -> fail ("stats endpoint " ^ name ^ " was missing")
               in
-              (match
-                 Nats_eio.Service.Stats.data (find_endpoint "created")
-               with
+              (match Nats_eio.Service.Stats.data (find_endpoint "created") with
               | Some (Jsont.String (value, _)) -> equal string "ready" value
               | Some _ -> fail "stats callback returned the wrong JSON value"
               | None -> fail "stats callback data was omitted");
@@ -959,8 +955,7 @@ let () =
                 expect_endpoint
                   (Nats_eio.Service.Endpoint.v ~name:"limited"
                      ~pending_limits:limits (fun request ->
-                       ignore
-                         (Nats_eio.Service.Request.payload request);
+                       ignore (Nats_eio.Service.Request.payload request);
                        incr calls;
                        if Int.equal !calls 1 then (
                          Eio.Promise.resolve first_started_u ();
@@ -1008,13 +1003,14 @@ let () =
               | Some error ->
                   fail
                     (Format.asprintf
-                       "unexpected endpoint failure after pending overflow: %a\n%s"
+                       "unexpected endpoint failure after pending overflow: %a\n\
+                        %s"
                        Nats_eio.Service.Error.pp error (Buffer.contents trace))
               | None -> fail "endpoint pending overflow did not fail service");
               (match Eio.Promise.await failure_callback with
               | Nats_eio.Service.Error.Connection
-                  (Nats_eio.Error.Slow_consumer
-                     (Nats_eio.Error.Subscription _)) ->
+                  (Nats_eio.Error.Slow_consumer (Nats_eio.Error.Subscription _))
+                ->
                   ()
               | error ->
                   fail

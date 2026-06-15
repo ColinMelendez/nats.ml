@@ -201,7 +201,7 @@ let run env =
           (match Nats_eio.Service.add_group service ~name:"after-failure" with
           | Error
               (Nats_eio.Service.Error.Connection
-                (Nats_eio.Error.Slow_consumer (Nats_eio.Error.Subscription _)))
+                 (Nats_eio.Error.Slow_consumer (Nats_eio.Error.Subscription _)))
             ->
               ()
           | Error error ->

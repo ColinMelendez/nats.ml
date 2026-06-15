@@ -7,9 +7,7 @@ module Config = struct
   module Source = Jetstream.Stream.Config.Source
   module Republish = Jetstream.Stream.Config.Republish
 
-  type compression = Jetstream.Stream.Config.compression =
-    | Uncompressed
-    | S2
+  type compression = Jetstream.Stream.Config.compression = Uncompressed | S2
 
   type t = {
     bucket : string;
@@ -70,8 +68,8 @@ module Config = struct
 
   let v ~bucket ?description ?(history = 1) ?ttl ?limit_marker_ttl ?max_bytes
       ?max_value_size ?(storage = File) ?(replicas = 1) ?placement ?mirror
-      ?(sources = []) ?republish ?(compression = Uncompressed)
-      ?(metadata = []) () =
+      ?(sources = []) ?republish ?(compression = Uncompressed) ?(metadata = [])
+      () =
     match validate_bucket bucket with
     | Error error -> Error error
     | Ok () when Int.compare history 1 < 0 || Int.compare history 64 > 0 ->
@@ -403,12 +401,9 @@ let stream_for_config config jetstream =
         | Config.Memory -> Jetstream.Stream.Config.Memory
         | Config.File -> Jetstream.Stream.Config.File)
       ~retention:Jetstream.Stream.Config.Limits
-      ~discard:Jetstream.Stream.Config.New
-      ~replicas:(Config.replicas config)
-      ?placement:(Config.placement config)
-      ?mirror:(Config.mirror config)
-      ~sources:(Config.sources config)
-      ?republish:(Config.republish config)
+      ~discard:Jetstream.Stream.Config.New ~replicas:(Config.replicas config)
+      ?placement:(Config.placement config) ?mirror:(Config.mirror config)
+      ~sources:(Config.sources config) ?republish:(Config.republish config)
       ~compression:(Config.compression config)
       ~metadata:(Config.metadata config)
       ~max_msgs_per_subject:(Int64.of_int (Config.history config))
@@ -1225,11 +1220,10 @@ module Ordered_watch = struct
     | New, None, _ | _, _, Some 0L -> Marker
     | _ -> Retained
 
-  let v ~sw ?key ?keys ?(delivery = Last_per_subject)
-      ?(ignore_deletes = false) ?(meta_only = false) ?resume_from_revision
-      ?batch ?expires ?idle_heartbeat ?max_bytes ?replay_policy
-      ?inactive_threshold ?max_reset_attempts ?(metadata = []) ?name_prefix
-      value =
+  let v ~sw ?key ?keys ?(delivery = Last_per_subject) ?(ignore_deletes = false)
+      ?(meta_only = false) ?resume_from_revision ?batch ?expires ?idle_heartbeat
+      ?max_bytes ?replay_policy ?inactive_threshold ?max_reset_attempts
+      ?(metadata = []) ?name_prefix value =
     match (key, keys) with
     | Some _, Some _ -> Error Error.Invalid_watch_filters
     | _ -> (
@@ -1261,8 +1255,7 @@ module Ordered_watch = struct
               Jetstream.Consumer.Ordered.v ~sw ?batch ?expires ?idle_heartbeat
                 ?max_bytes ~deliver_policy ~filter_subjects:filters
                 ?replay_policy ~headers_only:meta_only ?inactive_threshold
-                ?max_reset_attempts
-                ~metadata ?name_prefix value.stream
+                ?max_reset_attempts ~metadata ?name_prefix value.stream
             with
             | Error error -> Error (map_error error)
             | Ok ordered ->
@@ -1439,7 +1432,7 @@ let manager_entries jetstream =
   let subject = Nats.Subject.Filter.literal "$KV.*.>" in
   match Jetstream.Stream.list ~subject jetstream with
   | Error error -> Error (map_jetstream_error error)
-  | Ok infos ->
+  | Ok infos -> (
       let entries = ref [] in
       let result = ref None in
       List.iter
@@ -1448,19 +1441,19 @@ let manager_entries jetstream =
           | Some _ -> ()
           | None -> (
               let name =
-                Jetstream.Stream.Config.name
-                  (Jetstream.Stream.Info.config info)
+                Jetstream.Stream.Config.name (Jetstream.Stream.Info.config info)
               in
               match manager_bucket_name ~prefix:"KV_" name with
               | None -> ()
               | Some bucket -> (
                   match Config.v ~bucket () with
-                  | Error error -> result := Some (Error (map_config_error error))
+                  | Error error ->
+                      result := Some (Error (map_config_error error))
                   | Ok _ -> entries := (bucket, info) :: !entries)))
         infos;
       match !result with
       | Some result -> result
-      | None -> Ok (List.rev !entries)
+      | None -> Ok (List.rev !entries))
 
 let manager_statuses jetstream entries =
   let statuses = ref [] in

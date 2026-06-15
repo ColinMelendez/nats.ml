@@ -298,7 +298,6 @@ module Stats = struct
   let last_error (value : endpoint) = value.last_error
   let processing_time (value : endpoint) = value.processing_time
   let average_processing_time (value : endpoint) = value.average_processing_time
-
   let with_data data value = { value with data }
   let with_endpoints endpoints value = { value with endpoints }
 end
@@ -735,8 +734,7 @@ let stats_with_handler (service : service) (value : Stats.t) =
   | Some handler ->
       Stats.with_endpoints
         (List.map
-           (fun endpoint ->
-             Stats.with_data (handler endpoint) endpoint)
+           (fun endpoint -> Stats.with_data (handler endpoint) endpoint)
            (Stats.endpoints value))
         value
 
@@ -744,7 +742,9 @@ let info service =
   Eio.Mutex.use_ro service.mutex (fun () -> info_without_lock service)
 
 let stats service =
-  let value = Eio.Mutex.use_ro service.mutex (fun () -> stats_without_lock service) in
+  let value =
+    Eio.Mutex.use_ro service.mutex (fun () -> stats_without_lock service)
+  in
   stats_with_handler service value
 
 type wire_identity = {
@@ -1460,7 +1460,8 @@ let add_endpoint_to service ~prefix ~parent_queue (endpoint : Endpoint.t) =
             Connection.subscribe service.connection ?queue_group:queue
               ?pending_messages:
                 (Option.map Endpoint.Pending_limits.messages pending_limits)
-              ?pending_bytes:(Option.map Endpoint.Pending_limits.bytes pending_limits)
+              ?pending_bytes:
+                (Option.map Endpoint.Pending_limits.bytes pending_limits)
               subject
           with
           | Error error ->
@@ -1717,12 +1718,9 @@ let v ~sw ~clock ?random connection config =
   | Ok controls ->
       let service =
         let callbacks =
-          match
-            (Config.error_handler config, Config.done_handler config)
-          with
+          match (Config.error_handler config, Config.done_handler config) with
           | None, None -> None
-          | Some _, _ | _, Some _ ->
-              Some { events = Eio.Stream.create max_int }
+          | Some _, _ | _, Some _ -> Some { events = Eio.Stream.create max_int }
         in
         {
           sw;

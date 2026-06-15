@@ -237,7 +237,8 @@ let trace_consumer_name ~trace ~occurrence =
   while Option.is_none !start && !position <= limit do
     if String.equal (String.sub value !position marker_length) marker then (
       incr seen;
-      if Int.equal !seen occurrence then start := Some (!position + marker_length)
+      if Int.equal !seen occurrence then
+        start := Some (!position + marker_length)
       else incr position)
     else incr position
   done;
@@ -565,13 +566,14 @@ let () =
               wait_for_trace_count ~trace ~needle:"STREAM.LIST" ~count:2;
               Eio.Promise.resolve statuses_response_u
                 (Ok (stream_list_response ~sid:2 ~bucket:"assets"));
-              let statuses = expect_object_ok (Eio.Promise.await statuses_result) in
+              let statuses =
+                expect_object_ok (Eio.Promise.await statuses_result)
+              in
               (match statuses with
               | [ status ] ->
                   equal string "assets"
                     (Nats_eio.Object_store.Status.bucket status);
-                  equal int64 4L
-                    (Nats_eio.Object_store.Status.messages status);
+                  equal int64 4L (Nats_eio.Object_store.Status.messages status);
                   equal int 3 (Nats_eio.Object_store.Status.replicas status)
               | _ -> fail "manager status listing returned the wrong buckets");
               expect_ok (Nats_eio.Connection.close connection);
@@ -1142,8 +1144,7 @@ let () =
                       ~name:"images/cat.png"
                       {|{"name":"images/cat.png","bucket":"assets","nuid":"test-nuid","size":5,"chunks":3,"digest":"SHA-256=NrvlDtloQdEEQ7y2cNZVTwo0t2G-Z-ycSorSwMRMpCw=","options":{"max_chunk_size":2}}|}));
               wait_for_trace_count ~trace
-                ~needle:"PUB $JS.API.CONSUMER.CREATE.OBJ_assets "
-                ~count:1;
+                ~needle:"PUB $JS.API.CONSUMER.CREATE.OBJ_assets " ~count:1;
               let consumer = "get-1" in
               let subject = trace_json_string ~trace ~field:"deliver_subject" in
               Eio.Promise.resolve create_response_u
@@ -1151,7 +1152,8 @@ let () =
                    (object_get_push_create_wire ~sid:3 ~subject ~name:consumer
                       ~pending:3L));
               wait_for_trace_count ~trace
-                ~needle:("CONSUMER.INFO.OBJ_assets." ^ consumer) ~count:1;
+                ~needle:("CONSUMER.INFO.OBJ_assets." ^ consumer)
+                ~count:1;
               Eio.Promise.resolve consumer_info_response_u
                 (Ok
                    (object_get_push_create_wire ~sid:4 ~subject ~name:consumer
@@ -1236,8 +1238,7 @@ let () =
                         "SHA-256=NrvlDtloQdEEQ7y2cNZVTwo0t2G-Z-ycSorSwMRMpCw="
                       ~chunk_size:3));
               wait_for_trace_count ~trace
-                ~needle:"PUB $JS.API.CONSUMER.CREATE.OBJ_assets "
-                ~count:1;
+                ~needle:"PUB $JS.API.CONSUMER.CREATE.OBJ_assets " ~count:1;
               let consumer = "get-1" in
               let subject = trace_json_string ~trace ~field:"deliver_subject" in
               Eio.Promise.resolve create_response_u
@@ -1245,7 +1246,8 @@ let () =
                    (object_get_push_create_wire ~sid:3 ~subject ~name:consumer
                       ~pending:0L));
               wait_for_trace_count ~trace
-                ~needle:("CONSUMER.INFO.OBJ_assets." ^ consumer) ~count:1;
+                ~needle:("CONSUMER.INFO.OBJ_assets." ^ consumer)
+                ~count:1;
               Eio.Promise.resolve consumer_info_response_u
                 (Ok
                    (object_get_push_create_wire ~sid:4 ~subject ~name:consumer
@@ -1269,7 +1271,7 @@ let () =
                   fail
                     (Format.asprintf
                        "object get remained pending after its deadline; trace:\n\
-                       %s"
+                        %s"
                        (Buffer.contents trace)));
               Eio.Promise.resolve delete_response_u
                 (Ok (response_wire_with_sid ~sid:5 "{}"));
@@ -1328,8 +1330,7 @@ let () =
                         "SHA-256=dppObQADGJx-lsXZt-gQoNEcOhKDJSfslLD4bSd_Uco="
                       ~chunk_size:2));
               wait_for_trace_count ~trace
-                ~needle:"PUB $JS.API.CONSUMER.CREATE.OBJ_assets "
-                ~count:1;
+                ~needle:"PUB $JS.API.CONSUMER.CREATE.OBJ_assets " ~count:1;
               let consumer = "get-1" in
               let subject = trace_json_string ~trace ~field:"deliver_subject" in
               Eio.Promise.resolve create_response_u
@@ -1337,7 +1338,8 @@ let () =
                    (object_get_push_create_wire ~sid:4 ~subject ~name:consumer
                       ~pending:1L));
               wait_for_trace_count ~trace
-                ~needle:("CONSUMER.INFO.OBJ_assets." ^ consumer) ~count:1;
+                ~needle:("CONSUMER.INFO.OBJ_assets." ^ consumer)
+                ~count:1;
               Eio.Promise.resolve consumer_info_response_u
                 (Ok
                    (object_get_push_create_wire ~sid:5 ~subject ~name:consumer

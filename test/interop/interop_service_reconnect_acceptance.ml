@@ -315,7 +315,7 @@ let wait_for_stats ~clock ~timeout ~label ~target ~connection ~ready =
             (List.length values)
       | Error
           (Nats_eio.Service.Error.Connection
-            (Nats_eio.Error.Timeout | Nats_eio.Error.Disconnected)) ->
+             (Nats_eio.Error.Timeout | Nats_eio.Error.Disconnected)) ->
           Eio.Time.Mono.sleep clock 0.01
       | Error error -> failf "%s: %s" label (service_error_message error)
   done;

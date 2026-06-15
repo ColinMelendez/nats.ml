@@ -282,9 +282,9 @@ val put_file :
   t ->
   _ Eio.Path.t ->
   (Info.t, Error.t) result
-(** [put_file ?name bucket path] uploads [path] as an object. [name] defaults
-    to the path's basename; metadata options describe the new object. File
-    reads use Eio flows and return {!Error.File} for filesystem failures. *)
+(** [put_file ?name bucket path] uploads [path] as an object. [name] defaults to
+    the path's basename; metadata options describe the new object. File reads
+    use Eio flows and return {!Error.File} for filesystem failures. *)
 
 val get :
   ?timeout:Mtime.Span.t ->
@@ -318,8 +318,8 @@ val get_file :
   Name.t ->
   _ Eio.Path.t ->
   (Info.t, Error.t) result
-(** [get_file ?include_deleted ?max_links bucket name path] writes the object
-    to [path], replacing or creating the file. The object is verified before
+(** [get_file ?include_deleted ?max_links bucket name path] writes the object to
+    [path], replacing or creating the file. The object is verified before
     end-of-data is written; filesystem failures return {!Error.File}. A failed
     transfer may leave a partial file because the destination is opened before
     streaming begins. *)
@@ -379,6 +379,6 @@ module Manager : sig
   (** [names jetstream] returns the names of all Object Store buckets. *)
 
   val statuses : Jetstream.t -> (Status.t list, Error.t) result
-  (** [statuses jetstream] returns current status snapshots for all Object
-      Store buckets in server listing order. *)
+  (** [statuses jetstream] returns current status snapshots for all Object Store
+      buckets in server listing order. *)
 end

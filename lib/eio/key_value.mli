@@ -14,9 +14,7 @@ module Config : sig
   module Source = Jetstream.Stream.Config.Source
   module Republish = Jetstream.Stream.Config.Republish
 
-  type compression = Jetstream.Stream.Config.compression =
-    | Uncompressed
-    | S2
+  type compression = Jetstream.Stream.Config.compression = Uncompressed | S2
 
   type t
   (** A validated bucket configuration. *)
@@ -305,12 +303,16 @@ module Ordered_watch : sig
       after a consumer-sequence gap, missing heartbeat, deletion, or transport
       recovery and resumes at the next stream revision. *)
 
-  type delivery = New | Last_per_subject | All
-  (** The retained-message policy used before {!Initial_done}. *)
+  type delivery =
+    | New
+    | Last_per_subject
+    | All  (** The retained-message policy used before {!Initial_done}. *)
 
-  type event = Initial_done | Entry of Entry.t
-  (** An ordered watch event. [Initial_done] is emitted once after the retained
-      snapshot selected by [delivery]. *)
+  type event =
+    | Initial_done
+    | Entry of Entry.t
+        (** An ordered watch event. [Initial_done] is emitted once after the
+            retained snapshot selected by [delivery]. *)
 
   type t
   (** An owned, cancellable ordered key-value watch. Calls to [next] are
@@ -338,25 +340,25 @@ module Ordered_watch : sig
   (** [v ~sw ?key ?keys ?delivery ?ignore_deletes ?meta_only
        ?resume_from_revision value] creates an ordered watch over bucket keys.
 
-      [key] is a shorthand for one filter; [keys] supplies multiple filters
-      and cannot be supplied with [key]. [delivery] defaults to
-      [Last_per_subject]. [resume_from_revision] starts at the supplied
-      positive stream revision and takes precedence over [delivery]. Delete
-      and purge entries are delivered unless [ignore_deletes] is [true].
-      [meta_only] suppresses values while retaining entry metadata.
+      [key] is a shorthand for one filter; [keys] supplies multiple filters and
+      cannot be supplied with [key]. [delivery] defaults to [Last_per_subject].
+      [resume_from_revision] starts at the supplied positive stream revision and
+      takes precedence over [delivery]. Delete and purge entries are delivered
+      unless [ignore_deletes] is [true]. [meta_only] suppresses values while
+      retaining entry metadata.
 
       [batch], [expires], [idle_heartbeat], [max_bytes], [replay_policy],
       [inactive_threshold], [max_reset_attempts], [metadata], and [name_prefix]
-      are passed to the underlying ordered consumer. A zero
-      [max_reset_attempts] means unlimited recovery attempts. The watch owns
-      its ephemeral consumers and deletes the current generation when [sw]
-      releases. If the server omits the creation pending count, completion can
-      only be inferred from a delivered message; an empty snapshot cannot be
-      distinguished from an idle stream and may wait for a first delivery. *)
+      are passed to the underlying ordered consumer. A zero [max_reset_attempts]
+      means unlimited recovery attempts. The watch owns its ephemeral consumers
+      and deletes the current generation when [sw] releases. If the server omits
+      the creation pending count, completion can only be inferred from a
+      delivered message; an empty snapshot cannot be distinguished from an idle
+      stream and may wait for a first delivery. *)
 
   val next : t -> (event, Error.t) result
-  (** [next watch] returns the next ordered watch event. A call may recreate
-      the underlying consumer before returning. *)
+  (** [next watch] returns the next ordered watch event. A call may recreate the
+      underlying consumer before returning. *)
 
   val next_with_timeout : timeout:Mtime.Span.t -> t -> (event, Error.t) result
   (** [next_with_timeout ~timeout watch] bounds the wait across delivery and
@@ -366,8 +368,8 @@ module Ordered_watch : sig
   (** [iter watch ~f] invokes [f] until the watch is closed or fails. *)
 
   val close : t -> (unit, Error.t) result
-  (** [close watch] stops delivery, deletes the current ephemeral consumer,
-      and is idempotent. *)
+  (** [close watch] stops delivery, deletes the current ephemeral consumer, and
+      is idempotent. *)
 end
 
 module Key_lister : sig
@@ -396,8 +398,8 @@ module Manager : sig
   (** Account-wide Key-Value bucket management over a JetStream capability.
 
       Listing functions eagerly collect the server's paged responses into
-      ordered lists. They are intended for administrative views; use {!Watch}
-      or {!Key_lister} for data-plane streaming. *)
+      ordered lists. They are intended for administrative views; use {!Watch} or
+      {!Key_lister} for data-plane streaming. *)
 
   val open_ : Jetstream.t -> bucket:string -> (t, Error.t) result
   (** [open_ jetstream ~bucket] validates and checks an existing bucket. *)

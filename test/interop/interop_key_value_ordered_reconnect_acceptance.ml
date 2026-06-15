@@ -95,7 +95,8 @@ let wait_for_event ~clock ~timeout ~failure_file ~label ~remaining predicate
 let expect_server_info ~clock ~timeout ~failure_file ~names events =
   let event =
     wait_for_event ~clock ~timeout ~failure_file
-      ~label:({|INFO from |} ^ String.concat "/" names) ~remaining:24
+      ~label:({|INFO from |} ^ String.concat "/" names)
+      ~remaining:24
       (function
         | Nats_eio.Event.Core (Nats.Event.Info info) ->
             Option.fold ~none:false
@@ -229,9 +230,7 @@ let expect_status status bucket =
       failf "Key-Value status used memory storage, expected file storage"
 
 let expect_watch_entry ~timeout label watch ~key ~value ~revision =
-  match
-    Nats_eio.Key_value.Ordered_watch.next_with_timeout ~timeout watch
-  with
+  match Nats_eio.Key_value.Ordered_watch.next_with_timeout ~timeout watch with
   | Ok (Nats_eio.Key_value.Ordered_watch.Entry entry) ->
       expect_entry label ~key ~value ~revision
         ~operation:Nats_eio.Key_value.Entry.Put entry
@@ -240,14 +239,11 @@ let expect_watch_entry ~timeout label watch ~key ~value ~revision =
   | Error error -> failf "%s: %s" label (key_value_error_message error)
 
 let expect_initial_done ~timeout label watch =
-  match
-    Nats_eio.Key_value.Ordered_watch.next_with_timeout ~timeout watch
-  with
+  match Nats_eio.Key_value.Ordered_watch.next_with_timeout ~timeout watch with
   | Ok Nats_eio.Key_value.Ordered_watch.Initial_done -> ()
   | Ok (Nats_eio.Key_value.Ordered_watch.Entry entry) ->
       failf "%s emitted %S instead of Initial_done" label
-        (Nats_eio.Key_value.Key.to_string
-           (Nats_eio.Key_value.Entry.key entry))
+        (Nats_eio.Key_value.Key.to_string (Nats_eio.Key_value.Entry.key entry))
   | Error error -> failf "%s: %s" label (key_value_error_message error)
 
 let run env =
@@ -336,7 +332,8 @@ let run env =
           let start_response =
             expect_ok "start Key-Value ordered reconnect peer"
               (Nats_eio.Connection.request ~timeout connection
-                 (Nats.Subject.literal (prefix ^ ".start")) "start")
+                 (Nats.Subject.literal (prefix ^ ".start"))
+                 "start")
           in
           expect_payload "Key-Value start response" "started" start_response;
           let baseline_response =
@@ -402,9 +399,11 @@ let run env =
           let close_response =
             expect_ok "close Go Key-Value ordered session"
               (Nats_eio.Connection.request ~timeout connection
-                 (Nats.Subject.literal (prefix ^ ".close")) "ocaml-close")
+                 (Nats.Subject.literal (prefix ^ ".close"))
+                 "ocaml-close")
           in
-          expect_payload "Go Key-Value close response" "go-closed" close_response;
+          expect_payload "Go Key-Value close response" "go-closed"
+            close_response;
           expect_key_value_ok "close ordered Key-Value watch"
             (Nats_eio.Key_value.Ordered_watch.close watch);
           watch_closed := true;
@@ -413,7 +412,8 @@ let run env =
           let cleanup_response =
             expect_ok "request Key-Value cleanup"
               (Nats_eio.Connection.request ~timeout connection
-                 (Nats.Subject.literal (prefix ^ ".cleanup")) "cleanup")
+                 (Nats.Subject.literal (prefix ^ ".cleanup"))
+                 "cleanup")
           in
           expect_payload "Key-Value cleanup response" "cleaned" cleanup_response;
           print_endline "interop-key-value-ordered-reconnect: ok"))

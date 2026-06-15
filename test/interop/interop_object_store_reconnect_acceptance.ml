@@ -31,8 +31,7 @@ let endpoint () =
   match Nats.Endpoint.of_string value with
   | Ok endpoint -> endpoint
   | Error error ->
-      failf "invalid NATS_TEST_SERVER %S: %a" value Nats.Endpoint.pp_error
-        error
+      failf "invalid NATS_TEST_SERVER %S: %a" value Nats.Endpoint.pp_error error
 
 let leader_failover () =
   match Sys.getenv_opt "NATS_TEST_JS_CLUSTER_FAILURE_MODE" with
@@ -96,7 +95,8 @@ let wait_for_event ~clock ~timeout ~failure_file ~label ~remaining predicate
 let expect_server_info ~clock ~timeout ~failure_file ~names events =
   let event =
     wait_for_event ~clock ~timeout ~failure_file
-      ~label:({|INFO from |} ^ String.concat "/" names) ~remaining:24
+      ~label:({|INFO from |} ^ String.concat "/" names)
+      ~remaining:24
       (function
         | Nats_eio.Event.Core (Nats.Event.Info info) ->
             Option.fold ~none:false
@@ -200,8 +200,7 @@ let expect_info label ~bucket ~name ~size ~chunks info =
   if not (String.equal actual_bucket bucket) then
     failf "%s bucket was %S, expected %S" label actual_bucket bucket;
   let actual_name =
-    Nats_eio.Object_store.Name.to_string
-      (Nats_eio.Object_store.Info.name info)
+    Nats_eio.Object_store.Name.to_string (Nats_eio.Object_store.Info.name info)
   in
   if not (String.equal actual_name name) then
     failf "%s name was %S, expected %S" label actual_name name;
@@ -213,8 +212,8 @@ let expect_info label ~bucket ~name ~size ~chunks info =
     failf "%s chunks were %Ld, expected %Ld" label actual_chunks chunks
 
 let expect_status status bucket =
-  if not (String.equal (Nats_eio.Object_store.Status.bucket status) bucket)
-  then failf "Object Store status named the wrong bucket";
+  if not (String.equal (Nats_eio.Object_store.Status.bucket status) bucket) then
+    failf "Object Store status named the wrong bucket";
   (match Nats_eio.Object_store.Status.description status with
   | Some description when String.equal description "interop-cluster" -> ()
   | Some description ->
@@ -276,8 +275,8 @@ let run env =
     (fun () ->
       let events = Nats_eio.Connection.events connection in
       let initial_info =
-        expect_server_info ~clock ~timeout ~failure_file
-          ~names:[ initial_name ] events
+        expect_server_info ~clock ~timeout ~failure_file ~names:[ initial_name ]
+          events
       in
       let advertised = Nats.Info.connect_urls initial_info in
       List.iter
@@ -306,7 +305,8 @@ let run env =
       let start_response =
         expect_ok "start Object Store reconnect peer"
           (Nats_eio.Connection.request ~timeout connection
-             (Nats.Subject.literal (prefix ^ ".start")) "start")
+             (Nats.Subject.literal (prefix ^ ".start"))
+             "start")
       in
       expect_payload "Object Store start response" "started" start_response;
       let go_before = object_name "pre-failover Go object" "go-before" in
@@ -317,7 +317,9 @@ let run env =
       if not (String.equal go_payload "from-go-before") then
         failf "pre-failover Go object was %S, expected %S" go_payload
           "from-go-before";
-      let ocaml_before = object_name "pre-failover OCaml object" "ocaml-before" in
+      let ocaml_before =
+        object_name "pre-failover OCaml object" "ocaml-before"
+      in
       let ocaml_before_meta =
         object_meta "pre-failover OCaml metadata" ~name:ocaml_before
           ~chunk_size:4
@@ -348,7 +350,8 @@ let run env =
           expect_server_info ~clock ~timeout:reconnect_timeout ~failure_file
             ~names:recovered_names events
         in
-        expect_reconnected ~clock ~timeout:reconnect_timeout ~failure_file events;
+        expect_reconnected ~clock ~timeout:reconnect_timeout ~failure_file
+          events;
         (match Nats.Info.server_name recovered_info with
         | Some value when not (String.equal value initial_name) -> ()
         | Some value -> failf "reconnected to killed server %S" value
@@ -358,7 +361,8 @@ let run env =
         request_until_response ~clock ~timeout:recovery_request_timeout
           ~failure_file ~label:"confirm Object Store recovery" connection
           (Nats.Subject.literal (prefix ^ ".recovery-ready"))
-          (if leader_failover then "ocaml-leader-failover" else "ocaml-reconnected")
+          (if leader_failover then "ocaml-leader-failover"
+           else "ocaml-reconnected")
       in
       expect_payload "Object Store recovery response" "go-recovery-ready"
         recovery_response;
@@ -371,7 +375,9 @@ let run env =
       if not (String.equal go_after_payload "from-go-after") then
         failf "post-failover Go object was %S, expected %S" go_after_payload
           "from-go-after";
-      let ocaml_after = object_name "post-failover OCaml object" "ocaml-after" in
+      let ocaml_after =
+        object_name "post-failover OCaml object" "ocaml-after"
+      in
       let ocaml_after_meta =
         object_meta "post-failover OCaml metadata" ~name:ocaml_after
           ~chunk_size:4
@@ -394,7 +400,8 @@ let run env =
       let cleanup_response =
         expect_ok "request Object Store cleanup"
           (Nats_eio.Connection.request ~timeout connection
-             (Nats.Subject.literal (prefix ^ ".cleanup")) "cleanup")
+             (Nats.Subject.literal (prefix ^ ".cleanup"))
+             "cleanup")
       in
       expect_payload "Object Store cleanup response" "cleaned" cleanup_response;
       print_endline "interop-object-store-reconnect: ok")

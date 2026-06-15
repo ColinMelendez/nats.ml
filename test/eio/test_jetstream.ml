@@ -256,7 +256,8 @@ let ack_response_wire ~sid =
 
 let publish_ack_wire ~sid ~stream ~sequence =
   let message =
-    Nats.Message.v ~subject:(Nats.Subject.literal "_INBOX.reply")
+    Nats.Message.v
+      ~subject:(Nats.Subject.literal "_INBOX.reply")
       (Format.asprintf "{\"stream\":%S,\"seq\":%Ld}" stream sequence)
   in
   operation_wire (Nats.Op.Hmsg { sid; message; status = None })
@@ -275,7 +276,8 @@ let no_responders_wire ~sid =
 
 let publish_batch_ack_wire ~sid ~stream ~sequence ~batch ~count =
   let message =
-    Nats.Message.v ~subject:(Nats.Subject.literal "_INBOX.reply")
+    Nats.Message.v
+      ~subject:(Nats.Subject.literal "_INBOX.reply")
       (Format.asprintf "{\"stream\":%S,\"seq\":%Ld,\"batch\":%S,\"count\":%d}"
          stream sequence batch count)
   in
@@ -283,15 +285,17 @@ let publish_batch_ack_wire ~sid ~stream ~sequence ~batch ~count =
 
 let batch_flow_ack_wire ~sid ~sequence ~messages =
   let message =
-    Nats.Message.v ~subject:(Nats.Subject.literal "_INBOX.reply")
-      (Format.asprintf "{\"type\":\"ack\",\"seq\":%Ld,\"msgs\":%d}"
-         sequence messages)
+    Nats.Message.v
+      ~subject:(Nats.Subject.literal "_INBOX.reply")
+      (Format.asprintf "{\"type\":\"ack\",\"seq\":%Ld,\"msgs\":%d}" sequence
+         messages)
   in
   operation_wire (Nats.Op.Hmsg { sid; message; status = None })
 
 let batch_flow_gap_wire ~sid ~expected ~actual =
   let message =
-    Nats.Message.v ~subject:(Nats.Subject.literal "_INBOX.reply")
+    Nats.Message.v
+      ~subject:(Nats.Subject.literal "_INBOX.reply")
       (Format.asprintf "{\"type\":\"gap\",\"last_seq\":%Ld,\"seq\":%Ld}"
          expected actual)
   in
@@ -491,8 +495,8 @@ let wait_for_trace_count ~trace ~needle ~count =
   if !seen < count then
     fail
       (Format.asprintf
-         "trace did not contain %d occurrences of %S (saw %d); trace:\n%s"
-         count needle !seen (Buffer.contents trace))
+         "trace did not contain %d occurrences of %S (saw %d); trace:\n%s" count
+         needle !seen (Buffer.contents trace))
 
 let consumer connection =
   let jetstream = expect_jetstream_ok (Nats_eio.Jetstream.v connection) in
@@ -525,8 +529,7 @@ let () =
                  ~max_msgs_per_subject:5L ~allow_rollup:true ~allow_direct:true
                  ~deny_delete:true ~replicas:3 ~placement
                  ~compression:Nats_eio.Jetstream.Stream.Config.S2
-                 ~allow_msg_ttl:true
-                 ~allow_msg_counter:true
+                 ~allow_msg_ttl:true ~allow_msg_counter:true
                  ~allow_atomic_publish:true ~allow_msg_schedules:true
                  ~persist_mode:Nats_eio.Jetstream.Stream.Config.Async
                  ~allow_batch_publish:true
@@ -712,7 +715,8 @@ let () =
               fail
                 (Format.asprintf "unexpected replica error: %a"
                    Nats_eio.Jetstream.Error.pp_config error));
-      test "stream policy controls match the server configuration model" (fun () ->
+      test "stream policy controls match the server configuration model"
+        (fun () ->
           let subject = Nats.Subject.Filter.literal "orders.>" in
           let duplicate_window = Mtime.Span.of_uint64_ns 2_000_000_000L in
           let inactive_threshold = Mtime.Span.of_uint64_ns 30_000_000_000L in
@@ -724,39 +728,37 @@ let () =
           let config =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Stream.Config.v ~name:"ORDERS"
-                 ~subjects:[ subject ] ~discard:Nats_eio.Jetstream.Stream.Config.New
+                 ~subjects:[ subject ]
+                 ~discard:Nats_eio.Jetstream.Stream.Config.New
                  ~max_msgs_per_subject:10L ~max_consumers:12
                  ~discard_new_per_subject:true ~no_ack:true ~duplicate_window
-                 ~deny_purge:true ~first_sequence:3L
-                 ~consumer_limits ())
+                 ~deny_purge:true ~first_sequence:3L ~consumer_limits ())
           in
           equal (option int) (Some 12)
             (Nats_eio.Jetstream.Stream.Config.max_consumers config);
           equal bool true
             (Nats_eio.Jetstream.Stream.Config.discard_new_per_subject config);
           equal bool true (Nats_eio.Jetstream.Stream.Config.no_ack config);
-          (match
-             Nats_eio.Jetstream.Stream.Config.duplicate_window config
-           with
-          | Some value -> equal bool true (Mtime.Span.equal value duplicate_window)
+          (match Nats_eio.Jetstream.Stream.Config.duplicate_window config with
+          | Some value ->
+              equal bool true (Mtime.Span.equal value duplicate_window)
           | None -> fail "stream config lost duplicate window");
           equal bool true (Nats_eio.Jetstream.Stream.Config.deny_purge config);
           equal (option int64) (Some 3L)
             (Nats_eio.Jetstream.Stream.Config.first_sequence config);
-          (match
-             Nats_eio.Jetstream.Stream.Config.consumer_limits config
-           with
+          (match Nats_eio.Jetstream.Stream.Config.consumer_limits config with
           | None -> fail "stream config lost consumer limits"
           | Some value ->
               (match
-                 Nats_eio.Jetstream.Stream.Config.Consumer_limits.inactive_threshold
-                   value
+                 Nats_eio.Jetstream.Stream.Config.Consumer_limits
+                 .inactive_threshold value
                with
-              | Some span -> equal bool true (Mtime.Span.equal span inactive_threshold)
+              | Some span ->
+                  equal bool true (Mtime.Span.equal span inactive_threshold)
               | None -> fail "stream config lost inactive threshold");
               equal (option int) (Some 1000)
-                (Nats_eio.Jetstream.Stream.Config.Consumer_limits.max_ack_pending
-                   value));
+                (Nats_eio.Jetstream.Stream.Config.Consumer_limits
+                 .max_ack_pending value));
           let cleared =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Stream.Config.with_max_consumers config None)
@@ -768,9 +770,7 @@ let () =
               (Nats_eio.Jetstream.Stream.Config.with_duplicate_window cleared
                  None)
           in
-          (match
-             Nats_eio.Jetstream.Stream.Config.duplicate_window cleared
-           with
+          (match Nats_eio.Jetstream.Stream.Config.duplicate_window cleared with
           | None -> ()
           | Some _ -> fail "stream updater retained duplicate window");
           let cleared =
@@ -781,17 +781,17 @@ let () =
             (Nats_eio.Jetstream.Stream.Config.first_sequence cleared);
           let cleared =
             expect_jetstream_config_ok
-              (Nats_eio.Jetstream.Stream.Config.with_consumer_limits cleared None)
+              (Nats_eio.Jetstream.Stream.Config.with_consumer_limits cleared
+                 None)
           in
-          (match
-             Nats_eio.Jetstream.Stream.Config.consumer_limits cleared
-           with
+          (match Nats_eio.Jetstream.Stream.Config.consumer_limits cleared with
           | None -> ()
           | Some _ -> fail "stream updater retained consumer limits");
           (match
              Nats_eio.Jetstream.Stream.Config.v ~name:"invalid"
                ~subjects:[ subject ]
-               ~duplicate_window:(Mtime.Span.of_uint64_ns 50_000_000L) ()
+               ~duplicate_window:(Mtime.Span.of_uint64_ns 50_000_000L)
+               ()
            with
           | Error Nats_eio.Jetstream.Error.Invalid_duplicate_window -> ()
           | Ok _ -> fail "stream accepted a duplicate window below 100ms"
@@ -804,15 +804,16 @@ let () =
                ~subjects:[ subject ] ~discard_new_per_subject:true ()
            with
           | Error Nats_eio.Jetstream.Error.Invalid_discard_new_per_subject -> ()
-          | Ok _ -> fail "stream accepted discard-new-per-subject without a limit"
+          | Ok _ ->
+              fail "stream accepted discard-new-per-subject without a limit"
           | Error error ->
               fail
                 (Format.asprintf "unexpected discard policy error: %a"
                    Nats_eio.Jetstream.Error.pp_config error));
           (match
-            Nats_eio.Jetstream.Stream.Config.v ~name:"invalid"
-              ~subjects:[ subject ] ~allow_rollup:true ~deny_purge:true ()
-          with
+             Nats_eio.Jetstream.Stream.Config.v ~name:"invalid"
+               ~subjects:[ subject ] ~allow_rollup:true ~deny_purge:true ()
+           with
           | Error Nats_eio.Jetstream.Error.Deny_purge_and_rollup -> ()
           | Ok _ -> fail "stream accepted deny-purge with rollup headers"
           | Error error ->
@@ -829,15 +830,18 @@ let () =
               equal (option int) None
                 (Nats_eio.Jetstream.Stream.Config.max_consumers config))
             [ -1; 0 ];
-          ignore (expect_jetstream_config_ok
-            (Nats_eio.Jetstream.Stream.Config.v ~name:"ORDERS"
-               ~subjects:[ subject ]
-               ~duplicate_window:(Mtime.Span.of_uint64_ns 100_000_000L) ()));
+          ignore
+            (expect_jetstream_config_ok
+               (Nats_eio.Jetstream.Stream.Config.v ~name:"ORDERS"
+                  ~subjects:[ subject ]
+                  ~duplicate_window:(Mtime.Span.of_uint64_ns 100_000_000L)
+                  ()));
           (match
              Nats_eio.Jetstream.Stream.Config.v ~name:"invalid"
                ~subjects:[ subject ]
                ~max_age:(Mtime.Span.of_uint64_ns 50_000_000L)
-               ~duplicate_window:(Mtime.Span.of_uint64_ns 100_000_000L) ()
+               ~duplicate_window:(Mtime.Span.of_uint64_ns 100_000_000L)
+               ()
            with
           | Error Nats_eio.Jetstream.Error.Invalid_duplicate_window -> ()
           | Ok _ -> fail "stream accepted a duplicate window above max age"
@@ -850,8 +854,8 @@ let () =
               (Nats_eio.Jetstream.Stream.Config.Source.v ~name:"ORDERS" ())
           in
           (match
-             Nats_eio.Jetstream.Stream.Config.v ~name:"invalid"
-               ~subjects:[] ~mirror:mirror_source ~first_sequence:3L ()
+             Nats_eio.Jetstream.Stream.Config.v ~name:"invalid" ~subjects:[]
+               ~mirror:mirror_source ~first_sequence:3L ()
            with
           | Error Nats_eio.Jetstream.Error.Mirror_and_first_sequence -> ()
           | Ok _ -> fail "mirror accepted an initial sequence"
@@ -859,19 +863,19 @@ let () =
               fail
                 (Format.asprintf "unexpected mirror sequence error: %a"
                    Nats_eio.Jetstream.Error.pp_config error));
-          (match
-             Nats_eio.Jetstream.Stream.Config.Consumer_limits.v
-               ~max_ack_pending:(-2) ()
-           with
+          match
+            Nats_eio.Jetstream.Stream.Config.Consumer_limits.v
+              ~max_ack_pending:(-2) ()
+          with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_limit
-                { field = "max_ack_pending"; value = -2L }) ->
+                 { field = "max_ack_pending"; value = -2L }) ->
               ()
           | Ok _ -> fail "consumer limits accepted pending-ack value -2"
           | Error error ->
               fail
                 (Format.asprintf "unexpected consumer limit error: %a"
-                   Nats_eio.Jetstream.Error.pp_config error)));
+                   Nats_eio.Jetstream.Error.pp_config error));
       test "stream wire rejects negative duplicate windows" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
@@ -911,8 +915,7 @@ let () =
           let external_config =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Stream.Config.External.v
-                 ~api_prefix:"$JS.eu.API" ~deliver_prefix:"$JS.eu.DELIVER"
-                 ())
+                 ~api_prefix:"$JS.eu.API" ~deliver_prefix:"$JS.eu.DELIVER" ())
           in
           let source =
             expect_jetstream_config_ok
@@ -927,22 +930,19 @@ let () =
           in
           equal string "ORDERS"
             (Nats_eio.Jetstream.Stream.Config.Source.name
-               (Option.get
-                  (Nats_eio.Jetstream.Stream.Config.mirror mirror)));
+               (Option.get (Nats_eio.Jetstream.Stream.Config.mirror mirror)));
           equal bool true
             (Nats_eio.Jetstream.Stream.Config.mirror_direct mirror);
           (match
              Nats_eio.Jetstream.Stream.Config.Source.start
-               (Option.get
-                  (Nats_eio.Jetstream.Stream.Config.mirror mirror))
+               (Option.get (Nats_eio.Jetstream.Stream.Config.mirror mirror))
            with
-          | Some
-              (Nats_eio.Jetstream.Stream.Config.Source.Sequence sequence) ->
+          | Some (Nats_eio.Jetstream.Stream.Config.Source.Sequence sequence) ->
               equal int64 7L sequence
           | _ -> fail "stream source lost its sequence start");
           (match
-             Nats_eio.Jetstream.Stream.Config.v ~name:"invalid"
-               ~subjects:[] ~mirror:source ~sources:[ source ] ()
+             Nats_eio.Jetstream.Stream.Config.v ~name:"invalid" ~subjects:[]
+               ~mirror:source ~sources:[ source ] ()
            with
           | Error Nats_eio.Jetstream.Error.Mirror_and_sources -> ()
           | Ok _ -> fail "stream accepted mirror and sources together"
@@ -952,8 +952,8 @@ let () =
                    Nats_eio.Jetstream.Error.pp_config error));
           (match
              Nats_eio.Jetstream.Stream.Config.v ~name:"invalid"
-               ~subjects:[ Nats.Subject.Filter.literal "orders" ] ~mirror:source
-               ()
+               ~subjects:[ Nats.Subject.Filter.literal "orders" ]
+               ~mirror:source ()
            with
           | Error Nats_eio.Jetstream.Error.Mirror_and_subjects -> ()
           | Ok _ -> fail "stream accepted mirror subjects"
@@ -975,8 +975,7 @@ let () =
              Nats_eio.Jetstream.Stream.Config.Source.v ~name:"ORDERS"
                ~start:(Nats_eio.Jetstream.Stream.Config.Source.Sequence 0L) ()
            with
-          | Error
-              (Nats_eio.Jetstream.Error.Invalid_source_start_sequence 0L) ->
+          | Error (Nats_eio.Jetstream.Error.Invalid_source_start_sequence 0L) ->
               ()
           | Ok _ -> fail "source accepted sequence zero"
           | Error error ->
@@ -994,18 +993,14 @@ let () =
               (Nats_eio.Jetstream.Stream.Config.with_republish mirror
                  (Some republish))
           in
-          (match
-             Nats_eio.Jetstream.Stream.Config.with_mirror mirror None
-           with
+          (match Nats_eio.Jetstream.Stream.Config.with_mirror mirror None with
           | Error Nats_eio.Jetstream.Error.Empty_subjects -> ()
           | Ok _ -> fail "stream cleared its last relation without subjects"
           | Error error ->
               fail
                 (Format.asprintf "unexpected relation clearing error: %a"
                    Nats_eio.Jetstream.Error.pp_config error));
-          match
-            Nats_eio.Jetstream.Stream.Config.republish mirror
-          with
+          match Nats_eio.Jetstream.Stream.Config.republish mirror with
           | Some value ->
               equal bool true
                 (Nats_eio.Jetstream.Stream.Config.Republish.headers_only value)
@@ -1055,8 +1050,7 @@ let () =
                   (Nats_eio.Jetstream.Stream.Config.Source.v ~name:"ORDERS"
                      ~start:
                        (Nats_eio.Jetstream.Stream.Config.Source.Time
-                          (ptime_of_rfc3339
-                             "2026-08-16T12:00:00.000000000Z"))
+                          (ptime_of_rfc3339 "2026-08-16T12:00:00.000000000Z"))
                      ~subject_transforms:[ transform ]
                      ~external_:external_config ())
               in
@@ -1087,25 +1081,29 @@ let () =
               if
                 not
                   (contains_substring
-                     ~needle:"opt_start_time\\\":\\\"2026-08-16T12:00:00.000000000Z"
+                     ~needle:
+                       "opt_start_time\\\":\\\"2026-08-16T12:00:00.000000000Z"
                      create_trace)
               then fail "stream create omitted source start time";
               if
                 not
                   (contains_substring
-                     ~needle:"subject_transforms\\\":[{\\\"src\\\":\\\"orders.*\\\",\\\"dest\\\":\\\"archive.{{wildcard(1)}}"
+                     ~needle:
+                       "subject_transforms\\\":[{\\\"src\\\":\\\"orders.*\\\",\\\"dest\\\":\\\"archive.{{wildcard(1)}}"
                      create_trace)
               then fail "stream create omitted source transform";
               if
                 not
                   (contains_substring
-                     ~needle:"external\\\":{\\\"api\\\":\\\"$JS.eu.API\\\",\\\"deliver\\\":\\\"$JS.eu.DELIVER\\\"}"
+                     ~needle:
+                       "external\\\":{\\\"api\\\":\\\"$JS.eu.API\\\",\\\"deliver\\\":\\\"$JS.eu.DELIVER\\\"}"
                      create_trace)
               then fail "stream create omitted external prefixes";
               if
                 not
                   (contains_substring
-                     ~needle:"republish\\\":{\\\"src\\\":\\\"orders.>\\\",\\\"dest\\\":\\\"archive.>\\\",\\\"headers_only\\\":true}"
+                     ~needle:
+                       "republish\\\":{\\\"src\\\":\\\"orders.>\\\",\\\"dest\\\":\\\"archive.>\\\",\\\"headers_only\\\":true}"
                      create_trace)
               then fail "stream create omitted republish configuration";
               if
@@ -1121,9 +1119,7 @@ let () =
                     (Nats_eio.Jetstream.Stream.info stream));
               yield_n 5;
               Eio.Promise.resolve info_response_u (make_response ~sid:2);
-              let info =
-                expect_jetstream_ok (Eio.Promise.await info_result)
-              in
+              let info = expect_jetstream_ok (Eio.Promise.await info_result) in
               let config = Nats_eio.Jetstream.Stream.Info.config info in
               equal (option int) (Some 12)
                 (Nats_eio.Jetstream.Stream.Config.max_consumers config);
@@ -1143,17 +1139,15 @@ let () =
                with
               | Some limits ->
                   equal (option int) (Some 100)
-                    (Nats_eio.Jetstream.Stream.Config.Consumer_limits.max_ack_pending
-                       limits)
+                    (Nats_eio.Jetstream.Stream.Config.Consumer_limits
+                     .max_ack_pending limits)
               | None -> fail "stream response lost consumer limits");
               let source =
                 match Nats_eio.Jetstream.Stream.Config.sources config with
                 | [ source ] -> source
                 | _ -> fail "stream response lost source configuration"
               in
-              (match
-                 Nats_eio.Jetstream.Stream.Config.Source.start source
-               with
+              (match Nats_eio.Jetstream.Stream.Config.Source.start source with
               | Some (Nats_eio.Jetstream.Stream.Config.Source.Time time) ->
                   equal bool true
                     (Ptime.equal time
@@ -1186,7 +1180,8 @@ let () =
               then fail "stream update discarded the transform's unknown field";
               if
                 not
-                  (contains_substring ~needle:"external_extra\\\":\\\"kept" trace)
+                  (contains_substring ~needle:"external_extra\\\":\\\"kept"
+                     trace)
               then fail "stream update discarded the external unknown field";
               if
                 not
@@ -1194,8 +1189,8 @@ let () =
               then fail "stream update discarded the republish unknown field";
               if
                 not
-                  (contains_substring
-                     ~needle:"limits_extra\\\":\\\"kept\\\"" trace)
+                  (contains_substring ~needle:"limits_extra\\\":\\\"kept\\\""
+                     trace)
               then fail "stream update discarded nested consumer-limit fields";
               Eio.Promise.resolve update_response_u (make_response ~sid:4);
               ignore (expect_jetstream_ok (Eio.Promise.await update_result));
@@ -1218,8 +1213,8 @@ let () =
             expect_jetstream_config_ok
               (Nats_eio.Jetstream.Consumer.Config.v ~name:"worker"
                  ~durable_name:"worker" ~description:"before"
-                 ~deliver_subject:subject
-                 ~deliver_group:group ~idle_heartbeat:span ~flow_control:true
+                 ~deliver_subject:subject ~deliver_group:group
+                 ~idle_heartbeat:span ~flow_control:true
                  ~deliver_policy:
                    (Nats_eio.Jetstream.Consumer.Config.By_start_sequence 1L)
                  ~ack_policy:Nats_eio.Jetstream.Consumer.Config.All
@@ -1253,7 +1248,8 @@ let () =
             [ "orders.created"; "orders.updated" ]
             (List.map Nats.Subject.Filter.to_string
                (Nats_eio.Jetstream.Consumer.Config.filter_subjects described));
-          equal (list int64) [ 100_000_000L; 2_000_000L ]
+          equal (list int64)
+            [ 100_000_000L; 2_000_000L ]
             (List.map Mtime.Span.to_uint64_ns
                (Nats_eio.Jetstream.Consumer.Config.backoff described));
           (match Nats_eio.Jetstream.Consumer.Config.pause_until described with
@@ -1332,7 +1328,8 @@ let () =
            with
           | None -> ()
           | Some _ -> fail "consumer config updater retained a cleared filter");
-          equal (list int64) [ 100_000_000L; 2_000_000L ]
+          equal (list int64)
+            [ 100_000_000L; 2_000_000L ]
             (List.map Mtime.Span.to_uint64_ns
                (Nats_eio.Jetstream.Consumer.Config.backoff cleared_filters));
           let cleared_backoff =
@@ -1418,8 +1415,9 @@ let () =
               ()
           | _ -> fail "consumer config accepted exclusive filter forms");
           (match
-            Nats_eio.Jetstream.Consumer.Config.v ~backoff:[ Mtime.Span.zero ] ()
-          with
+             Nats_eio.Jetstream.Consumer.Config.v ~backoff:[ Mtime.Span.zero ]
+               ()
+           with
           | Ok _ -> ()
           | Error _ -> fail "consumer config rejected zero backoff");
           (match
@@ -1434,7 +1432,8 @@ let () =
           | _ -> fail "last-per-subject accepted no filter");
           (match
              Nats_eio.Jetstream.Consumer.Config.v ~max_deliver:1
-               ~backoff:[ Mtime.Span.zero; Mtime.Span.zero ] ()
+               ~backoff:[ Mtime.Span.zero; Mtime.Span.zero ]
+               ()
            with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_policy
@@ -1464,7 +1463,8 @@ let () =
           (match
              Nats_eio.Jetstream.Consumer.Config.v
                ~deliver_subject:(Nats.Subject.literal "orders.push")
-               ~idle_heartbeat:Mtime.Span.(1 * ms) ()
+               ~idle_heartbeat:Mtime.Span.(1 * ms)
+               ()
            with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_policy
@@ -1473,7 +1473,8 @@ let () =
           | _ -> fail "push config accepted a sub-minimum heartbeat");
           (match
              Nats_eio.Jetstream.Consumer.Config.v
-               ~max_expires:(Mtime.Span.of_uint64_ns 1L) ()
+               ~max_expires:(Mtime.Span.of_uint64_ns 1L)
+               ()
            with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_policy
@@ -1504,22 +1505,20 @@ let () =
              Nats_eio.Jetstream.Consumer.Config.v
                ~deliver_subject:(Nats.Subject.literal "orders.push")
                ~ack_policy:Nats_eio.Jetstream.Consumer.Config.Flow_control
-               ~ack_wait:Mtime.Span.(1 * s) ()
-          with
+               ~ack_wait:Mtime.Span.(1 * s)
+               ()
+           with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_policy
                  { field = "ack_wait" }) ->
               ()
           | _ -> fail "flow-control acknowledgement accepted ack-wait");
-          (match
-             Nats_eio.Jetstream.Consumer.Config.v
-               ~flow_control:true ()
-           with
+          match Nats_eio.Jetstream.Consumer.Config.v ~flow_control:true () with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_policy
                  { field = "flow_control" }) ->
               ()
-          | _ -> fail "pull config accepted flow control"));
+          | _ -> fail "pull config accepted flow control");
       test "priority consumer configuration validates policy constraints"
         (fun () ->
           let timeout = Mtime.Span.(30 * s) in
@@ -1615,11 +1614,11 @@ let () =
               ()
           | _ -> fail "priority config accepted a push consumer");
           (match
-            Nats_eio.Jetstream.Consumer.Config.v
-              ~ack_policy:Nats_eio.Jetstream.Consumer.Config.No_ack
-              ~priority_groups:[ "blue" ]
-              ~priority_policy:Nats_eio.Jetstream.Consumer.Config.Overflow ()
-          with
+             Nats_eio.Jetstream.Consumer.Config.v
+               ~ack_policy:Nats_eio.Jetstream.Consumer.Config.No_ack
+               ~priority_groups:[ "blue" ]
+               ~priority_policy:Nats_eio.Jetstream.Consumer.Config.Overflow ()
+           with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_consumer_policy
                  { field = "ack_policy"; value = "requires explicit" }) ->
@@ -1631,8 +1630,7 @@ let () =
                  (expect_jetstream_config_ok
                     (Nats_eio.Jetstream.Consumer.Config.v ()))
                  ~groups:[ "blue" ]
-                 ~policy:
-                   (Some Nats_eio.Jetstream.Consumer.Config.Pinned_client)
+                 ~policy:(Some Nats_eio.Jetstream.Consumer.Config.Pinned_client)
                  ~timeout:(Some timeout))
           in
           let cleared =
@@ -1851,8 +1849,8 @@ let () =
                        ]
                      ~pause_until ~sample_frequency:25 ~rate_limit:65536L
                      ~ack_policy:Nats_eio.Jetstream.Consumer.Config.Flow_control
-                     ~idle_heartbeat:Mtime.Span.(1 * s) ~flow_control:true
-                     ~replicas:3
+                     ~idle_heartbeat:Mtime.Span.(1 * s)
+                     ~flow_control:true ~replicas:3
                      ~metadata:[ ("owner", "client") ]
                      ())
               in
@@ -1868,7 +1866,8 @@ let () =
                      trace)
               then fail "consumer create was not sent";
               if
-                not (contains_substring ~needle:"\\\"action\\\":\\\"create" trace)
+                not
+                  (contains_substring ~needle:"\\\"action\\\":\\\"create" trace)
               then fail "consumer create omitted its create-only action";
               if
                 not (contains_substring ~needle:"sample_freq\\\":\\\"25%" trace)
@@ -1877,8 +1876,7 @@ let () =
               then fail "consumer create omitted the consumer name";
               if
                 not
-                  (contains_substring
-                     ~needle:"ack_policy\\\":\\\"flow_control"
+                  (contains_substring ~needle:"ack_policy\\\":\\\"flow_control"
                      trace)
               then fail "consumer create omitted flow-control acknowledgements";
               if
@@ -1939,8 +1937,8 @@ let () =
               yield_n 5;
               if
                 not
-                  (contains_substring
-                     ~needle:"\\\"action\\\":\\\"create" (Buffer.contents trace))
+                  (contains_substring ~needle:"\\\"action\\\":\\\"create"
+                     (Buffer.contents trace))
               then fail "consumer create did not request create-only semantics";
               Eio.Promise.resolve response_u
                 (Ok
@@ -2444,7 +2442,8 @@ let () =
               let consumer_limits =
                 expect_jetstream_config_ok
                   (Nats_eio.Jetstream.Stream.Config.Consumer_limits.v
-                     ~inactive_threshold:(Mtime.Span.of_uint64_ns 1_000_000_000L)
+                     ~inactive_threshold:
+                       (Mtime.Span.of_uint64_ns 1_000_000_000L)
                      ~max_ack_pending:100 ())
               in
               let config =
@@ -2456,8 +2455,8 @@ let () =
                      ~max_msgs_per_subject:5L ~max_consumers:12
                      ~discard_new_per_subject:true ~no_ack:true
                      ~duplicate_window:(Mtime.Span.of_uint64_ns 2_000_000_000L)
-                     ~first_sequence:3L ~consumer_limits
-                     ~allow_rollup:true ~allow_direct:true ~deny_delete:true
+                     ~first_sequence:3L ~consumer_limits ~allow_rollup:true
+                     ~allow_direct:true ~deny_delete:true
                      ~allow_msg_counter:true
                      ~persist_mode:Nats_eio.Jetstream.Stream.Config.Async
                      ~replicas:3
@@ -2496,32 +2495,27 @@ let () =
               then fail "stream create omitted the max-consumers limit";
               if
                 not
-                  (contains_substring
-                     ~needle:"discard_new_per_subject\\\":true" trace)
+                  (contains_substring ~needle:"discard_new_per_subject\\\":true"
+                     trace)
               then fail "stream create omitted the per-subject discard flag";
-              if not (contains_substring ~needle:"no_ack\\\":true" trace)
-              then fail "stream create omitted the no-ack flag";
+              if not (contains_substring ~needle:"no_ack\\\":true" trace) then
+                fail "stream create omitted the no-ack flag";
               if
                 not
-                  (contains_substring ~needle:"allow_msg_counter\\\":true"
-                     trace)
+                  (contains_substring ~needle:"allow_msg_counter\\\":true" trace)
               then fail "stream create omitted the message-counter flag";
               if
                 not
-                  (contains_substring ~needle:"persist_mode\\\":\\\"async"
-                     trace)
+                  (contains_substring ~needle:"persist_mode\\\":\\\"async" trace)
               then fail "stream create omitted the persistence mode";
               if
                 not
-                  (contains_substring
-                     ~needle:"duplicate_window\\\":2000000000" trace)
+                  (contains_substring ~needle:"duplicate_window\\\":2000000000"
+                     trace)
               then fail "stream create omitted the duplicate window";
-              if not (contains_substring ~needle:"first_seq\\\":3" trace)
-              then fail "stream create omitted the first sequence";
-              if
-                not
-                  (contains_substring
-                     ~needle:"consumer_limits\\\":{" trace)
+              if not (contains_substring ~needle:"first_seq\\\":3" trace) then
+                fail "stream create omitted the first sequence";
+              if not (contains_substring ~needle:"consumer_limits\\\":{" trace)
               then fail "stream create omitted consumer limits";
               if not (contains_substring ~needle:"num_replicas\\\":3" trace)
               then fail "stream create omitted the replica count";
@@ -2574,8 +2568,8 @@ let () =
                      ~discard:Nats_eio.Jetstream.Stream.Config.New
                      ~allow_rollup:false ~allow_direct:true ~replicas:2
                      ~compression:Nats_eio.Jetstream.Stream.Config.S2
-                     ~metadata:[ ("owner", "client") ] ~republish
-                     ())
+                     ~metadata:[ ("owner", "client") ]
+                     ~republish ())
               in
               let placement =
                 expect_jetstream_config_ok
@@ -2610,23 +2604,21 @@ let () =
                   (contains_substring ~needle:"max_msgs_per_subject\\\":5" trace)
               then
                 fail "stream update did not emit the changed per-subject limit";
-              if
-                count_substring ~needle:"allow_rollup_hdrs\\\":false" trace < 2
+              if count_substring ~needle:"allow_rollup_hdrs\\\":false" trace < 2
               then fail "stream update did not preserve the rollup safety flag";
               if not (contains_substring ~needle:"allow_direct\\\":true" trace)
               then
                 fail "stream update did not emit the changed direct-read flag";
-              if
-                count_substring ~needle:"deny_delete\\\":true" trace < 2
-              then fail "stream update cleared deny-delete";
+              if count_substring ~needle:"deny_delete\\\":true" trace < 2 then
+                fail "stream update cleared deny-delete";
               if count_substring ~needle:"deny_purge\\\":true" trace < 2 then
                 fail "stream update cleared deny-purge";
-              if not (contains_substring ~needle:"no_ack\\\":false" trace)
-              then fail "stream update omitted the no-ack false value";
-              if contains_substring ~needle:"allow_batched\\\":false" trace
-              then
+              if not (contains_substring ~needle:"no_ack\\\":false" trace) then
+                fail "stream update omitted the no-ack false value";
+              if contains_substring ~needle:"allow_batched\\\":false" trace then
                 fail
-                  "stream update sent an unsupported default allow-batched field";
+                  "stream update sent an unsupported default allow-batched \
+                   field";
               if count_substring ~needle:"num_replicas\\\":2" trace < 1 then
                 fail "stream update did not replace the replica count";
               if count_substring ~needle:"sealed\\\":true" trace < 2 then
@@ -3183,7 +3175,8 @@ let () =
                         (Nats_eio.Jetstream.Consumer.Config.v
                            ~durable_name:"worker" ()))
                      ~groups:[ "green" ]
-                     ~policy:(Some Nats_eio.Jetstream.Consumer.Config.Prioritized)
+                     ~policy:
+                       (Some Nats_eio.Jetstream.Consumer.Config.Prioritized)
                      ~timeout:None)
               in
               let result, result_u = Eio.Promise.create () in
@@ -3208,8 +3201,7 @@ let () =
                   (contains_substring
                      ~needle:"priority_policy\\\":\\\"prioritized" trace)
               then fail "priority update dropped the replacement policy";
-              if
-                not (contains_substring ~needle:"priority_timeout\\\":0" trace)
+              if not (contains_substring ~needle:"priority_timeout\\\":0" trace)
               then fail "priority update did not clear the old pin timeout";
               Eio.Promise.resolve update_response_u
                 (Ok
@@ -3236,8 +3228,8 @@ let () =
             (fun ~sw ~trace connection ->
               let pinned =
                 expect_jetstream_config_ok
-                  (Nats_eio.Jetstream.Consumer.Config.v
-                     ~durable_name:"worker" ~priority_groups:[ "blue" ]
+                  (Nats_eio.Jetstream.Consumer.Config.v ~durable_name:"worker"
+                     ~priority_groups:[ "blue" ]
                      ~priority_policy:
                        Nats_eio.Jetstream.Consumer.Config.Pinned_client
                      ~priority_timeout:Mtime.Span.(30 * s)
@@ -3264,7 +3256,8 @@ let () =
                 match
                   nth_substring_position
                     ~needle:
-                      "jetstream-server: wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS.worker"
+                      "jetstream-server: wrote \"PUB \
+                       $JS.API.CONSUMER.CREATE.ORDERS.worker"
                     ~occurrence:1 trace
                 with
                 | Some position -> position
@@ -3274,12 +3267,10 @@ let () =
                 String.sub trace update_start
                   (String.length trace - update_start)
               in
-              if
-                contains_substring ~needle:"priority_groups" update_trace
-              then fail "priority clear update retained priority groups";
-              if
-                contains_substring ~needle:"priority_policy" update_trace
-              then fail "priority clear update retained priority policy";
+              if contains_substring ~needle:"priority_groups" update_trace then
+                fail "priority clear update retained priority groups";
+              if contains_substring ~needle:"priority_policy" update_trace then
+                fail "priority clear update retained priority policy";
               if
                 not
                   (contains_substring ~needle:"priority_timeout\\\":0"
@@ -3290,9 +3281,7 @@ let () =
                    (consumer_info_wire_with_sid ~sid:2
                       {|{"stream_name":"ORDERS","name":"worker","config":{"durable_name":"worker","deliver_policy":"all","ack_policy":"explicit","replay_policy":"instant"}}|}));
               let info = expect_jetstream_ok (Eio.Promise.await result) in
-              let config =
-                Nats_eio.Jetstream.Consumer.Info.config info
-              in
+              let config = Nats_eio.Jetstream.Consumer.Info.config info in
               equal (list string) []
                 (Nats_eio.Jetstream.Consumer.Config.priority_groups config);
               equal (option string) None
@@ -3306,8 +3295,7 @@ let () =
                    (Nats_eio.Jetstream.Consumer.Config.priority_policy config));
               equal (option int64) None
                 (Option.map Mtime.Span.to_uint64_ns
-                   (Nats_eio.Jetstream.Consumer.Config.priority_timeout
-                      config));
+                   (Nats_eio.Jetstream.Consumer.Config.priority_timeout config));
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream purge sends a filtered request and returns the count"
@@ -4010,7 +3998,8 @@ let () =
               expect_jetstream_ok (Nats_eio.Jetstream.Consumer.Push.close push);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
-      test "push recreates a named ephemeral consumer after reconnect" (fun () ->
+      test "push recreates a named ephemeral consumer after reconnect"
+        (fun () ->
           let info_response, info_response_u = Eio.Promise.create () in
           let pause_response, pause_response_u = Eio.Promise.create () in
           let first_delivery, first_delivery_u = Eio.Promise.create () in
@@ -4161,8 +4150,7 @@ let () =
                   Eio.Promise.resolve close_result_u
                     (Nats_eio.Jetstream.Consumer.Push.close push));
               wait_for_trace ~clock ~trace
-                ~needle:"PUB $JS.API.CONSUMER.DELETE.ORDERS.worker"
-                ~count:1;
+                ~needle:"PUB $JS.API.CONSUMER.DELETE.ORDERS.worker" ~count:1;
               Eio.Promise.resolve final_delete_u (Ok (api_ok_wire ~sid:6));
               expect_jetstream_ok (Eio.Promise.await close_result);
               expect_ok (Nats_eio.Connection.close connection);
@@ -4502,12 +4490,13 @@ let () =
                        ~idle_heartbeat:Mtime.Span.(100 * ms)
                        ~filter_subjects:
                          [ Nats.Subject.Filter.literal "orders.created" ]
-                       ~replay_policy:Nats_eio.Jetstream.Consumer.Config.Original
+                       ~replay_policy:
+                         Nats_eio.Jetstream.Consumer.Config.Original
                        ~headers_only:true
                        ~inactive_threshold:Mtime.Span.(2 * min)
                        ~max_reset_attempts:3
-                       ~metadata:[ ("owner", "ordered") ] ~name_prefix:"ordered"
-                       stream));
+                       ~metadata:[ ("owner", "ordered") ]
+                       ~name_prefix:"ordered" stream));
               yield_n 5;
               let create_wire =
                 ordered_create_wire ~sid:1 ~name:"ordered_1"
@@ -4646,8 +4635,7 @@ let () =
                     (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ~batch:1
                        ~expires:Mtime.Span.(200 * ms)
                        ~idle_heartbeat:Mtime.Span.(100 * ms)
-                       ~name_prefix:"ordered"
-                       stream));
+                       ~name_prefix:"ordered" stream));
               yield_n 5;
               Eio.Promise.resolve first_create_u
                 (Ok
@@ -4709,7 +4697,8 @@ let () =
               expect_jetstream_ok (Eio.Promise.await close_result);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
-      test "ordered consumer recreates after a heartbeat sequence gap" (fun () ->
+      test "ordered consumer recreates after a heartbeat sequence gap"
+        (fun () ->
           let first_create, first_create_u = Eio.Promise.create () in
           let first_delivery, first_delivery_u = Eio.Promise.create () in
           let heartbeat, heartbeat_u = Eio.Promise.create () in
@@ -4745,8 +4734,7 @@ let () =
                     (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ~batch:1
                        ~expires:Mtime.Span.(200 * ms)
                        ~idle_heartbeat:Mtime.Span.(100 * ms)
-                       ~name_prefix:"ordered"
-                       stream));
+                       ~name_prefix:"ordered" stream));
               yield_n 5;
               Eio.Promise.resolve first_create_u
                 (Ok
@@ -4779,8 +4767,7 @@ let () =
                 ~count:1;
               Eio.Promise.resolve first_delete_u (Ok (api_ok_wire ~sid:3));
               wait_for_trace_count ~trace
-                ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS"
-                ~count:2;
+                ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS" ~count:2;
               if
                 not
                   (contains_substring ~needle:"\\\"opt_start_seq\\\":11"
@@ -4789,11 +4776,9 @@ let () =
               Eio.Promise.resolve second_create_u
                 (Ok
                    (ordered_create_wire ~sid:4 ~name:"ordered_2"
-                      ~deliver_policy:"by_start_sequence" ~opt_start_seq:11L
-                      ()));
+                      ~deliver_policy:"by_start_sequence" ~opt_start_seq:11L ()));
               wait_for_trace_count ~trace
-                ~needle:
-                  "wrote \"PUB $JS.API.CONSUMER.MSG.NEXT.ORDERS.ordered_2"
+                ~needle:"wrote \"PUB $JS.API.CONSUMER.MSG.NEXT.ORDERS.ordered_2"
                 ~count:1;
               Eio.Promise.resolve replay_delivery_u
                 (Ok
@@ -4802,8 +4787,7 @@ let () =
               let replayed =
                 expect_jetstream_ok (Eio.Promise.await replay_result)
               in
-              equal string "replayed"
-                (Nats_eio.Jetstream.Msg.payload replayed);
+              equal string "replayed" (Nats_eio.Jetstream.Msg.payload replayed);
               let close_result, close_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve close_result_u
@@ -4847,8 +4831,7 @@ let () =
                     (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ~batch:1
                        ~expires:Mtime.Span.(200 * ms)
                        ~idle_heartbeat:Mtime.Span.(100 * ms)
-                       ~name_prefix:"ordered"
-                       stream));
+                       ~name_prefix:"ordered" stream));
               yield_n 5;
               Eio.Promise.resolve create_response_u
                 (Ok
@@ -4928,8 +4911,7 @@ let () =
                     (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ~batch:1
                        ~expires:Mtime.Span.(200 * ms)
                        ~idle_heartbeat:Mtime.Span.(100 * ms)
-                       ~name_prefix:"ordered"
-                       stream));
+                       ~name_prefix:"ordered" stream));
               yield_n 5;
               Eio.Promise.resolve create_response_u
                 (Ok
@@ -4999,8 +4981,7 @@ let () =
                     (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ~batch:1
                        ~expires:Mtime.Span.(200 * ms)
                        ~idle_heartbeat:Mtime.Span.(100 * ms)
-                       ~name_prefix:"ordered"
-                       stream));
+                       ~name_prefix:"ordered" stream));
               yield_n 5;
               Eio.Promise.resolve create_response_u
                 (Ok
@@ -5042,7 +5023,8 @@ let () =
               expect_jetstream_ok (Eio.Promise.await close_result);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
-      test "ordered recovery timeout after teardown fails the session" (fun () ->
+      test "ordered recovery timeout after teardown fails the session"
+        (fun () ->
           let create_response, create_response_u = Eio.Promise.create () in
           let first_delivery, first_delivery_u = Eio.Promise.create () in
           let gap_delivery, gap_delivery_u = Eio.Promise.create () in
@@ -5074,8 +5056,7 @@ let () =
                     (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ~batch:1
                        ~expires:Mtime.Span.(1 * s)
                        ~idle_heartbeat:Mtime.Span.(100 * ms)
-                       ~name_prefix:"ordered"
-                       stream));
+                       ~name_prefix:"ordered" stream));
               yield_n 5;
               Eio.Promise.resolve create_response_u
                 (Ok
@@ -5098,7 +5079,8 @@ let () =
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve recovery_result_u
                     (Nats_eio.Jetstream.Consumer.Ordered.next_with_timeout
-                       ~timeout:Mtime.Span.(100 * ms) ordered));
+                       ~timeout:Mtime.Span.(100 * ms)
+                       ordered));
               yield_n 5;
               Eio.Promise.resolve gap_delivery_u
                 (Ok
@@ -5109,8 +5091,7 @@ let () =
                 ~count:1;
               Eio.Promise.resolve delete_response_u (Ok (api_ok_wire ~sid:3));
               wait_for_trace ~clock ~trace
-                ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS"
-                ~count:2;
+                ~needle:"wrote \"PUB $JS.API.CONSUMER.CREATE.ORDERS" ~count:2;
               Eio.Time.Mono.sleep clock 0.2;
               (match Eio.Promise.await recovery_result with
               | Error
@@ -5172,8 +5153,7 @@ let () =
                     (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ~batch:1
                        ~expires:Mtime.Span.(200 * ms)
                        ~idle_heartbeat:Mtime.Span.(100 * ms)
-                       ~max_reset_attempts:1 ~name_prefix:"ordered"
-                       stream));
+                       ~max_reset_attempts:1 ~name_prefix:"ordered" stream));
               yield_n 5;
               Eio.Promise.resolve create_response_u
                 (Ok
@@ -5196,7 +5176,8 @@ let () =
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve recovery_result_u
                     (Nats_eio.Jetstream.Consumer.Ordered.next_with_timeout
-                       ~timeout:Mtime.Span.(1 * s) ordered));
+                       ~timeout:Mtime.Span.(1 * s)
+                       ordered));
               yield_n 5;
               Eio.Promise.resolve gap_delivery_u
                 (Ok
@@ -5282,8 +5263,7 @@ let () =
                     (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ~batch:1
                        ~expires:Mtime.Span.(200 * ms)
                        ~idle_heartbeat:Mtime.Span.(100 * ms)
-                       ~name_prefix:"ordered"
-                       stream));
+                       ~name_prefix:"ordered" stream));
               yield_n 5;
               Eio.Promise.resolve create_response_u
                 (Ok
@@ -5405,8 +5385,7 @@ let () =
                     (Nats_eio.Jetstream.Consumer.Ordered.v ~sw ~batch:1
                        ~expires:Mtime.Span.(200 * ms)
                        ~idle_heartbeat:Mtime.Span.(100 * ms)
-                       ~name_prefix:"ordered"
-                       stream));
+                       ~name_prefix:"ordered" stream));
               yield_n 5;
               Eio.Promise.resolve create_response_u
                 (Ok
@@ -5734,7 +5713,8 @@ let () =
           let second, second_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
           with_connection_traced
-            ~reads:[ `Return info_wire; `Await first; `Await second; `Await hold ]
+            ~reads:
+              [ `Return info_wire; `Await first; `Await second; `Await hold ]
             (fun ~sw ~trace connection ->
               let consume =
                 expect_jetstream_ok
@@ -5743,7 +5723,8 @@ let () =
               in
               wait_for_trace_count ~trace
                 ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker" ~count:1;
-              Eio.Promise.resolve first_u (Ok (delivery_wire_with_sid ~sid:1 "one"));
+              Eio.Promise.resolve first_u
+                (Ok (delivery_wire_with_sid ~sid:1 "one"));
               wait_for_trace_count ~trace
                 ~needle:"CONSUMER.MSG.NEXT.ORDERS.worker" ~count:2;
               Eio.Promise.resolve second_u
@@ -5756,13 +5737,12 @@ let () =
                 expect_jetstream_ok
                   (Nats_eio.Jetstream.Consumer.Consume.next consume)
               in
-              equal string "one"
-                (Nats_eio.Jetstream.Msg.payload first_message);
-              equal string "two"
-                (Nats_eio.Jetstream.Msg.payload second_message);
+              equal string "one" (Nats_eio.Jetstream.Msg.payload first_message);
+              equal string "two" (Nats_eio.Jetstream.Msg.payload second_message);
               expect_jetstream_error
-                (Nats_eio.Jetstream.Consumer.Consume.next consume)
-                (function Nats_eio.Jetstream.Error.Pull_closed -> true | _ -> false);
+                (Nats_eio.Jetstream.Consumer.Consume.next consume) (function
+                | Nats_eio.Jetstream.Error.Pull_closed -> true
+                | _ -> false);
               equal bool true
                 (Nats_eio.Jetstream.Consumer.Consume.closed consume);
               expect_ok (Nats_eio.Connection.close connection);
@@ -5784,18 +5764,21 @@ let () =
               yield_n 5;
               Nats_eio.Jetstream.Consumer.Consume.stop consume;
               expect_jetstream_error
-                (Nats_eio.Jetstream.Consumer.Consume.next consume)
-                (function Nats_eio.Jetstream.Error.Pull_closed -> true | _ -> false);
+                (Nats_eio.Jetstream.Consumer.Consume.next consume) (function
+                | Nats_eio.Jetstream.Error.Pull_closed -> true
+                | _ -> false);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "continuous consumption closes with its switch" (fun () ->
           let hold, hold_u = Eio.Promise.create () in
           let request_seen, request_seen_u = Eio.Promise.create () in
           let request_prefix =
-            "jetstream-server: wrote \"PUB $JS.API.CONSUMER.MSG.NEXT.ORDERS.worker"
+            "jetstream-server: wrote \"PUB \
+             $JS.API.CONSUMER.MSG.NEXT.ORDERS.worker"
           in
           let request_reported = ref false in
-          with_connection_traced ~reads:[ `Return info_wire; `Await hold ]
+          with_connection_traced
+            ~reads:[ `Return info_wire; `Await hold ]
             ~on_trace:(fun message ->
               if
                 (not !request_reported)
@@ -5834,10 +5817,8 @@ let () =
               | Ok _ -> fail "continuous consume returned a message"
               | Error error ->
                   fail
-                    (Format.asprintf
-                       "continuous consume failed: %a; trace:\n%s"
-                       Nats_eio.Jetstream.Error.pp error
-                       (Buffer.contents trace)));
+                    (Format.asprintf "continuous consume failed: %a; trace:\n%s"
+                       Nats_eio.Jetstream.Error.pp error (Buffer.contents trace)));
               equal bool true
                 (Nats_eio.Jetstream.Consumer.Consume.closed consume);
               expect_ok (Nats_eio.Connection.close connection);
@@ -6228,7 +6209,7 @@ let () =
             ~reads:[ `Return info_wire; `Await response; `Await hold ]
             (fun ~sw connection ->
               let pull =
-                  expect_jetstream_ok
+                expect_jetstream_ok
                   (Nats_eio.Jetstream.Consumer.Pull.v ~sw
                      ~expires:Mtime.Span.(500 * ms)
                      ~idle_heartbeat:Mtime.Span.(100 * ms)
@@ -6257,7 +6238,9 @@ let () =
             ~reads:[ `Return info_wire; `Await response; `Await hold ]
             (fun ~sw ~trace ~clock connection ->
               ignore trace;
-              let jetstream = expect_jetstream_ok (Nats_eio.Jetstream.v connection) in
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
               let options =
                 match
                   Nats_eio.Jetstream.Publish_options.with_msg_id "async-id"
@@ -6272,7 +6255,8 @@ let () =
               let options =
                 match
                   Nats_eio.Jetstream.Publish_options.with_ttl
-                    Mtime.Span.(2 * s) options
+                    Mtime.Span.(2 * s)
+                    options
                 with
                 | Error error ->
                     fail
@@ -6288,7 +6272,8 @@ let () =
               let future =
                 expect_jetstream_ok
                   (Nats_eio.Jetstream.Publisher.publish ~options publisher
-                     (Nats.Subject.literal "orders.created") "async-payload")
+                     (Nats.Subject.literal "orders.created")
+                     "async-payload")
               in
               (match
                  Nats.Header.find "Nats-Msg-Id"
@@ -6308,14 +6293,11 @@ let () =
               equal int 1 (Nats_eio.Jetstream.Publisher.pending publisher);
               yield_n 8;
               Eio.Promise.resolve response_u
-                (Ok
-                   (publish_ack_wire ~sid:1 ~stream:"ORDERS" ~sequence:7L));
+                (Ok (publish_ack_wire ~sid:1 ~stream:"ORDERS" ~sequence:7L));
               let ack =
-                expect_jetstream_ok
-                  (Nats_eio.Jetstream.Publish.await future)
+                expect_jetstream_ok (Nats_eio.Jetstream.Publish.await future)
               in
-              equal string "ORDERS"
-                (Nats_eio.Jetstream.Publish_ack.stream ack);
+              equal string "ORDERS" (Nats_eio.Jetstream.Publish_ack.stream ack);
               equal int64 7L (Nats_eio.Jetstream.Publish_ack.sequence ack);
               equal int 0 (Nats_eio.Jetstream.Publisher.pending publisher);
               expect_jetstream_ok
@@ -6325,12 +6307,12 @@ let () =
       test "publish options reject invalid optimistic-concurrency values"
         (fun () ->
           match
-            Nats_eio.Jetstream.Publish_options.with_expected_last_sequence
-              (-1L) Nats_eio.Jetstream.Publish_options.empty
+            Nats_eio.Jetstream.Publish_options.with_expected_last_sequence (-1L)
+              Nats_eio.Jetstream.Publish_options.empty
           with
           | Error
               (Nats_eio.Jetstream.Error.Invalid_publish_option
-                { field = "expected_last_sequence"; _ }) ->
+                 { field = "expected_last_sequence"; _ }) ->
               ()
           | Ok _ -> fail "negative expected sequence was accepted"
           | Error error ->
@@ -6343,7 +6325,8 @@ let () =
           let second, second_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
           with_connection_traced_clock
-            ~reads:[ `Return info_wire; `Await first; `Await second; `Await hold ]
+            ~reads:
+              [ `Return info_wire; `Await first; `Await second; `Await hold ]
             (fun ~sw ~trace ~clock connection ->
               ignore trace;
               let jetstream =
@@ -6352,14 +6335,15 @@ let () =
               let options =
                 expect_jetstream_ok
                   (Nats_eio.Jetstream.Publish_options.with_retry
-                     ~wait:Mtime.Span.(1 * ms) ~attempts:(Some 1)
-                     Nats_eio.Jetstream.Publish_options.empty)
+                     ~wait:Mtime.Span.(1 * ms)
+                     ~attempts:(Some 1) Nats_eio.Jetstream.Publish_options.empty)
               in
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve result_u
                     (Nats_eio.Jetstream.publish ~options jetstream
-                       (Nats.Subject.literal "orders.created") "payload"));
+                       (Nats.Subject.literal "orders.created")
+                       "payload"));
               yield_n 8;
               Eio.Promise.resolve first_u (Ok (no_responders_wire ~sid:1));
               Eio.Time.Mono.sleep clock 0.005;
@@ -6382,20 +6366,23 @@ let () =
               let options =
                 expect_jetstream_ok
                   (Nats_eio.Jetstream.Publish_options.with_retry
-                     ~wait:Mtime.Span.(10 * ms) ~attempts:(Some 1)
-                     Nats_eio.Jetstream.Publish_options.empty)
+                     ~wait:Mtime.Span.(10 * ms)
+                     ~attempts:(Some 1) Nats_eio.Jetstream.Publish_options.empty)
               in
               let result, result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve result_u
-                    (Nats_eio.Jetstream.publish ~timeout:Mtime.Span.(1 * ms)
+                    (Nats_eio.Jetstream.publish
+                       ~timeout:Mtime.Span.(1 * ms)
                        ~options jetstream
-                       (Nats.Subject.literal "orders.created") "payload"));
+                       (Nats.Subject.literal "orders.created")
+                       "payload"));
               yield_n 8;
               Eio.Promise.resolve first_u (Ok (no_responders_wire ~sid:1));
               (match Eio.Promise.await result with
               | Error
-                  (Nats_eio.Jetstream.Error.Connection Nats_eio.Error.Timeout) ->
+                  (Nats_eio.Jetstream.Error.Connection Nats_eio.Error.Timeout)
+                ->
                   ()
               | Ok _ -> fail "publish retried after its deadline"
               | Error error ->
@@ -6404,9 +6391,11 @@ let () =
                        Nats_eio.Jetstream.Error.pp error));
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
-      test "synchronous publishing rejects asynchronous stall options" (fun () ->
+      test "synchronous publishing rejects asynchronous stall options"
+        (fun () ->
           let hold, hold_u = Eio.Promise.create () in
-          with_connection ~reads:[ `Return info_wire; `Await hold ]
+          with_connection
+            ~reads:[ `Return info_wire; `Await hold ]
             (fun ~sw connection ->
               ignore sw;
               let jetstream =
@@ -6420,11 +6409,12 @@ let () =
               in
               (match
                  Nats_eio.Jetstream.publish ~options jetstream
-                   (Nats.Subject.literal "orders.created") "payload"
+                   (Nats.Subject.literal "orders.created")
+                   "payload"
                with
               | Error
                   (Nats_eio.Jetstream.Error.Invalid_publish_option
-                    { field = "stall_wait"; _ }) ->
+                     { field = "stall_wait"; _ }) ->
                   ()
               | Ok _ -> fail "synchronous publish accepted stall_wait"
               | Error error ->
@@ -6433,7 +6423,8 @@ let () =
                        Nats_eio.Jetstream.Error.pp error));
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
-      test "cancelling an asynchronous publish settles and releases it" (fun () ->
+      test "cancelling an asynchronous publish settles and releases it"
+        (fun () ->
           let hold, hold_u = Eio.Promise.create () in
           with_connection_traced_clock
             ~reads:[ `Return info_wire; `Await hold ]
@@ -6449,7 +6440,8 @@ let () =
               let future =
                 expect_jetstream_ok
                   (Nats_eio.Jetstream.Publisher.publish publisher
-                     (Nats.Subject.literal "orders.created") "payload")
+                     (Nats.Subject.literal "orders.created")
+                     "payload")
               in
               yield_n 8;
               expect_jetstream_ok (Nats_eio.Jetstream.Publish.cancel future);
@@ -6465,8 +6457,7 @@ let () =
               equal int 0 (Nats_eio.Jetstream.Publisher.pending publisher);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
-      test "publish options emit the Go JetStream headers"
-        (fun () ->
+      test "publish options emit the Go JetStream headers" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
           with_connection_traced_clock
@@ -6495,12 +6486,14 @@ let () =
                 in
                 let* options =
                   Nats_eio.Jetstream.Publish_options
-                    .with_expected_last_sequence_for_subject ~sequence:3L
-                    ~subject:(Nats.Subject.literal "orders.created") options
+                  .with_expected_last_sequence_for_subject ~sequence:3L
+                    ~subject:(Nats.Subject.literal "orders.created")
+                    options
                 in
                 let* options =
                   Nats_eio.Jetstream.Publish_options.with_ttl
-                    Mtime.Span.(2 * s) options
+                    Mtime.Span.(2 * s)
+                    options
                 in
                 let* options =
                   Nats_eio.Jetstream.Publish_options.with_schedule
@@ -6508,11 +6501,13 @@ let () =
                 in
                 let* options =
                   Nats_eio.Jetstream.Publish_options.with_schedule_target
-                    (Nats.Subject.literal "orders.scheduled") options
+                    (Nats.Subject.literal "orders.scheduled")
+                    options
                 in
                 let* options =
                   Nats_eio.Jetstream.Publish_options.with_schedule_source
-                    (Nats.Subject.literal "orders.source") options
+                    (Nats.Subject.literal "orders.source")
+                    options
                 in
                 let* options =
                   Nats_eio.Jetstream.Publish_options.with_schedule_ttl
@@ -6530,7 +6525,8 @@ let () =
               let future =
                 expect_jetstream_ok
                   (Nats_eio.Jetstream.Publisher.publish ~options publisher
-                     (Nats.Subject.literal "orders.created") "payload")
+                     (Nats.Subject.literal "orders.created")
+                     "payload")
               in
               let headers =
                 Nats.Message.headers (Nats_eio.Jetstream.Publish.message future)
@@ -6556,11 +6552,13 @@ let () =
               yield_n 8;
               Eio.Promise.resolve response_u
                 (Ok (publish_ack_wire ~sid:1 ~stream:"ORDERS" ~sequence:8L));
-              ignore (expect_jetstream_ok (Nats_eio.Jetstream.Publish.await future));
+              ignore
+                (expect_jetstream_ok (Nats_eio.Jetstream.Publish.await future));
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
-      test "atomic batches stage control headers and preserve batch acknowledgements"
-        (fun () ->
+      test
+        "atomic batches stage control headers and preserve batch \
+         acknowledgements" (fun () ->
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
           with_connection_traced
@@ -6572,9 +6570,11 @@ let () =
               let messages =
                 [
                   Nats.Message.v
-                    ~subject:(Nats.Subject.literal "orders.created") "first";
+                    ~subject:(Nats.Subject.literal "orders.created")
+                    "first";
                   Nats.Message.v
-                    ~subject:(Nats.Subject.literal "orders.updated") "second";
+                    ~subject:(Nats.Subject.literal "orders.updated")
+                    "second";
                 ]
               in
               let result, result_u = Eio.Promise.create () in
@@ -6608,7 +6608,8 @@ let () =
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
           with_connection_traced
-            ~reads:[ `Return info_wire; `Await flow; `Await response; `Await hold ]
+            ~reads:
+              [ `Return info_wire; `Await flow; `Await response; `Await hold ]
             (fun ~sw ~trace connection ->
               ignore trace;
               let jetstream =
@@ -6616,8 +6617,12 @@ let () =
               in
               let messages =
                 [
-                  Nats.Message.v ~subject:(Nats.Subject.literal "orders.1") "one";
-                  Nats.Message.v ~subject:(Nats.Subject.literal "orders.2") "two";
+                  Nats.Message.v
+                    ~subject:(Nats.Subject.literal "orders.1")
+                    "one";
+                  Nats.Message.v
+                    ~subject:(Nats.Subject.literal "orders.2")
+                    "two";
                 ]
               in
               let result, result_u = Eio.Promise.create () in
@@ -6636,7 +6641,7 @@ let () =
               (match Eio.Promise.await result with
               | Error
                   (Nats_eio.Jetstream.Error.Batch_gap
-                    { expected = 1L; actual = 2L }) ->
+                     { expected = 1L; actual = 2L }) ->
                   ()
               | Ok _ -> fail "fast batch gap was accepted"
               | Error error ->
@@ -6645,21 +6650,25 @@ let () =
                        Nats_eio.Jetstream.Error.pp error));
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
-      test "fast batches use the flow reply protocol"
-        (fun () ->
+      test "fast batches use the flow reply protocol" (fun () ->
           let flow, flow_u = Eio.Promise.create () in
           let response, response_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
           with_connection_traced
-            ~reads:[ `Return info_wire; `Await flow; `Await response; `Await hold ]
+            ~reads:
+              [ `Return info_wire; `Await flow; `Await response; `Await hold ]
             (fun ~sw ~trace connection ->
               let jetstream =
                 expect_jetstream_ok (Nats_eio.Jetstream.v connection)
               in
               let messages =
                 [
-                  Nats.Message.v ~subject:(Nats.Subject.literal "orders.1") "one";
-                  Nats.Message.v ~subject:(Nats.Subject.literal "orders.2") "two";
+                  Nats.Message.v
+                    ~subject:(Nats.Subject.literal "orders.1")
+                    "one";
+                  Nats.Message.v
+                    ~subject:(Nats.Subject.literal "orders.2")
+                    "two";
                 ]
               in
               let result, result_u = Eio.Promise.create () in
@@ -6669,13 +6678,9 @@ let () =
                        jetstream messages));
               yield_n 8;
               let trace = Buffer.contents trace in
-              if
-                not
-                  (contains_substring ~needle:"fast-1.2.fail.1.0.$FI" trace)
+              if not (contains_substring ~needle:"fast-1.2.fail.1.0.$FI" trace)
               then fail "fast batch start reply subject was not sent";
-              if
-                not
-                  (contains_substring ~needle:"fast-1.2.fail.2.2.$FI" trace)
+              if not (contains_substring ~needle:"fast-1.2.fail.2.2.$FI" trace)
               then fail "fast batch commit reply subject was not sent";
               Eio.Promise.resolve flow_u
                 (Ok (batch_flow_ack_wire ~sid:1 ~sequence:0L ~messages:2));
@@ -6685,8 +6690,7 @@ let () =
                    (publish_batch_ack_wire ~sid:1 ~stream:"ORDERS" ~sequence:9L
                       ~batch:"fast-1" ~count:2));
               let ack = expect_jetstream_ok (Eio.Promise.await result) in
-              equal string "ORDERS"
-                (Nats_eio.Jetstream.Publish_ack.stream ack);
+              equal string "ORDERS" (Nats_eio.Jetstream.Publish_ack.stream ack);
               equal int64 9L (Nats_eio.Jetstream.Publish_ack.sequence ack);
               equal int64 2L
                 (Option.get (Nats_eio.Jetstream.Publish_ack.count ack));

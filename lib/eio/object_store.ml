@@ -1006,15 +1006,16 @@ let writer_of_flow flow =
       if not (Bytesrw.Bytes.Slice.is_eod slice) then
         let bytes = Bytesrw.Bytes.Slice.bytes slice in
         let cstruct =
-          Cstruct.of_bytes ~off:(Bytesrw.Bytes.Slice.first slice)
-            ~len:(Bytesrw.Bytes.Slice.length slice) bytes
+          Cstruct.of_bytes
+            ~off:(Bytesrw.Bytes.Slice.first slice)
+            ~len:(Bytesrw.Bytes.Slice.length slice)
+            bytes
         in
         Eio.Flow.write flow [ cstruct ])
 
 let file_error ~operation error =
   Error
-    (Error.File
-       { operation; message = Format.asprintf "%a" Eio.Exn.pp error })
+    (Error.File { operation; message = Format.asprintf "%a" Eio.Exn.pp error })
 
 let protect_file ~operation f =
   try f () with
@@ -1031,7 +1032,9 @@ let file_basename path =
 
 let put_file ?timeout ?name ?description ?headers ?metadata ?chunk_size value
     path =
-  let name = match name with Some name -> Ok name | None -> file_basename path in
+  let name =
+    match name with Some name -> Ok name | None -> file_basename path
+  in
   match name with
   | Error error -> Error error
   | Ok name -> (
@@ -1260,8 +1263,7 @@ let get_content ~deadline (value : t) info writer =
                           ~finally:(fun () ->
                             ignore
                               (Eio.Cancel.protect (fun () ->
-                                   ignore
-                                     (Jetstream.Consumer.Push.release push))))
+                                   ignore (Jetstream.Consumer.Push.release push))))
                           (fun () ->
                             read_chunks ();
                             match !result with
@@ -1566,7 +1568,7 @@ module Watch = struct
             let initial =
               match delivery with
               | New -> Marker
-              | Last_per_subject | All when Int64.equal initial_pending 0L ->
+              | (Last_per_subject | All) when Int64.equal initial_pending 0L ->
                   Marker
               | Last_per_subject | All -> Retained
             in
@@ -1807,7 +1809,7 @@ let manager_entries jetstream =
   let subject = Nats.Subject.Filter.literal "$O.*.>" in
   match Jetstream.Stream.list ~subject jetstream with
   | Error error -> Error (map_jetstream_error error)
-  | Ok infos ->
+  | Ok infos -> (
       let entries = ref [] in
       let result = ref None in
       List.iter
@@ -1816,19 +1818,19 @@ let manager_entries jetstream =
           | Some _ -> ()
           | None -> (
               let name =
-                Jetstream.Stream.Config.name
-                  (Jetstream.Stream.Info.config info)
+                Jetstream.Stream.Config.name (Jetstream.Stream.Info.config info)
               in
               match manager_bucket_name ~prefix:"OBJ_" name with
               | None -> ()
               | Some bucket -> (
                   match Config.v ~bucket () with
-                  | Error error -> result := Some (Error (map_config_error error))
+                  | Error error ->
+                      result := Some (Error (map_config_error error))
                   | Ok _ -> entries := (bucket, info) :: !entries)))
         infos;
       match !result with
       | Some result -> result
-      | None -> Ok (List.rev !entries)
+      | None -> Ok (List.rev !entries))
 
 let manager_statuses jetstream entries =
   let statuses = ref [] in

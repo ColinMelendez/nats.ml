@@ -216,8 +216,8 @@ module Endpoint : sig
 
     val v : messages:int -> bytes:int -> (t, Error.t) result
     (** [v ~messages ~bytes] validates queued message and payload-byte limits.
-        Each limit is positive or [-1], where [-1] disables that endpoint
-        limit. Both limits cannot be zero. *)
+        Each limit is positive or [-1], where [-1] disables that endpoint limit.
+        Both limits cannot be zero. *)
 
     val messages : t -> int
     (** [messages limits] is the queued message limit, or [-1]. *)

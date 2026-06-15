@@ -106,7 +106,8 @@ module Error = struct
         Format.pp_print_string ppf "stream max age must not be negative"
     | Invalid_duplicate_window ->
         Format.pp_print_string ppf
-          "stream duplicate window must be at least 100ms and no greater than max age"
+          "stream duplicate window must be at least 100ms and no greater than \
+           max age"
     | Invalid_first_sequence value ->
         Format.fprintf ppf "stream first sequence must not be negative, got %Ld"
           value
@@ -134,7 +135,8 @@ module Error = struct
           "a mirror stream cannot configure an initial sequence"
     | Invalid_discard_new_per_subject ->
         Format.pp_print_string ppf
-          "discard-new-per-subject requires discard-new and a positive per-subject message limit"
+          "discard-new-per-subject requires discard-new and a positive \
+           per-subject message limit"
     | Deny_purge_and_rollup ->
         Format.pp_print_string ppf
           "a stream cannot allow rollup headers while purge is denied"
@@ -145,8 +147,8 @@ module Error = struct
         Format.pp_print_string ppf
           "a stream source cannot have both a sequence and time start"
     | Invalid_source_start_sequence value ->
-        Format.fprintf ppf "stream source start sequence must be positive, got %Ld"
-          value
+        Format.fprintf ppf
+          "stream source start sequence must be positive, got %Ld" value
     | Invalid_source_start_time value ->
         Format.fprintf ppf "invalid stream source start time %S" value
     | Empty_external_api_prefix ->
@@ -209,7 +211,8 @@ module Error = struct
         Format.fprintf ppf "invalid JetStream headers: %a" Nats.Header.pp_error
           error
     | Invalid_publish_option { field; reason } ->
-        Format.fprintf ppf "invalid JetStream publish option %S: %s" field reason
+        Format.fprintf ppf "invalid JetStream publish option %S: %s" field
+          reason
     | Publish_stalled ->
         Format.pp_print_string ppf
           "JetStream asynchronous publishing stalled at its pending limit"
@@ -218,8 +221,9 @@ module Error = struct
           "JetStream fast publish batch gap: expected sequence %Ld, got %Ld"
           expected actual
     | Batch_flow_error { sequence; error } ->
-        Format.fprintf ppf "JetStream fast publish batch failed at sequence %Ld: %a"
-          sequence pp_api error
+        Format.fprintf ppf
+          "JetStream fast publish batch failed at sequence %Ld: %a" sequence
+          pp_api error
     | Message_not_found ->
         Format.pp_print_string ppf "JetStream message was not found"
     | Stream_not_found ->
@@ -244,8 +248,8 @@ module Error = struct
         Format.fprintf ppf "JetStream response named consumer %S, expected %S"
           actual expected
     | Invalid_batch value ->
-        Format.fprintf ppf
-          "JetStream fetch batch must be positive, got %d" value
+        Format.fprintf ppf "JetStream fetch batch must be positive, got %d"
+          value
     | Invalid_consume_limit { field; value } ->
         Format.fprintf ppf "JetStream consume %s must be positive, got %d" field
           value
@@ -768,17 +772,18 @@ module Stream = struct
                 let at_separator =
                   (not at_end) && Char.equal (String.get value position) '.'
                 in
-                if at_end || at_separator then
+                if at_end || at_separator then (
                   let token_length = position - !token_start in
                   if Int.equal token_length 0 then
                     invalid := Some (Error.Invalid_transform_destination value)
-                  else (
+                  else
                     let token = String.sub value !token_start token_length in
                     if String.contains token '*' then
                       invalid :=
                         Some (Error.Invalid_transform_destination value)
-                    else if Char.equal (String.get token 0) '>'
-                            && not (String.equal token ">")
+                    else if
+                      Char.equal (String.get token 0) '>'
+                      && not (String.equal token ">")
                     then
                       invalid :=
                         Some (Error.Invalid_transform_destination value)
@@ -860,8 +865,8 @@ module Stream = struct
 
       type error = config_error
 
-      let v ~name ?start ?filter_subject ?(subject_transforms = [])
-          ?external_ () =
+      let v ~name ?start ?filter_subject ?(subject_transforms = []) ?external_
+          () =
         match validate_name name with
         | Error error -> Error error
         | Ok () -> (
@@ -869,8 +874,9 @@ module Stream = struct
             | Some (Sequence value) when Int64.compare value 0L <= 0 ->
                 Error (Error.Invalid_source_start_sequence value)
             | _ ->
-                if Option.is_some filter_subject
-                   && List.length subject_transforms > 0
+                if
+                  Option.is_some filter_subject
+                  && List.length subject_transforms > 0
                 then Error Error.Source_filter_and_transforms
                 else
                   Ok
@@ -907,12 +913,7 @@ module Stream = struct
         | Ok transform when Int.equal (String.length destination) 0 ->
             Error (Error.Invalid_transform_destination destination)
         | Ok transform ->
-            Ok
-              {
-                transform;
-                headers_only;
-                unknown = Jsont.Json.object' [];
-              }
+            Ok { transform; headers_only; unknown = Jsont.Json.object' [] }
 
       let source value = Transform.source value.transform
       let destination value = Transform.destination value.transform
@@ -1017,17 +1018,15 @@ module Stream = struct
       else Ok ()
 
     let v_internal ~allow_empty_subjects ~name ~subjects ?description
-        ?(storage = File) ?(replicas = 1) ?placement
-        ?mirror ?(sources = []) ?subject_transform ?republish
-        ?(mirror_direct = false)
+        ?(storage = File) ?(replicas = 1) ?placement ?mirror ?(sources = [])
+        ?subject_transform ?republish ?(mirror_direct = false)
         ?(compression = Uncompressed) ?(metadata = []) ?(retention = Limits)
         ?(discard = Old) ?max_msgs ?max_msgs_per_subject ?max_bytes ?max_age
         ?max_msg_size ?max_consumers ?(discard_new_per_subject = false)
         ?(no_ack = false) ?duplicate_window ?(allow_msg_ttl = false)
-        ?(allow_msg_counter = false)
-        ?(allow_atomic_publish = false) ?(allow_msg_schedules = false)
-        ?(persist_mode = Default) ?(allow_batch_publish = false)
-        ?subject_delete_marker_ttl
+        ?(allow_msg_counter = false) ?(allow_atomic_publish = false)
+        ?(allow_msg_schedules = false) ?(persist_mode = Default)
+        ?(allow_batch_publish = false) ?subject_delete_marker_ttl
         ?(allow_rollup = false) ?(allow_direct = false) ?(deny_delete = false)
         ?(deny_purge = false) ?first_sequence ?consumer_limits ?(sealed = false)
         () =
@@ -1043,16 +1042,13 @@ module Stream = struct
       in
       let duplicate_window = normalize_span duplicate_window in
       let max_consumers =
-        match max_consumers with
-        | Some (-1 | 0) -> None
-        | value -> value
+        match max_consumers with Some (-1 | 0) -> None | value -> value
       in
       let first_sequence =
         match first_sequence with Some 0L -> None | value -> value
       in
       let allow_empty_subjects =
-        allow_empty_subjects || Option.is_some mirror
-        || List.length sources > 0
+        allow_empty_subjects || Option.is_some mirror || List.length sources > 0
       in
       let ( let* ) value f =
         match value with Error error -> Error error | Ok value -> f value
@@ -1102,8 +1098,7 @@ module Stream = struct
                     (Mtime.Span.of_uint64_ns 100_000_000L)
                   < 0 ->
             Error Error.Invalid_duplicate_window
-        | Some value, Some max_age
-          when Mtime.Span.compare value max_age > 0 ->
+        | Some value, Some max_age when Mtime.Span.compare value max_age > 0 ->
             Error Error.Invalid_duplicate_window
         | Some _, _ -> Ok ()
       in
@@ -1176,13 +1171,13 @@ module Stream = struct
 
     let v ~name ~subjects ?description ?storage ?replicas ?placement ?mirror
         ?sources ?subject_transform ?republish ?mirror_direct ?compression
-        ?metadata ?retention ?discard ?max_msgs
-        ?max_msgs_per_subject ?max_bytes ?max_age ?max_msg_size ?max_consumers
-        ?discard_new_per_subject ?no_ack ?duplicate_window ?allow_msg_ttl
-        ?allow_msg_counter ?allow_atomic_publish ?allow_msg_schedules
-        ?persist_mode ?allow_batch_publish
-        ?subject_delete_marker_ttl ?allow_rollup ?allow_direct ?deny_delete
-        ?deny_purge ?first_sequence ?consumer_limits ?sealed () =
+        ?metadata ?retention ?discard ?max_msgs ?max_msgs_per_subject ?max_bytes
+        ?max_age ?max_msg_size ?max_consumers ?discard_new_per_subject ?no_ack
+        ?duplicate_window ?allow_msg_ttl ?allow_msg_counter
+        ?allow_atomic_publish ?allow_msg_schedules ?persist_mode
+        ?allow_batch_publish ?subject_delete_marker_ttl ?allow_rollup
+        ?allow_direct ?deny_delete ?deny_purge ?first_sequence ?consumer_limits
+        ?sealed () =
       v_internal ~allow_empty_subjects:false ~name ~subjects ?description
         ?storage ?replicas ?placement ?mirror ?sources ?subject_transform
         ?republish ?mirror_direct ?compression ?metadata ?retention ?discard
@@ -1190,9 +1185,8 @@ module Stream = struct
         ?max_consumers ?discard_new_per_subject ?no_ack ?duplicate_window
         ?allow_msg_ttl ?allow_msg_counter ?allow_atomic_publish
         ?allow_msg_schedules ?persist_mode ?allow_batch_publish
-        ?subject_delete_marker_ttl ?allow_rollup
-        ?allow_direct ?deny_delete ?deny_purge ?first_sequence ?consumer_limits
-        ?sealed ()
+        ?subject_delete_marker_ttl ?allow_rollup ?allow_direct ?deny_delete
+        ?deny_purge ?first_sequence ?consumer_limits ?sealed ()
 
     let name value = value.name
     let subjects value = value.subjects
@@ -1234,14 +1228,13 @@ module Stream = struct
     let sealed value = value.sealed
 
     let rebuild ?sealed ?replicas ?placement ?mirror ?sources ?subject_transform
-        ?republish ?mirror_direct ?compression ?metadata
-        ?allow_msg_ttl ?allow_msg_counter ?allow_atomic_publish
-        ?allow_msg_schedules ?persist_mode ?allow_batch_publish
-        ?subject_delete_marker_ttl ?max_consumers
-        ?discard_new_per_subject ?no_ack ?duplicate_window ?deny_purge
-        ?first_sequence ?consumer_limits value ~name ~subjects ~storage
-        ~retention ~discard ~max_msgs ~max_msgs_per_subject ~max_bytes ~max_age
-        ~max_msg_size ~allow_rollup ~allow_direct ~deny_delete =
+        ?republish ?mirror_direct ?compression ?metadata ?allow_msg_ttl
+        ?allow_msg_counter ?allow_atomic_publish ?allow_msg_schedules
+        ?persist_mode ?allow_batch_publish ?subject_delete_marker_ttl
+        ?max_consumers ?discard_new_per_subject ?no_ack ?duplicate_window
+        ?deny_purge ?first_sequence ?consumer_limits value ~name ~subjects
+        ~storage ~retention ~discard ~max_msgs ~max_msgs_per_subject ~max_bytes
+        ~max_age ~max_msg_size ~allow_rollup ~allow_direct ~deny_delete =
       let replicas = Option.value ~default:value.replicas replicas in
       let placement = Option.value ~default:value.placement placement in
       let mirror = Option.value ~default:value.mirror mirror in
@@ -1267,7 +1260,9 @@ module Stream = struct
       let allow_msg_schedules =
         Option.value ~default:value.allow_msg_schedules allow_msg_schedules
       in
-      let persist_mode = Option.value ~default:value.persist_mode persist_mode in
+      let persist_mode =
+        Option.value ~default:value.persist_mode persist_mode
+      in
       let allow_batch_publish =
         Option.value ~default:value.allow_batch_publish allow_batch_publish
       in
@@ -1275,7 +1270,9 @@ module Stream = struct
         Option.value ~default:value.subject_delete_marker_ttl
           subject_delete_marker_ttl
       in
-      let max_consumers = Option.value ~default:value.max_consumers max_consumers in
+      let max_consumers =
+        Option.value ~default:value.max_consumers max_consumers
+      in
       let discard_new_per_subject =
         Option.value ~default:value.discard_new_per_subject
           discard_new_per_subject
@@ -1295,13 +1292,13 @@ module Stream = struct
         ~allow_empty_subjects:(Int.equal (List.length value.subjects) 0)
         ~name ~subjects ?description:value.description ~storage ~retention
         ~replicas ?placement ?mirror ~sources ?subject_transform ?republish
-        ~mirror_direct ~compression ~metadata ~discard ?max_msgs
-        ?max_bytes ?max_msgs_per_subject ?max_age ?max_msg_size ?max_consumers
+        ~mirror_direct ~compression ~metadata ~discard ?max_msgs ?max_bytes
+        ?max_msgs_per_subject ?max_age ?max_msg_size ?max_consumers
         ~discard_new_per_subject ~no_ack ?duplicate_window ~allow_rollup
         ~allow_msg_ttl ~allow_msg_counter ~allow_atomic_publish
         ~allow_msg_schedules ~persist_mode ~allow_batch_publish
-        ?subject_delete_marker_ttl ~allow_direct
-        ~deny_delete ~deny_purge ?first_sequence ?consumer_limits
+        ?subject_delete_marker_ttl ~allow_direct ~deny_delete ~deny_purge
+        ?first_sequence ?consumer_limits
         ~sealed:(Option.value sealed ~default:value.sealed)
         ()
 
@@ -1325,9 +1322,8 @@ module Stream = struct
         ?max_msg_size:value.max_msg_size ?max_consumers:value.max_consumers
         ~discard_new_per_subject:value.discard_new_per_subject
         ~no_ack:value.no_ack ?duplicate_window:value.duplicate_window
-        ~allow_rollup:value.allow_rollup
-        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
-        ~allow_msg_ttl:value.allow_msg_ttl
+        ~allow_rollup:value.allow_rollup ~allow_direct:value.allow_direct
+        ~deny_delete:value.deny_delete ~allow_msg_ttl:value.allow_msg_ttl
         ~allow_msg_counter:value.allow_msg_counter
         ~allow_atomic_publish:value.allow_atomic_publish
         ~allow_msg_schedules:value.allow_msg_schedules
@@ -1336,11 +1332,10 @@ module Stream = struct
         ?subject_delete_marker_ttl:value.subject_delete_marker_ttl
         ~deny_purge:value.deny_purge ?first_sequence:value.first_sequence
         ?consumer_limits:value.consumer_limits ~sealed:value.sealed
-        ~replicas:value.replicas ?placement:value.placement
-        ?mirror:value.mirror ~sources:value.sources
-        ?subject_transform:value.subject_transform ?republish:value.republish
-        ~mirror_direct:value.mirror_direct ~compression:value.compression
-        ~metadata:value.metadata ()
+        ~replicas:value.replicas ?placement:value.placement ?mirror:value.mirror
+        ~sources:value.sources ?subject_transform:value.subject_transform
+        ?republish:value.republish ~mirror_direct:value.mirror_direct
+        ~compression:value.compression ~metadata:value.metadata ()
 
     let with_subjects value subjects =
       rebuild value ~name:value.name ~subjects ~storage:value.storage
@@ -1461,8 +1456,8 @@ module Stream = struct
 
     let with_allow_msg_counter value allow_msg_counter =
       rebuild ~allow_msg_counter value ~name:value.name ~subjects:value.subjects
-        ~storage:value.storage ~retention:value.retention
-        ~discard:value.discard ~max_msgs:value.max_msgs
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
         ~max_msgs_per_subject:value.max_msgs_per_subject
         ~max_bytes:value.max_bytes ~max_age:value.max_age
         ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
@@ -1490,8 +1485,8 @@ module Stream = struct
 
     let with_persist_mode value persist_mode =
       rebuild ~persist_mode value ~name:value.name ~subjects:value.subjects
-        ~storage:value.storage ~retention:value.retention
-        ~discard:value.discard ~max_msgs:value.max_msgs
+        ~storage:value.storage ~retention:value.retention ~discard:value.discard
+        ~max_msgs:value.max_msgs
         ~max_msgs_per_subject:value.max_msgs_per_subject
         ~max_bytes:value.max_bytes ~max_age:value.max_age
         ~max_msg_size:value.max_msg_size ~allow_rollup:value.allow_rollup
@@ -1610,9 +1605,8 @@ module Stream = struct
         ?max_msg_size:value.max_msg_size ?max_consumers:value.max_consumers
         ~discard_new_per_subject:value.discard_new_per_subject
         ~no_ack:value.no_ack ?duplicate_window:value.duplicate_window
-        ~allow_rollup:value.allow_rollup
-        ~allow_direct:value.allow_direct ~deny_delete:value.deny_delete
-        ~allow_msg_ttl:value.allow_msg_ttl
+        ~allow_rollup:value.allow_rollup ~allow_direct:value.allow_direct
+        ~deny_delete:value.deny_delete ~allow_msg_ttl:value.allow_msg_ttl
         ~allow_msg_counter:value.allow_msg_counter
         ~allow_atomic_publish:value.allow_atomic_publish
         ~allow_msg_schedules:value.allow_msg_schedules
@@ -1627,14 +1621,13 @@ module Stream = struct
 
     let rebuild_with_relations value ~mirror ~sources ~subject_transform
         ~republish ~mirror_direct =
-      v_internal
-        ~allow_empty_subjects:false
-        ~name:value.name ~subjects:value.subjects ?description:value.description
+      v_internal ~allow_empty_subjects:false ~name:value.name
+        ~subjects:value.subjects ?description:value.description
         ~storage:value.storage ~replicas:value.replicas
-        ?placement:value.placement ?mirror ~sources ?subject_transform ?republish
-        ~mirror_direct ~compression:value.compression ~metadata:value.metadata
-        ~retention:value.retention ~discard:value.discard
-        ?max_msgs:value.max_msgs
+        ?placement:value.placement ?mirror ~sources ?subject_transform
+        ?republish ~mirror_direct ~compression:value.compression
+        ~metadata:value.metadata ~retention:value.retention
+        ~discard:value.discard ?max_msgs:value.max_msgs
         ?max_msgs_per_subject:value.max_msgs_per_subject
         ?max_bytes:value.max_bytes ?max_age:value.max_age
         ?max_msg_size:value.max_msg_size ?max_consumers:value.max_consumers
@@ -1852,9 +1845,9 @@ module Stream = struct
   let metadata_codec = Jsont.Object.as_string_map Jsont.string
 
   let wire_transform_codec : wire_transform Jsont.t =
-    Jsont.Object.map ~kind:"JetStream subject transform" (fun source destination
-        unknown ->
-      ({ source; destination; unknown } : wire_transform))
+    Jsont.Object.map ~kind:"JetStream subject transform"
+      (fun source destination unknown ->
+        ({ source; destination; unknown } : wire_transform))
     |> Jsont.Object.opt_mem "src" Jsont.string
          ~enc:(fun (value : wire_transform) -> value.source)
     |> Jsont.Object.mem "dest" Jsont.string
@@ -1865,13 +1858,13 @@ module Stream = struct
     |> Jsont.Object.finish
 
   let wire_external_codec : wire_external Jsont.t =
-    Jsont.Object.map ~kind:"JetStream external stream" (fun api_prefix
-        deliver_prefix unknown ->
-      ({ api_prefix; deliver_prefix; unknown } : wire_external))
-    |> Jsont.Object.mem "api" Jsont.string
-         ~enc:(fun (value : wire_external) -> value.api_prefix)
-    |> Jsont.Object.opt_mem "deliver" Jsont.string ~enc:(fun (value : wire_external) ->
-        value.deliver_prefix)
+    Jsont.Object.map ~kind:"JetStream external stream"
+      (fun api_prefix deliver_prefix unknown ->
+        ({ api_prefix; deliver_prefix; unknown } : wire_external))
+    |> Jsont.Object.mem "api" Jsont.string ~enc:(fun (value : wire_external) ->
+        value.api_prefix)
+    |> Jsont.Object.opt_mem "deliver" Jsont.string
+         ~enc:(fun (value : wire_external) -> value.deliver_prefix)
     |> Jsont.Object.keep_unknown
          ~enc:(fun (value : wire_external) -> value.unknown)
          Jsont.json_mems
@@ -1879,27 +1872,35 @@ module Stream = struct
 
   let wire_source_codec : wire_source Jsont.t =
     Jsont.Object.map ~kind:"JetStream stream source"
-      (fun name opt_start_seq opt_start_time filter_subject subject_transforms
-          external_ unknown ->
+      (fun
+        name
+        opt_start_seq
+        opt_start_time
+        filter_subject
+        subject_transforms
+        external_
+        unknown
+      ->
         ({
-          name;
-          opt_start_seq;
-          opt_start_time;
-          filter_subject;
-          subject_transforms = Option.value ~default:[] subject_transforms;
-          external_;
-          unknown;
-        } : wire_source))
-    |> Jsont.Object.mem "name" Jsont.string
-         ~enc:(fun (value : wire_source) -> value.name)
+           name;
+           opt_start_seq;
+           opt_start_time;
+           filter_subject;
+           subject_transforms = Option.value ~default:[] subject_transforms;
+           external_;
+           unknown;
+         }
+          : wire_source))
+    |> Jsont.Object.mem "name" Jsont.string ~enc:(fun (value : wire_source) ->
+        value.name)
     |> Jsont.Object.opt_mem "opt_start_seq" Jsont.int64
          ~enc:(fun (value : wire_source) -> value.opt_start_seq)
     |> Jsont.Object.opt_mem "opt_start_time" Jsont.string
          ~enc:(fun (value : wire_source) -> value.opt_start_time)
     |> Jsont.Object.opt_mem "filter_subject" Jsont.string
          ~enc:(fun (value : wire_source) -> value.filter_subject)
-    |> Jsont.Object.opt_mem "subject_transforms" (Jsont.list wire_transform_codec)
-         ~enc:(fun (value : wire_source) ->
+    |> Jsont.Object.opt_mem "subject_transforms"
+         (Jsont.list wire_transform_codec) ~enc:(fun (value : wire_source) ->
            match value.subject_transforms with
            | [] -> None
            | values -> Some values)
@@ -1911,9 +1912,9 @@ module Stream = struct
     |> Jsont.Object.finish
 
   let wire_republish_codec : wire_republish Jsont.t =
-    Jsont.Object.map ~kind:"JetStream republish" (fun source destination
-        headers_only unknown ->
-      ({ source; destination; headers_only; unknown } : wire_republish))
+    Jsont.Object.map ~kind:"JetStream republish"
+      (fun source destination headers_only unknown ->
+        ({ source; destination; headers_only; unknown } : wire_republish))
     |> Jsont.Object.opt_mem "src" Jsont.string
          ~enc:(fun (value : wire_republish) -> value.source)
     |> Jsont.Object.mem "dest" Jsont.string
@@ -1928,7 +1929,8 @@ module Stream = struct
   let wire_consumer_limits_codec : wire_consumer_limits Jsont.t =
     Jsont.Object.map ~kind:"JetStream stream consumer limits"
       (fun inactive_threshold max_ack_pending unknown ->
-        ({ inactive_threshold; max_ack_pending; unknown } : wire_consumer_limits))
+        ({ inactive_threshold; max_ack_pending; unknown }
+          : wire_consumer_limits))
     |> Jsont.Object.opt_mem "inactive_threshold" Jsont.int64
          ~enc:(fun (value : wire_consumer_limits) -> value.inactive_threshold)
     |> Jsont.Object.opt_mem "max_ack_pending" Jsont.int
@@ -1964,8 +1966,7 @@ module Stream = struct
   let transform_to_wire value =
     {
       source =
-        Option.map Nats.Subject.Filter.to_string
-          (Config.Transform.source value);
+        Option.map Nats.Subject.Filter.to_string (Config.Transform.source value);
       destination = Config.Transform.destination value;
       unknown = Config.Transform.unknown value;
     }
@@ -2001,11 +2002,10 @@ module Stream = struct
   let republish_to_wire value =
     {
       source =
-        Option.map Nats.Subject.Filter.to_string
-          (Config.Republish.source value);
+        Option.map Nats.Subject.Filter.to_string (Config.Republish.source value);
       destination = Config.Republish.destination value;
       headers_only =
-        if Config.Republish.headers_only value then Some true else None;
+        (if Config.Republish.headers_only value then Some true else None);
       unknown = Config.Republish.unknown value;
     }
 
@@ -2040,8 +2040,7 @@ module Stream = struct
         ?deliver_prefix:value.deliver_prefix ()
     with
     | Error error -> Error (Error.Invalid_config error)
-    | Ok external_ ->
-        Ok (Config.External.with_unknown external_ value.unknown)
+    | Ok external_ -> Ok (Config.External.with_unknown external_ value.unknown)
 
   let source_of_wire value =
     let ( let* ) value f =
@@ -2054,16 +2053,15 @@ module Stream = struct
       | Some sequence, None when Int64.equal sequence 0L -> Ok None
       | Some sequence, None when Int64.compare sequence 0L < 0 ->
           Error
-            (Error.Invalid_config
-               (Error.Invalid_source_start_sequence sequence))
+            (Error.Invalid_config (Error.Invalid_source_start_sequence sequence))
       | Some sequence, None -> Ok (Some (Config.Source.Sequence sequence))
       | None, Some "" -> Ok None
       | None, Some raw -> (
           match Ptime.of_rfc3339 ~strict:true raw with
           | Ok (time, _, _) -> Ok (Some (Config.Source.Time time))
           | Error _ ->
-              Error
-                (Error.Invalid_config (Error.Invalid_source_start_time raw)))
+              Error (Error.Invalid_config (Error.Invalid_source_start_time raw))
+          )
       | Some _, Some _ ->
           Error (Error.Invalid_config Error.Invalid_source_start)
       | None, None -> Ok None
@@ -2100,11 +2098,11 @@ module Stream = struct
     let* source = filter_of_wire value.source in
     match
       Config.Republish.v ?source ~destination:value.destination
-        ~headers_only:(Option.value ~default:false value.headers_only) ()
+        ~headers_only:(Option.value ~default:false value.headers_only)
+        ()
     with
     | Error error -> Error (Error.Invalid_config error)
-    | Ok republish ->
-        Ok (Config.Republish.with_unknown republish value.unknown)
+    | Ok republish -> Ok (Config.Republish.with_unknown republish value.unknown)
 
   let consumer_limits_of_wire value =
     let inactive_threshold =
@@ -2114,8 +2112,7 @@ module Stream = struct
           Error
             (Error.Invalid_config
                (Error.Invalid_consumer_span { field = "inactive_threshold" }))
-      | Some nanoseconds ->
-          Ok (Some (Mtime.Span.of_uint64_ns nanoseconds))
+      | Some nanoseconds -> Ok (Some (Mtime.Span.of_uint64_ns nanoseconds))
     in
     let ( let* ) value f =
       match value with Error error -> Error error | Ok value -> f value
@@ -2124,12 +2121,9 @@ module Stream = struct
     let max_ack_pending =
       match value.max_ack_pending with Some 0 -> None | value -> value
     in
-    match
-      Config.Consumer_limits.v ?inactive_threshold ?max_ack_pending ()
-    with
+    match Config.Consumer_limits.v ?inactive_threshold ?max_ack_pending () with
     | Error error -> Error (Error.Invalid_config error)
-    | Ok limits ->
-        Ok (Config.Consumer_limits.with_unknown limits value.unknown)
+    | Ok limits -> Ok (Config.Consumer_limits.with_unknown limits value.unknown)
 
   let wire_config_codec =
     Jsont.Object.map ~kind:"JetStream stream config"
@@ -2450,7 +2444,7 @@ module Stream = struct
         Option.map Mtime.Span.to_uint64_ns (Config.duplicate_window value);
       allow_msg_ttl = (if Config.allow_msg_ttl value then Some true else None);
       allow_msg_counter =
-        if Config.allow_msg_counter value then Some true else None;
+        (if Config.allow_msg_counter value then Some true else None);
       allow_atomic_publish =
         (if Config.allow_atomic_publish value then Some true else None);
       allow_msg_schedules =
@@ -2530,7 +2524,9 @@ module Stream = struct
       allow_msg_schedules = Some (Config.allow_msg_schedules value);
       persist_mode = Some (Config.persist_mode value);
       allow_batch_publish =
-        (match (current.allow_batch_publish, Config.allow_batch_publish value) with
+        (match
+           (current.allow_batch_publish, Config.allow_batch_publish value)
+         with
         | Some _, value -> Some value
         | None, true -> Some true
         | None, false -> None);
@@ -2594,10 +2590,8 @@ module Stream = struct
       match value.duplicate_window with
       | None | Some 0L -> Ok None
       | Some nanoseconds when Int64.compare nanoseconds 0L < 0 ->
-          Error
-            (Error.Invalid_config Error.Invalid_duplicate_window)
-      | Some nanoseconds ->
-          Ok (Some (Mtime.Span.of_uint64_ns nanoseconds))
+          Error (Error.Invalid_config Error.Invalid_duplicate_window)
+      | Some nanoseconds -> Ok (Some (Mtime.Span.of_uint64_ns nanoseconds))
     in
     let first_sequence =
       match value.first_sequence with Some 0L -> None | value -> value
@@ -2641,8 +2635,7 @@ module Stream = struct
     let* consumer_limits =
       match value.consumer_limits with
       | None -> Ok None
-      | Some limits ->
-          consumer_limits_of_wire limits |> Result.map Option.some
+      | Some limits -> consumer_limits_of_wire limits |> Result.map Option.some
     in
     match
       Config.v_internal ~allow_empty_subjects:true ~name:value.name ~subjects
@@ -2656,8 +2649,7 @@ module Stream = struct
         ~discard_new_per_subject:value.discard_new_per_subject
         ~no_ack:value.no_ack ?duplicate_window
         ~allow_msg_ttl:(Option.value ~default:false value.allow_msg_ttl)
-        ~allow_msg_counter:
-          (Option.value ~default:false value.allow_msg_counter)
+        ~allow_msg_counter:(Option.value ~default:false value.allow_msg_counter)
         ~allow_atomic_publish:
           (Option.value ~default:false value.allow_atomic_publish)
         ~allow_msg_schedules:
@@ -3519,8 +3511,8 @@ module Consumer = struct
       let* () =
         match deliver_policy with
         | Last_per_subject
-          when Option.is_none filter_subject && Int.equal (List.length filter_subjects) 0
-          ->
+          when Option.is_none filter_subject
+               && Int.equal (List.length filter_subjects) 0 ->
             Error
               (Error.Invalid_consumer_policy
                  {
@@ -3532,8 +3524,7 @@ module Consumer = struct
       let* () =
         if
           List.exists
-            (fun value ->
-              Mtime.Span.compare value Mtime.Span.zero < 0)
+            (fun value -> Mtime.Span.compare value Mtime.Span.zero < 0)
             backoff
         then Error (Error.Invalid_consumer_span { field = "backoff" })
         else Ok ()
@@ -3561,9 +3552,7 @@ module Consumer = struct
         match ack_policy with
         | Flow_control ->
             let invalid_max_deliver =
-              match max_deliver with
-              | Some value -> value > 0
-              | None -> false
+              match max_deliver with Some value -> value > 0 | None -> false
             in
             let invalid_max_ack_pending =
               match max_ack_pending with
@@ -3616,7 +3605,8 @@ module Consumer = struct
                    field = "idle_heartbeat";
                    value = "requires deliver_subject";
                  })
-        | Some _, Some true, None when not (match ack_policy with Flow_control -> true | _ -> false) ->
+        | Some _, Some true, None
+          when not (match ack_policy with Flow_control -> true | _ -> false) ->
             Error
               (Error.Invalid_consumer_policy
                  {
@@ -3737,7 +3727,8 @@ module Consumer = struct
       let* () =
         match deliver_subject with
         | Some _ ->
-            validate_minimum_span "idle_heartbeat" Mtime.Span.(100 * ms)
+            validate_minimum_span "idle_heartbeat"
+              Mtime.Span.(100 * ms)
               idle_heartbeat
         | None -> Ok ()
       in
@@ -3749,8 +3740,7 @@ module Consumer = struct
       let* () =
         match deliver_subject with
         | None ->
-            validate_minimum_span "max_expires" Mtime.Span.(1 * ms)
-              max_expires
+            validate_minimum_span "max_expires" Mtime.Span.(1 * ms) max_expires
         | Some _ -> Ok ()
       in
       Ok
@@ -3921,11 +3911,11 @@ module Consumer = struct
     let with_name value name =
       rebuild ?name ~durable_name:value.durable_name
         ~description:value.description ~deliver_subject:value.deliver_subject
-        ~deliver_group:value.deliver_group
-        ~idle_heartbeat:value.idle_heartbeat ~flow_control:value.flow_control
-        ~deliver_policy:value.deliver_policy ~ack_policy:value.ack_policy
-        ~ack_wait:value.ack_wait ~max_deliver:value.max_deliver
-        ~filter_subject:value.filter_subject ~replay_policy:value.replay_policy
+        ~deliver_group:value.deliver_group ~idle_heartbeat:value.idle_heartbeat
+        ~flow_control:value.flow_control ~deliver_policy:value.deliver_policy
+        ~ack_policy:value.ack_policy ~ack_wait:value.ack_wait
+        ~max_deliver:value.max_deliver ~filter_subject:value.filter_subject
+        ~replay_policy:value.replay_policy
         ~filter_subjects:value.filter_subjects ~backoff:value.backoff
         ~pause_until:value.pause_until ~priority_groups:value.priority_groups
         ~priority_policy:value.priority_policy
@@ -4852,9 +4842,8 @@ module Consumer = struct
     let max_bytes = value.max_bytes in
     match
       Config.v ?name:value.name ?durable_name:value.durable_name
-        ?description:value.description
-        ?deliver_subject ?deliver_group ?idle_heartbeat
-        ?flow_control:value.flow_control ~deliver_policy
+        ?description:value.description ?deliver_subject ?deliver_group
+        ?idle_heartbeat ?flow_control:value.flow_control ~deliver_policy
         ~ack_policy:value.ack_policy ?ack_wait ?max_deliver ?filter_subject
         ~filter_subjects ~backoff ?pause_until ~priority_groups ?priority_policy
         ?priority_timeout ?sample_frequency ?rate_limit ?replicas
@@ -5304,7 +5293,9 @@ module Consumer = struct
 
   let wire_config_for_update ~(current : wire_config) value =
     let value = wire_config value in
-    let priority_timeout = Some (Option.value ~default:0L value.priority_timeout) in
+    let priority_timeout =
+      Some (Option.value ~default:0L value.priority_timeout)
+    in
     {
       value with
       name =
@@ -5478,7 +5469,8 @@ module Consumer = struct
       match value with Error error -> Error error | Ok value -> f value
     in
     let* () =
-      if Int.compare batch 1 >= 0 then Ok () else Error (Error.Invalid_batch batch)
+      if Int.compare batch 1 >= 0 then Ok ()
+      else Error (Error.Invalid_batch batch)
     in
     let* () =
       if Mtime.Span.compare expires Mtime.Span.zero > 0 then Ok ()
@@ -5653,8 +5645,7 @@ module Consumer = struct
         let base_request =
           {
             expires =
-              if no_wait then None
-              else Some (Mtime.Span.to_uint64_ns expires);
+              (if no_wait then None else Some (Mtime.Span.to_uint64_ns expires));
             batch;
             max_bytes;
             idle_heartbeat = Option.map Mtime.Span.to_uint64_ns idle_heartbeat;
@@ -5663,7 +5654,7 @@ module Consumer = struct
             min_ack_pending;
             id = None;
             priority;
-            no_wait = if no_wait then Some true else None;
+            no_wait = (if no_wait then Some true else None);
           }
         in
         with_fetch_subscription consumer (fun ~inbox subscription ->
@@ -5811,16 +5802,14 @@ module Consumer = struct
   module Pull = struct
     type consumer = t
     type state = Open | Closed | Failed of Error.t
+
     type delivery_result =
       | Delivery_continue
       | Delivery_heartbeat
       | Delivery_message of Msg.t
-    type next_result = Message of Msg.t | Heartbeat
 
-    type heartbeat = {
-      consumer_sequence : int64;
-      stream_sequence : int64;
-    }
+    type next_result = Message of Msg.t | Heartbeat
+    type heartbeat = { consumer_sequence : int64; stream_sequence : int64 }
 
     type t = {
       consumer : consumer;
@@ -6155,9 +6144,7 @@ module Consumer = struct
 
   module Consume = struct
     type consumer = t
-
     type event = Message of Msg.t | Finished of Error.t option
-
     type state = Open | Draining | Closed | Failed of Error.t
 
     exception Stop
@@ -6188,21 +6175,27 @@ module Consumer = struct
       stop_after : int option;
     }
 
-    let state value =
-      Eio.Mutex.use_ro value.mutex (fun () -> value.state)
+    let state value = Eio.Mutex.use_ro value.mutex (fun () -> value.state)
 
     let open_ value =
-      match state value with Open -> true | Draining | Closed | Failed _ -> false
+      match state value with
+      | Open -> true
+      | Draining | Closed | Failed _ -> false
 
     let wait_for_capacity value =
       Eio.Mutex.use_rw ~protect:false value.mutex (fun () ->
           while
             Eio.Stream.length value.queue >= value.max_messages
-            && match value.state with Open -> true | Draining | Closed | Failed _ -> false
+            &&
+            match value.state with
+            | Open -> true
+            | Draining | Closed | Failed _ -> false
           do
             Eio.Condition.await value.changed value.mutex
           done;
-          match value.state with Open -> true | Draining | Closed | Failed _ -> false)
+          match value.state with
+          | Open -> true
+          | Draining | Closed | Failed _ -> false)
 
     let enqueue value message =
       if wait_for_capacity value then (
@@ -6217,7 +6210,9 @@ module Consumer = struct
             match value.state with
             | Open ->
                 value.state <-
-                  (match error with None -> Draining | Some error -> Failed error);
+                  (match error with
+                  | None -> Draining
+                  | Some error -> Failed error);
                 true
             | Draining | Closed | Failed _ -> false)
       in
@@ -6225,8 +6220,7 @@ module Consumer = struct
         Eio.Stream.add value.queue (Finished error);
         Eio.Condition.broadcast value.changed)
 
-    let worker_failure value error =
-      finish value (Some error)
+    let worker_failure value error = finish value (Some error)
 
     let remove_hook value =
       match value.hook with
@@ -6248,7 +6242,7 @@ module Consumer = struct
         Eio.Mutex.use_rw ~protect:false value.mutex (fun () ->
             match value.state with
             | Open ->
-                value.state <- if drain then Draining else Closed;
+                value.state <- (if drain then Draining else Closed);
                 true
             | Failed _ when not drain ->
                 value.state <- Closed;
@@ -6310,9 +6304,7 @@ module Consumer = struct
       else
         match stop_after with
         | Some value when Int.compare value 1 < 0 ->
-            Error
-              (Error.Invalid_consume_limit
-                 { field = "stop_after"; value })
+            Error (Error.Invalid_consume_limit { field = "stop_after"; value })
         | None | Some _ -> (
             let expires = Option.value expires ~default:default_expires in
             let idle_heartbeat =
@@ -6325,9 +6317,8 @@ module Consumer = struct
               | Some stop_after -> Int.min batch stop_after
             in
             match
-              validate_fetch ~batch
-                ~expires ~max_bytes ~idle_heartbeat:(Some idle_heartbeat) ~group
-                ~min_pending
+              validate_fetch ~batch ~expires ~max_bytes
+                ~idle_heartbeat:(Some idle_heartbeat) ~group ~min_pending
                 ~min_ack_pending ~priority
             with
             | Error error -> Error error
@@ -6381,9 +6372,9 @@ module Consumer = struct
         | Failed error when value.terminal_seen -> result := Some (Error error)
         | Open | Draining | Failed _ -> (
             match Eio.Stream.take value.queue with
-            | Message message ->
+            | Message message -> (
                 Eio.Condition.broadcast value.changed;
-                (match state value with
+                match state value with
                 | Closed -> ()
                 | Open | Draining | Failed _ -> result := Some (Ok message))
             | Finished error ->
@@ -6398,7 +6389,11 @@ module Consumer = struct
                 in
                 Eio.Mutex.use_rw ~protect:false value.mutex (fun () ->
                     value.state <- next_state);
-                result := Some (match error with None -> Error Error.Pull_closed | Some error -> Error error))
+                result :=
+                  Some
+                    (match error with
+                    | None -> Error Error.Pull_closed
+                    | Some error -> Error error))
       done;
       match !result with Some result -> result | None -> assert false
 
@@ -6417,7 +6412,9 @@ module Consumer = struct
     let close value = stop value
 
     let closed value =
-      match state value with Open -> false | Draining | Closed | Failed _ -> true
+      match state value with
+      | Open -> false
+      | Draining | Closed | Failed _ -> true
   end
 
   let bind (stream : Stream.t) ~name =
@@ -6866,7 +6863,9 @@ module Consumer = struct
         else Ok ()
       in
       let consumer_result = delete_owned_consumer push in
-      match subscription_result with Error error -> Error error | Ok () -> consumer_result
+      match subscription_result with
+      | Error error -> Error error
+      | Ok () -> consumer_result
 
     let release push =
       let first_close =
@@ -6888,7 +6887,9 @@ module Consumer = struct
         else Ok ()
       in
       let consumer_result = release_owned_consumer push in
-      match subscription_result with Error error -> Error error | Ok () -> consumer_result
+      match subscription_result with
+      | Error error -> Error error
+      | Ok () -> consumer_result
 
     let heartbeat_missed push =
       match push.heartbeat_deadline with
@@ -6932,8 +6933,7 @@ module Consumer = struct
             Config.By_start_sequence (next_stream_sequence sequence)
       in
       match
-        Config.v
-          ?name:(Config.name push.config)
+        Config.v ?name:(Config.name push.config)
           ?durable_name:(Config.durable_name push.config)
           ?description:(Config.description push.config)
           ?deliver_subject:(Config.deliver_subject push.config)
@@ -7228,7 +7228,7 @@ module Consumer = struct
             heartbeat_deadline_at connection (Config.idle_heartbeat config);
           state = Open;
           hook = None;
-          owned_consumer = if owns_consumer then Some consumer else None;
+          owned_consumer = (if owns_consumer then Some consumer else None);
           initial_pending;
         }
       in
@@ -7276,13 +7276,14 @@ module Consumer = struct
         let deadline_result =
           match timeout with
           | None -> Ok None
-          | Some timeout
-            when Mtime.Span.compare timeout Mtime.Span.zero <= 0 ->
+          | Some timeout when Mtime.Span.compare timeout Mtime.Span.zero <= 0 ->
               Error (Error.Connection (Core_error.Invalid_timeout "push"))
           | Some timeout ->
               Ok
                 (Some
-                   (match Mtime.add_span (Connection.now connection) timeout with
+                   (match
+                      Mtime.add_span (Connection.now connection) timeout
+                    with
                    | Some deadline -> deadline
                    | None -> Mtime.max_stamp))
         in
@@ -7297,7 +7298,7 @@ module Consumer = struct
         in
         match deadline_result with
         | Error error -> Error error
-        | Ok deadline ->
+        | Ok deadline -> (
             let config =
               {
                 config with
@@ -7317,15 +7318,15 @@ module Consumer = struct
             in
             match Config.deliver_subject config with
             | None -> assert false
-            | Some subject ->
+            | Some subject -> (
                 let filter =
                   Nats.Subject.Filter.literal (Nats.Subject.to_string subject)
                 in
-                (match
-                   Connection.subscribe connection
-                     ?queue_group:(Config.deliver_group config)
-                     filter
-                 with
+                match
+                  Connection.subscribe connection
+                    ?queue_group:(Config.deliver_group config)
+                    filter
+                with
                 | Error error -> Error (Error.Connection error)
                 | Ok subscription ->
                     let active_subscription = ref subscription in
@@ -7354,109 +7355,87 @@ module Consumer = struct
                         match remaining_timeout deadline with
                         | Error error -> Error error
                         | Ok timeout ->
-                            begin
-                              match create ?timeout stream config with
-                              | Error error -> Error error
-                              | Ok consumer ->
-                                  created_consumer := Some consumer;
-                                  match remaining_timeout deadline with
-                                  | Error error -> Error error
-                                  | Ok timeout ->
-                                      begin
-                                        match info ?timeout consumer with
-                                        | Error error -> Error error
-                                        | Ok info ->
-                                            let actual_config =
-                                              Info.config info
+                            begin match create ?timeout stream config with
+                            | Error error -> Error error
+                            | Ok consumer -> (
+                                created_consumer := Some consumer;
+                                match remaining_timeout deadline with
+                                | Error error -> Error error
+                                | Ok timeout ->
+                                    begin match info ?timeout consumer with
+                                    | Error error -> Error error
+                                    | Ok info ->
+                                        let actual_config = Info.config info in
+                                        begin match
+                                          Config.deliver_subject actual_config
+                                        with
+                                        | None -> Error Error.Not_push_consumer
+                                        | Some actual_subject ->
+                                            let subscription_result =
+                                              if
+                                                Nats.Subject.equal subject
+                                                  actual_subject
+                                                && option_equal
+                                                     Nats.Queue_group.equal
+                                                     (Config.deliver_group
+                                                        config)
+                                                     (Config.deliver_group
+                                                        actual_config)
+                                              then Ok !active_subscription
+                                              else
+                                                match
+                                                  Connection.subscribe
+                                                    connection
+                                                    ?queue_group:
+                                                      (Config.deliver_group
+                                                         actual_config)
+                                                    (Nats.Subject.Filter.literal
+                                                       (Nats.Subject.to_string
+                                                          actual_subject))
+                                                with
+                                                | Error error ->
+                                                    Error
+                                                      (Error.Connection error)
+                                                | Ok replacement ->
+                                                    active_subscription :=
+                                                      replacement;
+                                                    begin match
+                                                      release_subscription
+                                                        subscription
+                                                    with
+                                                    | None -> Ok replacement
+                                                    | Some error ->
+                                                        Error
+                                                          (Error.Connection
+                                                             error)
+                                                    end
                                             in
-                                            begin
-                                              match
-                                                Config.deliver_subject
-                                                  actual_config
-                                              with
-                                              | None ->
-                                                  Error Error.Not_push_consumer
-                                              | Some actual_subject ->
-                                                  let subscription_result =
-                                                    if
-                                                      Nats.Subject.equal subject
-                                                        actual_subject
-                                                      && option_equal
-                                                           Nats.Queue_group.equal
-                                                           (Config.deliver_group
-                                                              config)
-                                                           (Config.deliver_group
-                                                              actual_config)
-                                                    then Ok !active_subscription
-                                                    else
-                                                      match
-                                                        Connection.subscribe
-                                                          connection
-                                                          ?queue_group:
-                                                            (Config.deliver_group
-                                                               actual_config)
-                                                          (Nats.Subject.Filter
-                                                           .literal
-                                                             (Nats.Subject
-                                                              .to_string
-                                                                actual_subject))
-                                                      with
-                                                      | Error error ->
-                                                          Error
-                                                            (Error.Connection
-                                                               error)
-                                                      | Ok replacement ->
-                                                          active_subscription :=
-                                                            replacement;
-                                                          begin
-                                                            match
-                                                              release_subscription
-                                                                subscription
-                                                            with
-                                                            | None ->
-                                                                Ok replacement
-                                                            | Some error ->
-                                                                Error
-                                                                  (Error.Connection
-                                                                     error)
-                                                          end
-                                                  in
-                                                  begin
-                                                    match subscription_result with
-                                                    | Error error -> Error error
-                                                    | Ok subscription ->
-                                                        let initial_pending =
-                                                          match
-                                                            created_pending
-                                                              consumer
-                                                          with
-                                                          | Some value -> value
-                                                          | None ->
-                                                              Info.num_pending
-                                                                info
-                                                        in
-                                                        begin
-                                                          match
-                                                            make ~sw
-                                                              ~owns_consumer:
-                                                                true
-                                                              ~initial_pending
-                                                              ~consumer
-                                                              ~subscription
-                                                              ~config:
-                                                                actual_config
-                                                          with
-                                                          | Error error ->
-                                                              Error error
-                                                          | Ok push ->
-                                                              transferred :=
-                                                                true;
-                                                              Ok push
-                                                        end
-                                                  end
+                                            begin match subscription_result with
+                                            | Error error -> Error error
+                                            | Ok subscription ->
+                                                let initial_pending =
+                                                  match
+                                                    created_pending consumer
+                                                  with
+                                                  | Some value -> value
+                                                  | None ->
+                                                      Info.num_pending info
+                                                in
+                                                begin match
+                                                  make ~sw ~owns_consumer:true
+                                                    ~initial_pending ~consumer
+                                                    ~subscription
+                                                    ~config:actual_config
+                                                with
+                                                | Error error -> Error error
+                                                | Ok push ->
+                                                    transferred := true;
+                                                    Ok push
+                                                end
                                             end
-                                      end
-                            end))
+                                        end
+                                    end)
+                            end)))
 
     let consumer push = push.consumer
     let initial_pending push = push.initial_pending
@@ -7510,9 +7489,7 @@ module Consumer = struct
       || Char.equal character '_' || Char.equal character '-'
 
     let generated_name_prefix connection =
-      let raw =
-        Nats.Subject.to_string (Connection.fresh_inbox connection)
-      in
+      let raw = Nats.Subject.to_string (Connection.fresh_inbox connection) in
       "ordered_"
       ^ String.map
           (fun character ->
@@ -7543,15 +7520,15 @@ module Consumer = struct
           ignore (Pull.close pull)
 
     let consumer_gone = function
-      | Error.Consumer_deleted
-      | Error.Consumer_not_found
-      | Error.Api { err_code = Some 10014; _ } -> true
+      | Error.Consumer_deleted | Error.Consumer_not_found
+      | Error.Api { err_code = Some 10014; _ } ->
+          true
       | _ -> false
 
     let delete_current_consumer ordered ?timeout () =
       match ordered.consumer with
       | None -> Ok ()
-      | Some consumer ->
+      | Some consumer -> (
           let result =
             Eio.Cancel.protect (fun () -> delete ?timeout consumer)
           in
@@ -7562,7 +7539,7 @@ module Consumer = struct
           | Error error when consumer_gone error ->
               ordered.consumer <- None;
               Ok ()
-          | Error error -> Error error
+          | Error error -> Error error)
 
     let cleanup_current_consumer ordered ~deadline =
       match remaining_timeout ordered deadline with
@@ -7591,11 +7568,9 @@ module Consumer = struct
       | Error.Connection
           ( Core_error.Disconnected | Core_error.Io _ | Core_error.Tls _
           | Core_error.Timeout )
-      | Error.Decode _
-      | Error.Missing_field _
-      | Error.Invalid_config _
-      | Error.Invalid_subject _
-      | Error.Unexpected_consumer_name _ -> true
+      | Error.Decode _ | Error.Missing_field _ | Error.Invalid_config _
+      | Error.Invalid_subject _ | Error.Unexpected_consumer_name _ ->
+          true
       | _ -> false
 
     let await_connection ordered ~deadline =
@@ -7633,8 +7608,8 @@ module Consumer = struct
         | Some subject, [] -> (Some subject, [])
         | None, subjects -> (
             match (deliver_policy, subjects) with
-            | Config.Last_per_subject, [] ->
-                (match Nats.Subject.Filter.of_string ">" with
+            | Config.Last_per_subject, [] -> (
+                match Nats.Subject.Filter.of_string ">" with
                 | Ok subject -> (None, [ subject ])
                 | Error _ -> (None, []))
             | _, _ -> (None, subjects))
@@ -7648,10 +7623,10 @@ module Consumer = struct
             Some (Format.asprintf "%s_%d" prefix ordered.generation)
       in
       match
-        Config.v ?name ~deliver_policy ~ack_policy:Config.No_ack
-          ?filter_subject ~filter_subjects
-          ~replay_policy:ordered.replay_policy ~headers_only:ordered.headers_only
-          ~replicas:1 ~inactive_threshold:ordered.inactive_threshold
+        Config.v ?name ~deliver_policy ~ack_policy:Config.No_ack ?filter_subject
+          ~filter_subjects ~replay_policy:ordered.replay_policy
+          ~headers_only:ordered.headers_only ~replicas:1
+          ~inactive_threshold:ordered.inactive_threshold
           ~metadata:ordered.metadata ~mem_storage:true ()
       with
       | Ok config -> Ok config
@@ -7674,7 +7649,7 @@ module Consumer = struct
                     | Some name -> (
                         match bind ordered.stream ~name with
                         | Error error -> Error error
-                        | Ok consumer ->
+                        | Ok consumer -> (
                             ordered.consumer <- Some consumer;
                             match create ?timeout ordered.stream config with
                             | Ok consumer ->
@@ -7684,7 +7659,7 @@ module Consumer = struct
                                 Error error
                             | Error error ->
                                 ordered.consumer <- None;
-                                Error error)
+                                Error error))
                   in
                   match create_result with
                   | Error error -> Error error
@@ -7725,10 +7700,7 @@ module Consumer = struct
           true
       | _ -> false
 
-    type recreate_error = {
-      error : Error.t;
-      torn_down : bool;
-    }
+    type recreate_error = { error : Error.t; torn_down : bool }
 
     let recreate ordered ~deadline =
       stop_current_pull ordered;
@@ -7740,8 +7712,8 @@ module Consumer = struct
         | Error error -> Error { error; torn_down }
         | Ok () -> (
             match cleanup_current_consumer ordered ~deadline with
-            | Error error when reconnectable_recreate_error error ->
-                (match ordered.max_reset_attempts with
+            | Error error when reconnectable_recreate_error error -> (
+                match ordered.max_reset_attempts with
                 | Some limit when !cleanup_attempts >= limit ->
                     Error { error; torn_down }
                 | _ ->
@@ -7749,21 +7721,22 @@ module Consumer = struct
                     last_error := Some error;
                     attempt ~torn_down)
             | Error error -> Error { error; torn_down }
-            | Ok () ->
+            | Ok () -> (
                 let torn_down = true in
                 match ordered.max_reset_attempts with
                 | Some limit when !attempts >= limit -> (
                     match !last_error with
                     | Some error -> Error { error; torn_down }
-                    | None -> Error { error = Error.Consumer_deleted; torn_down })
-                | _ ->
+                    | None ->
+                        Error { error = Error.Consumer_deleted; torn_down })
+                | _ -> (
                     incr attempts;
                     match create_generation ordered ~deadline with
                     | Ok () -> Ok ()
                     | Error error when reconnectable_recreate_error error ->
                         last_error := Some error;
                         attempt ~torn_down
-                    | Error error -> Error { error; torn_down })
+                    | Error error -> Error { error; torn_down })))
       in
       attempt ~torn_down:false
 
@@ -7788,8 +7761,7 @@ module Consumer = struct
     let heartbeat_gap ordered pull =
       match Pull.last_heartbeat pull with
       | Some heartbeat ->
-          Int64.compare heartbeat.consumer_sequence
-            ordered.consumer_sequence
+          Int64.compare heartbeat.consumer_sequence ordered.consumer_sequence
           > 0
       | None -> false
 
@@ -7817,24 +7789,24 @@ module Consumer = struct
                     if not (timed_out error && not torn_down) then
                       fail ordered error;
                     result := Some (Error error))
-            | Some pull ->
-                if heartbeat_gap ordered pull then
+            | Some pull -> (
+                if heartbeat_gap ordered pull then (
                   match recreate ordered ~deadline with
                   | Ok () -> ()
                   | Error { error; torn_down } ->
                       if not (timed_out error && not torn_down) then
                         fail ordered error;
-                      result := Some (Error error)
+                      result := Some (Error error))
                 else
                   match next_from_pull ordered ~deadline pull with
                   | Ok Pull.Heartbeat ->
-                      if heartbeat_gap ordered pull then
+                      if heartbeat_gap ordered pull then (
                         match recreate ordered ~deadline with
                         | Ok () -> ()
                         | Error { error; torn_down } ->
                             if not (timed_out error && not torn_down) then
                               fail ordered error;
-                            result := Some (Error error)
+                            result := Some (Error error))
                       else ()
                   | Ok (Pull.Message message) -> (
                       match accept_message ordered message with
@@ -7857,24 +7829,23 @@ module Consumer = struct
                             fail ordered error;
                           result := Some (Error error))
                   | Error error ->
-                      if timed_out error && heartbeat_gap ordered pull then
+                      if timed_out error && heartbeat_gap ordered pull then (
                         match recreate ordered ~deadline with
                         | Ok () -> ()
                         | Error { error; torn_down } ->
                             if not (timed_out error && not torn_down) then
                               fail ordered error;
-                            result := Some (Error error)
+                            result := Some (Error error))
                       else (
                         if not (timed_out error) then fail ordered error;
-                        result := Some (Error error)))
+                        result := Some (Error error))))
       done;
       match !result with Some result -> result | None -> assert false
 
     let close ordered =
       (match ordered.state with
       | Closed -> ()
-      | Open | Failed _ ->
-          ordered.state <- Closed);
+      | Open | Failed _ -> ordered.state <- Closed);
       let pull_result =
         match ordered.pull with
         | None -> Ok ()
@@ -7900,7 +7871,7 @@ module Consumer = struct
     let release ordered =
       match ordered.state with
       | Closed -> Ok ()
-      | Open | Failed _ ->
+      | Open | Failed _ -> (
           ordered.state <- Closed;
           let pull_result =
             match ordered.pull with
@@ -7922,7 +7893,7 @@ module Consumer = struct
           in
           match pull_result with
           | Error error -> Error error
-          | Ok () -> delete_result
+          | Ok () -> delete_result)
 
     let v ~sw ?timeout ?batch ?expires ?idle_heartbeat ?max_bytes
         ?(deliver_policy = Config.All) ?filter_subject ?(filter_subjects = [])
@@ -7937,13 +7908,17 @@ module Consumer = struct
         | Some timeout ->
             Ok
               (Some
-                 (match Mtime.add_span (Connection.now stream.jetstream.connection) timeout with
+                 (match
+                    Mtime.add_span
+                      (Connection.now stream.jetstream.connection)
+                      timeout
+                  with
                  | Some deadline -> deadline
                  | None -> Mtime.max_stamp))
       in
       match deadline_result with
       | Error error -> Error error
-      | Ok deadline ->
+      | Ok deadline -> (
           let batch = Option.value batch ~default:1 in
           let expires = Option.value expires ~default:default_expires in
           let idle_heartbeat =
@@ -7993,8 +7968,8 @@ module Consumer = struct
           in
           match
             validate_fetch ~batch ~expires ~max_bytes
-              ~idle_heartbeat:(Some idle_heartbeat) ~group:None ~min_pending:None
-              ~min_ack_pending:None ~priority:None
+              ~idle_heartbeat:(Some idle_heartbeat) ~group:None
+              ~min_pending:None ~min_ack_pending:None ~priority:None
           with
           | Error error -> Error error
           | Ok () -> (
@@ -8003,7 +7978,7 @@ module Consumer = struct
               with
               | Error error, _, _ | _, Error error, _ | _, _, Error error ->
                   Error error
-              | Ok max_reset_attempts, Ok filter_subjects, Ok name_prefix ->
+              | Ok max_reset_attempts, Ok filter_subjects, Ok name_prefix -> (
                   let ordered =
                     {
                       stream;
@@ -8042,10 +8017,9 @@ module Consumer = struct
                   | Error error ->
                       ignore (close ordered);
                       Error error
-                  | Ok () -> Ok ordered)
+                  | Ok () -> Ok ordered)))
 
     let initial_pending ordered = ordered.initial_pending
-
     let next ordered = next_loop ordered ~deadline:None
 
     let next_with_timeout ~timeout ordered =
@@ -8234,9 +8208,11 @@ module Publish_ack = struct
 
   let pp ppf value =
     Format.fprintf ppf
-      "JetStream publish ack(stream=%S, sequence=%Ld, duplicate=%b, batch=%a, count=%a)"
+      "JetStream publish ack(stream=%S, sequence=%Ld, duplicate=%b, batch=%a, \
+       count=%a)"
       value.stream value.sequence value.duplicate
-      (Format.pp_print_option Format.pp_print_string) value.batch
+      (Format.pp_print_option Format.pp_print_string)
+      value.batch
       (Format.pp_print_option (fun ppf value -> Format.fprintf ppf "%Ld" value))
       value.count
 end
@@ -8244,7 +8220,6 @@ end
 module Publish_options = struct
   type schedule = At of Ptime.t | Every of Mtime.Span.t | Cron of string
   type schedule_ttl = Duration of Mtime.Span.t | Never
-
   type retry = { wait : Mtime.Span.t; attempts : int option }
 
   type t = {
@@ -8319,8 +8294,7 @@ module Publish_options = struct
   let with_expected_last_subject_sequence value options =
     match nonnegative_sequence "expected_last_subject_sequence" value with
     | Error error -> Error error
-    | Ok () ->
-        Ok { options with expected_last_subject_sequence = Some value }
+    | Ok () -> Ok { options with expected_last_subject_sequence = Some value }
 
   let with_expected_last_sequence_for_subject ~sequence ~subject options =
     match nonnegative_sequence "expected_last_subject_sequence" sequence with
@@ -8485,13 +8459,14 @@ let apply_publish_options ?msg_id ?(options = Publish_options.empty) headers =
   let headers_result =
     match validate_publish_options options with
     | Error error -> Error error
-    | Ok () ->
-        (match (msg_id, options.msg_id) with
+    | Ok () -> (
+        match (msg_id, options.msg_id) with
         | Some _, Some _ ->
             Error
               (Error.Invalid_publish_option
                  { field = "msg_id"; reason = "specified twice" })
-        | Some value, None when String.equal value "" -> Error Error.Empty_msg_id
+        | Some value, None when String.equal value "" ->
+            Error Error.Empty_msg_id
         | Some value, None when Nats.Header.mem "Nats-Msg-Id" headers ->
             Error Error.Msg_id_already_set
         | Some value, None ->
@@ -8509,12 +8484,13 @@ let apply_publish_options ?msg_id ?(options = Publish_options.empty) headers =
   in
   match headers_result with
   | Error error -> Error error
-  | Ok headers -> (
+  | Ok headers ->
       let ( let* ) = Result.bind in
       let* headers =
         add_option headers "Nats-Expected-Stream" options.expected_stream
       in
-      let* headers = add_option headers "Nats-Expected-Last-Msg-Id"
+      let* headers =
+        add_option headers "Nats-Expected-Last-Msg-Id"
           options.expected_last_msg_id
       in
       let* headers =
@@ -8529,9 +8505,12 @@ let apply_publish_options ?msg_id ?(options = Publish_options.empty) headers =
         add_option headers "Nats-Expected-Last-Subject-Sequence-Subject"
           (Option.map Nats.Subject.to_string options.expected_last_subject)
       in
-      let* headers = add_option headers "Nats-TTL" (Option.map span_string options.ttl) in
       let* headers =
-        add_option headers "Nats-Schedule" (Option.map schedule_string options.schedule)
+        add_option headers "Nats-TTL" (Option.map span_string options.ttl)
+      in
+      let* headers =
+        add_option headers "Nats-Schedule"
+          (Option.map schedule_string options.schedule)
       in
       let* headers =
         add_option headers "Nats-Schedule-Target"
@@ -8549,7 +8528,7 @@ let apply_publish_options ?msg_id ?(options = Publish_options.empty) headers =
           options.schedule_ttl
       in
       let* headers = add_option headers "Nats-Schedule-TTL" schedule_ttl in
-      add_option headers "Nats-Schedule-Time-Zone" options.schedule_timezone)
+      add_option headers "Nats-Schedule-Time-Zone" options.schedule_timezone
 
 let publish_message ?(headers = Nats.Header.empty) ?msg_id ?options subject
     payload =
@@ -8647,7 +8626,8 @@ module Publisher = struct
               sw;
               now = (fun () -> Eio.Time.Mono.now clock);
               sleep = (fun seconds -> Eio.Time.Mono.sleep clock seconds);
-              sleep_until = (fun deadline -> Eio.Time.Mono.sleep_until clock deadline);
+              sleep_until =
+                (fun deadline -> Eio.Time.Mono.sleep_until clock deadline);
               jetstream;
               stall_wait;
               ack_timeout;
@@ -8690,23 +8670,22 @@ module Publisher = struct
     Option.iter (fun resolver -> Eio.Promise.resolve resolver ()) completion_u
 
   let reserve publisher ~stall_wait =
-    let deadline =
-      Mtime.add_span (publisher.now ()) stall_wait
-    in
+    let deadline = Mtime.add_span (publisher.now ()) stall_wait in
     let rec loop () =
       Mutex.lock publisher.state.mutex;
-      if Int.compare publisher.state.pending publisher.state.max_pending < 0 then (
+      if Int.compare publisher.state.pending publisher.state.max_pending < 0
+      then (
         publisher.state.pending <- publisher.state.pending + 1;
         Mutex.unlock publisher.state.mutex;
         Ok ())
-      else (
+      else
         let capacity = publisher.state.capacity in
         Mutex.unlock publisher.state.mutex;
         match deadline with
         | None -> Error Error.Publish_stalled
-        | Some deadline when Mtime.compare (publisher.now ()) deadline >= 0
-          -> Error Error.Publish_stalled
-        | Some deadline ->
+        | Some deadline when Mtime.compare (publisher.now ()) deadline >= 0 ->
+            Error Error.Publish_stalled
+        | Some deadline -> (
             let wait_capacity () =
               Eio.Promise.await capacity;
               Ok ()
@@ -8757,31 +8736,29 @@ module Publisher = struct
               message
       in
       match request_result with
-      | (Error Core_error.No_responders as result) ->
+      | Error Core_error.No_responders as result ->
           let policy = retry_policy options in
           if can_retry attempts policy then (
             wait_retry publisher policy.wait;
             request_loop publisher future message options (attempts + 1))
           else result
       | Error error -> Error error
-      | Ok request ->
+      | Ok request -> (
           set_current_request future (Some request);
           let result = Connection.Request.await request in
           set_current_request future None;
           match result with
-          | (Error Core_error.No_responders as result) ->
+          | Error Core_error.No_responders as result ->
               let policy = retry_policy options in
               if can_retry attempts policy then (
                 wait_retry publisher policy.wait;
                 request_loop publisher future message options (attempts + 1))
               else result
-          | result -> result
+          | result -> result)
 
   let run publisher future options resolver =
     let result =
-      match
-        request_loop publisher future future.Publish.message options 0
-      with
+      match request_loop publisher future future.Publish.message options 0 with
       | Error error -> Error (Error.Connection error)
       | Ok response -> publish_ack_of_message response
     in
@@ -8839,9 +8816,7 @@ module Publisher = struct
       | Some timeout when Mtime.Span.compare timeout Mtime.Span.zero <= 0 ->
           Error
             (Error.Connection (Core_error.Invalid_timeout "publish completion"))
-      | Some timeout ->
-          Ok
-            (Mtime.add_span (publisher.now ()) timeout)
+      | Some timeout -> Ok (Mtime.add_span (publisher.now ()) timeout)
     in
     let* deadline = timeout in
     let rec loop () =
@@ -8849,7 +8824,7 @@ module Publisher = struct
       if Int.equal publisher.state.pending 0 then (
         Mutex.unlock publisher.state.mutex;
         Ok ())
-      else (
+      else
         let completion = publisher.state.completion in
         Mutex.unlock publisher.state.mutex;
         let wait_completion () =
@@ -8864,9 +8839,10 @@ module Publisher = struct
                 publisher.sleep_until deadline;
                 Error (Error.Connection Core_error.Timeout)
               in
-              Eio.Fiber.first ~combine:choose_result wait_completion wait_timeout
+              Eio.Fiber.first ~combine:choose_result wait_completion
+                wait_timeout
         in
-        match result with Error error -> Error error | Ok () -> loop ())
+        match result with Error error -> Error error | Ok () -> loop ()
     in
     loop ()
 end
@@ -8898,7 +8874,7 @@ let validate_batch_messages messages =
       Error
         (Error.Invalid_publish_option
            { field = "messages"; reason = "must not be empty" })
-  | _ ->
+  | _ -> (
       let failure = ref None in
       List.iter
         (fun message ->
@@ -8913,7 +8889,8 @@ let validate_batch_messages messages =
                          field = "messages";
                          reason = "must not contain reply subjects";
                        })
-              else if Nats.Header.mem "Nats-Batch-Id" (Nats.Message.headers message)
+              else if
+                Nats.Header.mem "Nats-Batch-Id" (Nats.Message.headers message)
               then
                 failure :=
                   Some
@@ -8945,14 +8922,12 @@ let validate_batch_messages messages =
                          reason = "is reserved for batch control";
                        }))
         messages;
-      match !failure with Some error -> Error error | None -> Ok ()
+      match !failure with Some error -> Error error | None -> Ok ())
 
 let batch_message ?reply_to ~id ~sequence ~commit message =
   let headers = Nats.Message.headers message in
   let ( let* ) = Result.bind in
-  let* headers =
-    add_publish_header headers ~name:"Nats-Batch-Id" ~value:id
-  in
+  let* headers = add_publish_header headers ~name:"Nats-Batch-Id" ~value:id in
   let* headers =
     add_publish_header headers ~name:"Nats-Batch-Sequence"
       ~value:(Int64.to_string sequence)
@@ -8963,12 +8938,17 @@ let batch_message ?reply_to ~id ~sequence ~commit message =
     | Some value -> add_publish_header headers ~name:"Nats-Batch-Commit" ~value
   in
   Ok
-    (Nats.Message.v ~subject:(Nats.Message.subject message) ?reply_to ~headers
+    (Nats.Message.v
+       ~subject:(Nats.Message.subject message)
+       ?reply_to ~headers
        (Nats.Message.payload message))
 
 let fast_batch_message ~reply_to message =
-  Nats.Message.v ~subject:(Nats.Message.subject message) ~reply_to
-    ~headers:(Nats.Message.headers message) (Nats.Message.payload message)
+  Nats.Message.v
+    ~subject:(Nats.Message.subject message)
+    ~reply_to
+    ~headers:(Nats.Message.headers message)
+    (Nats.Message.payload message)
 
 let batch_deadline connection timeout =
   match timeout with
@@ -8977,8 +8957,7 @@ let batch_deadline connection timeout =
       Error (Error.Connection (Core_error.Invalid_timeout "batch"))
   | Some timeout ->
       let deadline =
-        Option.value
-          ~default:Mtime.max_stamp
+        Option.value ~default:Mtime.max_stamp
           (Mtime.add_span (Connection.now connection) timeout)
       in
       Ok (Some deadline)
@@ -9001,7 +8980,7 @@ module Atomic_batch = struct
     let* deadline = batch_deadline jetstream.connection timeout in
     match List.rev messages with
     | [] -> assert false
-    | last :: staged_reversed ->
+    | last :: staged_reversed -> (
         let staged = List.rev staged_reversed in
         let stage_result = ref (Ok ()) in
         List.iteri
@@ -9010,7 +8989,8 @@ module Atomic_batch = struct
             | Error _ -> ()
             | Ok () -> (
                 match
-                  batch_message ~id ~sequence:(Int64.of_int (index + 1))
+                  batch_message ~id
+                    ~sequence:(Int64.of_int (index + 1))
                     ~commit:None message
                 with
                 | Error error -> stage_result := Error error
@@ -9026,11 +9006,9 @@ module Atomic_batch = struct
         let sequence = Int64.of_int (List.length messages) in
         let* message = batch_message ~id ~sequence ~commit:(Some "1") last in
         let* timeout = batch_remaining jetstream.connection deadline in
-        match
-          Connection.request_msg ?timeout jetstream.connection message
-        with
+        match Connection.request_msg ?timeout jetstream.connection message with
         | Error error -> Error (Error.Connection error)
-        | Ok response -> publish_ack_of_message response
+        | Ok response -> publish_ack_of_message response)
 end
 
 module Batch = struct
@@ -9057,9 +9035,9 @@ module Batch = struct
     |> Jsont.Object.opt_mem "seq" Jsont.int64 ~enc:(fun value -> value.sequence)
     |> Jsont.Object.opt_mem "msgs" Jsont.int ~enc:(fun value -> value.messages)
     |> Jsont.Object.opt_mem "last_seq" Jsont.int64 ~enc:(fun value ->
-         value.expected)
+        value.expected)
     |> Jsont.Object.opt_mem "error" api_error_codec ~enc:(fun value ->
-         value.error)
+        value.error)
     |> Jsont.Object.skip_unknown |> Jsont.Object.finish
 
   let flow_string = function Fail -> "fail" | Allow -> "ok"
@@ -9072,8 +9050,8 @@ module Batch = struct
 
   let reply_subject ~inbox ~id ~flow ~gap ~sequence ~operation =
     Nats.Subject.of_string
-      (Format.asprintf "%s.%s.%d.%s.%Ld.%d.$FI" inbox id flow
-         (flow_string gap) sequence operation)
+      (Format.asprintf "%s.%s.%d.%s.%Ld.%d.$FI" inbox id flow (flow_string gap)
+         sequence operation)
 
   let decode_flow_response message =
     match decode flow_codec message with
@@ -9095,7 +9073,10 @@ module Batch = struct
               Error (Error.Batch_flow_error { sequence; error })
           | None, _ -> Error (Error.Missing_field "seq")
           | _, None -> Error (Error.Missing_field "error")
-        else Error (Error.Invalid_ack_reply (Nats.Subject.to_string (Nats.Message.subject message)))
+        else
+          Error
+            (Error.Invalid_ack_reply
+               (Nats.Subject.to_string (Nats.Message.subject message)))
     | Ok { kind = None; _ } -> (
         match publish_ack_of_message message with
         | Error error -> Error error
@@ -9120,7 +9101,7 @@ module Batch = struct
     in
     match Connection.subscribe connection ~replay_on_reconnect:false filter with
     | Error error -> Error (Error.Connection error)
-    | Ok subscription ->
+    | Ok subscription -> (
         let finish result =
           Eio.Cancel.protect (fun () ->
               match Connection.Subscription.unsubscribe subscription with
@@ -9138,14 +9119,14 @@ module Batch = struct
             | Error _ -> ()
             | Ok () -> (
                 match
-                  reply_subject ~inbox:(Nats.Subject.to_string inbox) ~id ~flow
-                    ~gap ~sequence:(Int64.of_int (index + 1))
+                  reply_subject
+                    ~inbox:(Nats.Subject.to_string inbox)
+                    ~id ~flow ~gap
+                    ~sequence:(Int64.of_int (index + 1))
                     ~operation:(operation ~length index)
                 with
                 | Error error ->
-                    send_result :=
-                      Error
-                        (Error.Invalid_subject error)
+                    send_result := Error (Error.Invalid_subject error)
                 | Ok reply -> (
                     let message = fast_batch_message ~reply_to:reply message in
                     match Connection.publish_msg connection message with
@@ -9189,7 +9170,8 @@ module Batch = struct
               in
               receive None
         in
-        (try finish result with Eio.Cancel.Cancelled _ as cancellation ->
+        try finish result
+        with Eio.Cancel.Cancelled _ as cancellation ->
           Eio.Cancel.protect (fun () ->
               ignore (Connection.Subscription.unsubscribe subscription));
           raise cancellation)
@@ -9199,9 +9181,9 @@ let publish ?timeout ?(headers = Nats.Header.empty) ?msg_id ?options jetstream
     subject payload =
   match publish_message ~headers ?msg_id ?options subject payload with
   | Error error -> Error error
-  | Ok message ->
+  | Ok message -> (
       let options = Option.value ~default:Publish_options.empty options in
-      (match options.stall_wait with
+      match options.stall_wait with
       | Some _ ->
           Error
             (Error.Invalid_publish_option
@@ -9209,13 +9191,13 @@ let publish ?timeout ?(headers = Nats.Header.empty) ?msg_id ?options jetstream
                  field = "stall_wait";
                  reason = "is only valid for asynchronous publishing";
                })
-      | None ->
+      | None -> (
           let retry =
             Option.value ~default:default_publish_retry options.retry
           in
-          (match
-           Connection.request_msg_retry ?timeout ~retry_wait:retry.wait
-               ~retry_attempts:retry.attempts jetstream.connection message
-           with
+          match
+            Connection.request_msg_retry ?timeout ~retry_wait:retry.wait
+              ~retry_attempts:retry.attempts jetstream.connection message
+          with
           | Error error -> Error (Error.Connection error)
           | Ok response -> publish_ack_of_message response))

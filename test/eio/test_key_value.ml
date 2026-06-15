@@ -375,21 +375,20 @@ let () =
             | Ok value -> value
             | Error error ->
                 fail
-                  (Format.asprintf "%a"
-                     Nats_eio.Jetstream.Error.pp_config error)
+                  (Format.asprintf "%a" Nats_eio.Jetstream.Error.pp_config error)
           in
           let advanced =
             match
               Nats_eio.Key_value.Config.v ~bucket:"advanced"
                 ~description:"user buckets" ~history:3 ~replicas:3 ~placement
                 ~compression:Nats_eio.Key_value.Config.S2
-                ~metadata:[ ("owner", "kv-test") ] ()
+                ~metadata:[ ("owner", "kv-test") ]
+                ()
             with
             | Ok value -> value
             | Error error ->
                 fail
-                  (Format.asprintf "%a" Nats_eio.Key_value.Error.pp_config
-                     error)
+                  (Format.asprintf "%a" Nats_eio.Key_value.Error.pp_config error)
           in
           equal (option string) (Some "user buckets")
             (Nats_eio.Key_value.Config.description advanced);
@@ -401,17 +400,16 @@ let () =
           | Nats_eio.Key_value.Config.S2 -> ()
           | Nats_eio.Key_value.Config.Uncompressed ->
               fail "key-value config lost compression");
-          equal (list (pair string string)) [ ("owner", "kv-test") ]
+          equal
+            (list (pair string string))
+            [ ("owner", "kv-test") ]
             (Nats_eio.Key_value.Config.metadata advanced);
           let source =
-            match
-              Nats_eio.Key_value.Config.Source.v ~name:"KV_source" ()
-            with
+            match Nats_eio.Key_value.Config.Source.v ~name:"KV_source" () with
             | Ok value -> value
             | Error error ->
                 fail
-                  (Format.asprintf "%a"
-                     Nats_eio.Jetstream.Error.pp_config error)
+                  (Format.asprintf "%a" Nats_eio.Jetstream.Error.pp_config error)
           in
           let republish =
             match
@@ -422,8 +420,7 @@ let () =
             | Ok value -> value
             | Error error ->
                 fail
-                  (Format.asprintf "%a"
-                     Nats_eio.Jetstream.Error.pp_config error)
+                  (Format.asprintf "%a" Nats_eio.Jetstream.Error.pp_config error)
           in
           let composed =
             match
@@ -433,14 +430,12 @@ let () =
             | Ok value -> value
             | Error error ->
                 fail
-                  (Format.asprintf "%a" Nats_eio.Key_value.Error.pp_config
-                     error)
+                  (Format.asprintf "%a" Nats_eio.Key_value.Error.pp_config error)
           in
           equal (option string) (Some "KV_source")
             (Option.map Nats_eio.Key_value.Config.Source.name
                (Nats_eio.Key_value.Config.mirror composed));
-          equal int 0
-            (List.length (Nats_eio.Key_value.Config.sources composed));
+          equal int 0 (List.length (Nats_eio.Key_value.Config.sources composed));
           equal (option string) (Some "audit.advanced")
             (Option.map Nats_eio.Key_value.Config.Republish.destination
                (Nats_eio.Key_value.Config.republish composed));
@@ -575,7 +570,9 @@ let () =
               | Nats_eio.Key_value.Config.S2 -> ()
               | Nats_eio.Key_value.Config.Uncompressed ->
                   fail "key-value status lost compression");
-              equal (list (pair string string)) [ ("owner", "kv-test") ]
+              equal
+                (list (pair string string))
+                [ ("owner", "kv-test") ]
                 (Nats_eio.Key_value.Status.metadata status);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
@@ -1292,18 +1289,17 @@ let () =
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve watch_result_u
                     (Nats_eio.Key_value.Ordered_watch.v ~sw
-                       ~keys:[ "alice"; "bob" ]
-                       ~batch:1 ~meta_only:true ~name_prefix:"kv-ordered"
-                       ~metadata:[ ("owner", "ordered-watch") ] value));
+                       ~keys:[ "alice"; "bob" ] ~batch:1 ~meta_only:true
+                       ~name_prefix:"kv-ordered"
+                       ~metadata:[ ("owner", "ordered-watch") ]
+                       value));
               yield_n 5;
               require_trace ~trace
                 ~needle:"deliver_policy\\\":\\\"last_per_subject";
               require_trace ~trace
                 ~needle:"filter_subjects\\\":[\\\"$KV.users.alice";
-              require_trace ~trace
-                ~needle:"$KV.users.bob";
-              require_trace ~trace
-                ~needle:"name\\\":\\\"kv-ordered_1";
+              require_trace ~trace ~needle:"$KV.users.bob";
+              require_trace ~trace ~needle:"name\\\":\\\"kv-ordered_1";
               require_trace ~trace ~needle:"headers_only\\\":true";
               Eio.Promise.resolve create_response_u
                 (Ok
@@ -1320,8 +1316,8 @@ let () =
               Eio.Promise.resolve first_delivery_u
                 (Ok
                    (consumer_delivery_wire ~sid:2 ~consumer:"kv-ordered_1"
-                      ~key:"alice" ~stream_sequence:10L
-                      ~consumer_sequence:1L ~pending:1L ""));
+                      ~key:"alice" ~stream_sequence:10L ~consumer_sequence:1L
+                      ~pending:1L ""));
               let first =
                 match expect_kv_ok (Eio.Promise.await first_result) with
                 | Nats_eio.Key_value.Ordered_watch.Entry entry -> entry
@@ -1337,8 +1333,8 @@ let () =
               Eio.Promise.resolve second_delivery_u
                 (Ok
                    (consumer_delivery_wire ~sid:2 ~consumer:"kv-ordered_1"
-                      ~key:"bob" ~stream_sequence:11L
-                      ~consumer_sequence:2L ~pending:0L ~operation:"DEL" ""));
+                      ~key:"bob" ~stream_sequence:11L ~consumer_sequence:2L
+                      ~pending:0L ~operation:"DEL" ""));
               let second =
                 match expect_kv_ok (Eio.Promise.await second_result) with
                 | Nats_eio.Key_value.Ordered_watch.Entry entry -> entry
@@ -1348,7 +1344,9 @@ let () =
               (match Nats_eio.Key_value.Entry.operation second with
               | Nats_eio.Key_value.Entry.Delete -> ()
               | _ -> fail "ordered watch returned the wrong tombstone");
-              (match expect_kv_ok (Nats_eio.Key_value.Ordered_watch.next watch) with
+              (match
+                 expect_kv_ok (Nats_eio.Key_value.Ordered_watch.next watch)
+               with
               | Nats_eio.Key_value.Ordered_watch.Initial_done -> ()
               | Nats_eio.Key_value.Ordered_watch.Entry _ ->
                   fail "ordered watch omitted its initial marker");
@@ -1360,8 +1358,8 @@ let () =
               Eio.Promise.resolve live_delivery_u
                 (Ok
                    (consumer_delivery_wire ~sid:2 ~consumer:"kv-ordered_1"
-                      ~key:"alice" ~stream_sequence:12L
-                      ~consumer_sequence:3L ~pending:0L ""));
+                      ~key:"alice" ~stream_sequence:12L ~consumer_sequence:3L
+                      ~pending:0L ""));
               let live =
                 match expect_kv_ok (Eio.Promise.await live_result) with
                 | Nats_eio.Key_value.Ordered_watch.Entry entry -> entry
@@ -1412,7 +1410,9 @@ let () =
                       ~pending:(Some 0L) ~opt_start_seq:None
                       ~name:"ordered-empty_1" ~deliver_subject:""));
               let watch = expect_kv_ok (Eio.Promise.await watch_result) in
-              (match expect_kv_ok (Nats_eio.Key_value.Ordered_watch.next watch) with
+              (match
+                 expect_kv_ok (Nats_eio.Key_value.Ordered_watch.next watch)
+               with
               | Nats_eio.Key_value.Ordered_watch.Initial_done -> ()
               | Nats_eio.Key_value.Ordered_watch.Entry _ ->
                   fail "empty ordered watch returned an entry");
@@ -1482,8 +1482,8 @@ let () =
               Eio.Promise.resolve first_delivery_u
                 (Ok
                    (consumer_delivery_wire ~sid:2 ~consumer:"kv-gap_1"
-                      ~key:"alice" ~stream_sequence:10L
-                      ~consumer_sequence:1L ~pending:0L "before-gap"));
+                      ~key:"alice" ~stream_sequence:10L ~consumer_sequence:1L
+                      ~pending:0L "before-gap"));
               let first =
                 match expect_kv_ok (Eio.Promise.await first_result) with
                 | Nats_eio.Key_value.Ordered_watch.Entry entry -> entry
@@ -1499,8 +1499,8 @@ let () =
               Eio.Promise.resolve gap_delivery_u
                 (Ok
                    (consumer_delivery_wire ~sid:2 ~consumer:"kv-gap_1"
-                      ~key:"alice" ~stream_sequence:12L
-                      ~consumer_sequence:3L ~pending:0L "gap"));
+                      ~key:"alice" ~stream_sequence:12L ~consumer_sequence:3L
+                      ~pending:0L "gap"));
               wait_for_trace ~trace
                 ~needle:"PUB $JS.API.CONSUMER.DELETE.KV_users.kv-gap_1";
               Eio.Promise.resolve first_delete_u (Ok (api_ok_wire ~sid:3));
@@ -1511,14 +1511,14 @@ let () =
                 (Ok
                    (consumer_response_named_with_opt_start_seq ~sid:4
                       ~policy:"by_start_sequence" ~headers_only:false
-                      ~pending:(Some 0L) ~opt_start_seq:(Some 11L) ~name:"kv-gap_2"
-                      ~deliver_subject:""));
+                      ~pending:(Some 0L) ~opt_start_seq:(Some 11L)
+                      ~name:"kv-gap_2" ~deliver_subject:""));
               yield_n 5;
               Eio.Promise.resolve replay_delivery_u
                 (Ok
                    (consumer_delivery_wire ~sid:5 ~consumer:"kv-gap_2"
-                      ~key:"alice" ~stream_sequence:11L
-                      ~consumer_sequence:1L ~pending:0L "replayed"));
+                      ~key:"alice" ~stream_sequence:11L ~consumer_sequence:1L
+                      ~pending:0L "replayed"));
               let replayed =
                 match expect_kv_ok (Eio.Promise.await replay_result) with
                 | Nats_eio.Key_value.Ordered_watch.Entry entry -> entry
@@ -1526,8 +1526,7 @@ let () =
                     fail "ordered watch did not return the replayed entry"
               in
               equal int64 11L (Nats_eio.Key_value.Entry.revision replayed);
-              equal string "replayed"
-                (Nats_eio.Key_value.Entry.value replayed);
+              equal string "replayed" (Nats_eio.Key_value.Entry.value replayed);
               let close_result, close_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve close_result_u
