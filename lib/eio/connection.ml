@@ -1,3 +1,99 @@
+module Stats = struct
+  type t = {
+    in_messages : int64;
+    in_bytes : int64;
+    out_messages : int64;
+    out_bytes : int64;
+    reconnects : int64;
+  }
+
+  type counters = t Atomic.t
+
+  let create () =
+    Atomic.make
+      {
+        in_messages = 0L;
+        in_bytes = 0L;
+        out_messages = 0L;
+        out_bytes = 0L;
+        reconnects = 0L;
+      }
+
+  let add value amount =
+    if Int64.compare amount 0L < 0 then
+      invalid_arg "negative statistics increment"
+    else
+      let maximum = Int64.sub Int64.max_int amount in
+      if Int64.compare value maximum > 0 then Int64.max_int
+      else Int64.add value amount
+
+  let update counters f =
+    (* All writers are serialized by the protocol-owner fiber. The atomic
+       publication makes the immutable snapshot safe for concurrent readers. *)
+    Atomic.set counters (f (Atomic.get counters))
+
+  let record_incoming counters bytes =
+    update counters (fun value ->
+        {
+          value with
+          in_messages = add value.in_messages 1L;
+          in_bytes = add value.in_bytes bytes;
+        })
+
+  let record_outgoing counters bytes =
+    update counters (fun value ->
+        {
+          value with
+          out_messages = add value.out_messages 1L;
+          out_bytes = add value.out_bytes bytes;
+        })
+
+  let record_reconnect counters =
+    update counters (fun value ->
+        { value with reconnects = add value.reconnects 1L })
+
+  let snapshot counters = Atomic.get counters
+  let in_messages value = value.in_messages
+  let in_bytes value = value.in_bytes
+  let out_messages value = value.out_messages
+  let out_bytes value = value.out_bytes
+  let reconnects value = value.reconnects
+
+  let pp ppf value =
+    Format.fprintf ppf
+      "Stats(in_messages=%Ld, in_bytes=%Ld, out_messages=%Ld, out_bytes=%Ld, \
+       reconnects=%Ld)"
+      value.in_messages value.in_bytes value.out_messages value.out_bytes
+      value.reconnects
+end
+
+let message_header_bytes ?status headers =
+  if Option.is_none status && Nats.Header.is_empty headers then 0L
+  else
+    let status_bytes =
+      match status with
+      | None -> 0
+      | Some ({ Nats.Op.code; description } : Nats.Op.status) ->
+          1
+          + String.length (string_of_int code)
+          +
+          if String.equal description "" then 0
+          else 1 + String.length description
+    in
+    let field_bytes =
+      List.fold_left
+        (fun total (name, value) ->
+          total + String.length name + String.length value + 4)
+        0
+        (Nats.Header.to_list headers)
+    in
+    Int64.of_int (10 + status_bytes + field_bytes + 2)
+
+let message_bytes ?status message =
+  Int64.add
+    (Int64.of_int (String.length (Nats.Message.payload message)))
+    (message_header_bytes ?status (Nats.Message.headers message))
+
 module Config = struct
   type t = {
     core : Nats.Config.t;
@@ -767,6 +863,7 @@ type t = {
   ready_promise : (unit, Error.t) result Eio.Promise.t;
   ready : (unit, Error.t) result Eio.Promise.u;
   barriers : barrier Queue.t;
+  stats : Stats.counters;
 }
 
 type connection = t
@@ -925,6 +1022,8 @@ let event t event =
   | _ ->
       if Event_stream.push t.events event then Ok ()
       else Error (Error.Slow_consumer Error.Events)
+
+let stats t = Stats.snapshot t.stats
 
 let close_subscription t sid error =
   match Hashtbl.find_opt t.subscriptions sid with
@@ -1141,7 +1240,12 @@ let handle_event t event =
       Ok ()
   | Nats.Event.Connected ->
       t.handshake_deadline <- None;
-      if t.reconnecting then
+      if t.reconnecting then (
+        (* The replacement CONNECT and subscription replay have been written
+           by [apply_transition] before this event is handled. Count the
+           successful replacement connection independently of later local
+           event delivery or reconnect-buffer flushing. *)
+        Stats.record_reconnect t.stats;
         match flush_reconnect_pending t with
         | Error error -> Error error
         | Ok () -> (
@@ -1160,7 +1264,7 @@ let handle_event t event =
                   t.reconnect_publish_state <- None;
                   resolve_reconnect t (Ok ());
                   Ok ())
-                else Error (Error.Slow_consumer Error.Events))
+                else Error (Error.Slow_consumer Error.Events)))
       else if not t.connect_sent then Ok ()
       else if Eio.Promise.is_resolved t.ready_promise then Ok ()
       else (
@@ -1217,6 +1321,8 @@ let handle_deliveries t deliveries =
   let rec loop = function
     | [] -> Ok ()
     | (delivery : Nats.Client.delivery) :: rest -> (
+        Stats.record_incoming t.stats
+          (message_bytes ?status:delivery.status delivery.message);
         match Hashtbl.find_opt t.requests delivery.sid with
         | Some waiter -> (
             Hashtbl.remove t.requests delivery.sid;
@@ -1593,6 +1699,7 @@ let enqueue_reconnect_publish_output t message =
           if Int.compare t.reconnect_pending_bytes limit >= 0 then
             Error (Error.Reconnect_buffer_exceeded { limit })
           else (
+            Stats.record_outgoing t.stats (message_bytes message);
             List.iter (enqueue_reconnect_output t) transition.output;
             Ok ()))
 
@@ -1684,6 +1791,7 @@ let apply_outgoing t command =
           fail_waiter resolver (command_error error);
           Ok ()
       | Ok transition -> (
+          Stats.record_outgoing t.stats (message_bytes message);
           match apply_transition t transition with
           | Error error ->
               fail_waiter resolver error;
@@ -1963,6 +2071,8 @@ let apply_outgoing t command =
                                     | Ok () -> Ok ()
                                     | Error error -> Error error)
                                 | Ok transition -> (
+                                    Stats.record_outgoing t.stats
+                                      (message_bytes message);
                                     match apply_transition t transition with
                                     | Error error ->
                                         Hashtbl.remove t.requests sid;
@@ -2456,6 +2566,7 @@ let create ~sw ~clock ~config ~(dial : dial) ~pool ~current_endpoint ~tls_active
       ready_promise = ready;
       ready = ready_resolver;
       barriers = Queue.create ();
+      stats = Stats.create ();
     }
   in
   Eio.Switch.on_release sw (fun () -> finish connection Error.Closed);

@@ -13,6 +13,8 @@ The research and architecture proposal is in
 [`docs/core-api-review.md`](docs/core-api-review.md),
 [`docs/jetstream-api-review.md`](docs/jetstream-api-review.md), and
 [`docs/durable-feature-api-review.md`](docs/durable-feature-api-review.md).
+The current observability boundary is described in
+[`docs/observability.md`](docs/observability.md).
 
 ## Capability comparisons
 
@@ -23,7 +25,7 @@ channels, and mutable handles.
 
 | Comparison point | Current position |
 | --- | --- |
-| Core connection conveniences | Core protocol, authentication, TLS, discovery, reconnect, drain, and lifecycle events are covered. Go-specific custom dialers, proxy headers, stale-connection tuning, connection statistics, richer introspection, and dynamic callback hooks are not currently exposed. |
+| Core connection conveniences | Core protocol, authentication, TLS, discovery, reconnect, drain, lifecycle events, and race-safe cumulative connection statistics are covered. Go-specific custom dialers, proxy headers, stale-connection tuning, richer introspection, and dynamic callback hooks are not currently exposed. |
 | JetStream resource administration | Account information plus stream and consumer administration/configuration are covered, including placement, persistence mode, message counters, and the material pinned Go SDK fields. |
 | Server-wide administration | Monitoring and selected controls are covered by the optional `nats-eio-system` package: privileged server/account queries, fan-out collection, reload, client kick/LDM, and system events. Claims, resolver, and user-management operations remain separate work. |
 | JetStream consumption | Pull, push, ordered, fetch-by-bytes, no-wait fetch, flow control, priority groups, and bounded continuous consumption are covered. `Messages`/`Consume` threshold callbacks are represented by Eio backpressure and result ownership. |

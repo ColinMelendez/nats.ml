@@ -159,12 +159,22 @@ let () =
     [
       test "handshake, delivery, publish, and flush" (fun () ->
           let deliver, deliver_u = Eio.Promise.create () in
+          let header_deliver, header_deliver_u = Eio.Promise.create () in
           let pong, pong_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
           let message = "MSG orders.created 1 5\r\nhello\r\n" in
+          let header_message =
+            "HMSG orders.created 1 18 19\r\n" ^ "NATS/1.0\r\nX: y\r\n\r\nh\r\n"
+          in
           with_connection
             ~reads:
-              [ `Return info_wire; `Await deliver; `Await pong; `Await hold ]
+              [
+                `Return info_wire;
+                `Await deliver;
+                `Await header_deliver;
+                `Await pong;
+                `Await hold;
+              ]
             (fun ~sw connection ->
               let events = Nats_eio.Connection.events connection in
               (match expect_core_event (Nats_eio.Event_stream.next events) with
@@ -188,8 +198,32 @@ let () =
               equal string "hello" (Nats.Message.payload delivery.message);
               equal string "orders.created"
                 (Nats.Subject.to_string (Nats.Message.subject delivery.message));
+              Eio.Promise.resolve header_deliver_u (Ok header_message);
+              let header_delivery =
+                expect_ok (Nats_eio.Subscription.next subscription)
+              in
+              equal string "h" (Nats.Message.payload header_delivery.message);
+              equal (option string) (Some "y")
+                (Nats.Header.find "X"
+                   (Nats.Message.headers header_delivery.message));
               expect_ok
                 (Nats_eio.Connection.publish connection subject "outgoing");
+              let headers =
+                match Nats.Header.of_list [ ("X", "y") ] with
+                | Ok headers -> headers
+                | Error error ->
+                    fail
+                      (Format.asprintf "invalid test header: %a"
+                         Nats.Header.pp_error error)
+              in
+              expect_ok
+                (Nats_eio.Connection.publish ~headers connection subject "h");
+              let stats = Nats_eio.Connection.stats connection in
+              equal int64 2L (Nats_eio.Connection.Stats.in_messages stats);
+              equal int64 24L (Nats_eio.Connection.Stats.in_bytes stats);
+              equal int64 2L (Nats_eio.Connection.Stats.out_messages stats);
+              equal int64 27L (Nats_eio.Connection.Stats.out_bytes stats);
+              equal int64 0L (Nats_eio.Connection.Stats.reconnects stats);
               let flush_result, flush_result_u = Eio.Promise.create () in
               Eio.Fiber.fork ~sw (fun () ->
                   Eio.Promise.resolve flush_result_u
@@ -403,6 +437,11 @@ let () =
                   fail
                     (Format.asprintf "expected request timeout, got %a"
                        Nats_eio.Error.pp error));
+              let stats = Nats_eio.Connection.stats connection in
+              equal int64 2L (Nats_eio.Connection.Stats.in_messages stats);
+              equal int64 35L (Nats_eio.Connection.Stats.in_bytes stats);
+              equal int64 3L (Nats_eio.Connection.Stats.out_messages stats);
+              equal int64 17L (Nats_eio.Connection.Stats.out_bytes stats);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "cancelling a request leaves cleanup non-blocking" (fun () ->
@@ -902,7 +941,7 @@ let () =
                 expect_ok (Nats_eio.Subscription.next subscription)
               in
               equal string "b" (Nats.Message.payload second.message);
-              match Nats_eio.Subscription.next subscription with
+              (match Nats_eio.Subscription.next subscription with
               | Error
                   (Nats_eio.Error.Slow_consumer
                      (Nats_eio.Error.Subscription { sid = 1 })) ->
@@ -915,7 +954,10 @@ let () =
               | Error error ->
                   fail
                     (Format.asprintf "expected slow consumer, got %a"
-                       Nats_eio.Error.pp error)));
+                       Nats_eio.Error.pp error));
+              let stats = Nats_eio.Connection.stats connection in
+              equal int64 3L (Nats_eio.Connection.Stats.in_messages stats);
+              equal int64 3L (Nats_eio.Connection.Stats.in_bytes stats)));
       test "subscription pending byte limits count queued payloads" (fun () ->
           let messages, messages_u = Eio.Promise.create () in
           let hold, hold_u = Eio.Promise.create () in
@@ -2200,6 +2242,10 @@ let () =
                   (contains_substring ~needle:"wrote \"PUB orders.created"
                      reconnect_trace)
               then fail "ordinary publish was not written after reconnect";
+              let stats = Nats_eio.Connection.stats connection in
+              equal int64 1L (Nats_eio.Connection.Stats.out_messages stats);
+              equal int64 16L (Nats_eio.Connection.Stats.out_bytes stats);
+              equal int64 1L (Nats_eio.Connection.Stats.reconnects stats);
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "bounds publishes accepted during reconnect" (fun () ->

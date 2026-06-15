@@ -1227,7 +1227,8 @@ Only pursue these after the core feature waves are stable and a concrete user
 needs them:
 
 - typed payload codec helpers and documentation examples;
-- adapter-level probes, metrics, and tracing hooks;
+- the dependency-free `Connection.stats` snapshot and lifecycle event
+  observation boundary; optional tracing bridges remain separate integrations;
 - a dedicated credential/NKey/JWT package if in-repo auth becomes too large;
 - alternative transports such as WebSocket (currently out of scope; revisit
   only if a concrete requirement justifies a separate adapter);

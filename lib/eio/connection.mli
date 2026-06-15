@@ -1,5 +1,37 @@
 (** A direct-style Core NATS connection running under Eio. *)
 
+module Stats : sig
+  (** Race-safe cumulative message and reconnect counters. *)
+
+  type t
+
+  val in_messages : t -> int64
+  (** [in_messages stats] is the number of application messages delivered to a
+      request or subscription during the connection lifetime. *)
+
+  val in_bytes : t -> int64
+  (** [in_bytes stats] is the number of bytes in delivered message bodies,
+      including encoded NATS header blocks, during the connection lifetime. *)
+
+  val out_messages : t -> int64
+  (** [out_messages stats] is the number of messages accepted by publish and
+      request operations, including messages queued during reconnect, during the
+      connection lifetime. *)
+
+  val out_bytes : t -> int64
+  (** [out_bytes stats] is the number of bytes in accepted message bodies,
+      including encoded NATS header blocks, during the connection lifetime. *)
+
+  val reconnects : t -> int64
+  (** [reconnects stats] is the number of successful reconnects after the
+      initial connection. It advances after the replacement CONNECT and
+      subscription replay have been written, before reconnect-buffer flushing
+      and lifecycle-event delivery. *)
+
+  val pp : Format.formatter -> t -> unit
+  (** [pp ppf stats] formats a diagnostic representation of [stats]. *)
+end
+
 module Config : sig
   type t
 
@@ -128,6 +160,11 @@ val now : t -> Mtime.t
 (** [now connection] reads the monotonic clock used by the connection for
     protocol deadlines. Use it when calculating deadlines for operations that
     combine several connection primitives. *)
+
+val stats : t -> Stats.t
+(** [stats connection] is a race-safe snapshot of the connection's cumulative
+    message and reconnect counters. Counter values are non-negative [int64]
+    values and saturate at [Int64.max_int]. *)
 
 val await_reconnect : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
 (** [await_reconnect ?timeout connection] waits for an in-progress transport

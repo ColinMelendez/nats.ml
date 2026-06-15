@@ -19,7 +19,7 @@ marked as covered.
 | --- | --- | --- |
 | Core NATS | Covered for the Eio model | Go-specific dialers, proxy knobs, diagnostics, and alternative transports are not part of the Eio surface |
 | Authentication and TLS | Covered | The callback/dialer breadth is narrower because credentials and TLS flows are explicit values |
-| Reconnect, discovery, drain | Covered | Lifecycle callbacks and connection statistics use Eio events/results rather than Go callback/stat APIs |
+| Reconnect, discovery, drain | Covered | Lifecycle callbacks use the Eio event stream; cumulative message and reconnect statistics are exposed as race-safe snapshots rather than mutable Go-style fields |
 | JetStream management | Covered for the material v1.52.0 surface | No material protocol gap; future server-only fields remain an acceptance concern |
 | Server-wide administration | Monitoring and selected controls covered by the optional `nats-eio-system` package | This privileged `$SYS` surface is separate from JetStream and outside the pinned Go JetStream package parity claim; claims, resolver, and user-management operations remain out of scope and explicit system-account authorization is required |
 | JetStream publishing | Covered, including async futures, retries, TTL/schedule headers, atomic and fast batches | Shared async acknowledgement multiplexing is a throughput optimization, not a capability gap |
@@ -61,10 +61,12 @@ wire capability.
 Alternative transports, including WebSocket, are intentionally out of scope
 for the current Eio-only SDK. The protocol core remains transport-neutral so a
 future adapter can be added without changing the protocol semantics. Go-only
-custom dialers, in-process servers, proxy headers, stale-connection tuning,
-connection statistics, and server-introspection helpers are also not mirrored;
-they are adapter or observability conveniences rather than required NATS wire
-operations.
+custom dialers, in-process servers, proxy headers, stale-connection tuning, and
+server-introspection helpers are also not mirrored; they are adapter
+conveniences rather than required NATS wire operations. Eio exposes the Go
+baseline message and reconnect counters through `Connection.stats` and the
+`Connection.Stats` accessors, while retaining direct-style ownership and
+immutable snapshots.
 
 ## JetStream management
 
@@ -235,8 +237,9 @@ surface:
 
 1. Extend the established live-server and Go-peer matrices to more cluster
    failure topologies and newer server/SDK releases.
-2. Add observability or dialer conveniences only when a concrete application
-   requires them; keep them outside the protocol waist.
+2. Extend the dependency-free observability boundary with optional tracing
+   bridges only when a concrete application requires them; keep them outside
+   the protocol waist.
 3. Re-audit future JetStream fields and server feature gates without silently
    changing the pinned parity claim.
 4. Keep alternative transports such as WebSocket out of this project scope

@@ -440,7 +440,10 @@ output. The pure machine reports server INFO updates, connected, lame-duck
 mode, server errors, protocol notices, flush completion, drain, and close. The
 Eio facade adds reconnect, disconnection, and slow-consumer events. An
 application message is delivered through a subscription, not hidden in a
-generic lifecycle callback.
+generic lifecycle callback. `Nats_eio.Connection.stats` provides a race-safe
+immutable snapshot of cumulative application-message and successful-reconnect
+counters. The snapshot boundary keeps metrics out of the pure protocol package
+and does not require a logging or tracing runtime.
 
 ### The pure protocol layer
 
@@ -897,8 +900,8 @@ mistaken for `flush` success.
 5. **Durable services.** Add KV, Object Store, and Services on the JetStream/
    Core primitives, with streaming and cancellation tests.
 6. **Ergonomic and operational polish.** Add codec helpers, structured event
-   observation, metrics hooks, WebSocket transport if justified, and optional
-   NKey/JWT helpers.
+   observation, a dependency-free statistics boundary, optional tracing
+   bridges, WebSocket transport if justified, and optional NKey/JWT helpers.
 
 The order intentionally gets Core NATS and the reconnect/drain invariants
 right before adding the JSON-heavy APIs. Every higher-level feature should
