@@ -4,11 +4,25 @@ set -eu
 script_dir=$(CDPATH=; export CDPATH; cd "$(dirname "$0")" && pwd)
 cd "$script_dir/.."
 
+runner_timeout=${NATS_TEST_RUN_TIMEOUT:-300}
+case "$runner_timeout" in
+  ""|*[!0-9]*)
+    echo "NATS_TEST_RUN_TIMEOUT must be a positive number of seconds" >&2
+    exit 1
+    ;;
+esac
+if [ "$runner_timeout" -lt 1 ]; then
+  echo "NATS_TEST_RUN_TIMEOUT must be a positive number of seconds" >&2
+  exit 1
+fi
+
 if [ "${NATS_INTEGRATION_SHELL-}" != 1 ]; then
   LC_ALL=C
   export LC_ALL
-  exec nix develop .#integration -c env \
-    NATS_INTEGRATION_SHELL=1 "$script_dir/runtest-interop.sh" "$@"
+  exec nix develop .#integration -c timeout --preserve-status \
+    --signal=TERM --kill-after=5s \
+    "${runner_timeout}s" env NATS_INTEGRATION_SHELL=1 \
+    "$script_dir/runtest-interop.sh" "$@"
 fi
 
 image=${NATS_SERVER_IMAGE:-nats:2.10.22}
@@ -83,7 +97,8 @@ cleanup() {
   artifact_save_image "$status" "$image" nats-server.image
   artifact_save_text "$status" run.txt \
     "runner=interop" "mode=$interop_mode" "image=$image" "tls=$tls_enabled" \
-    "auth_mode=$auth_mode" "negative=$negative_mode" "status=$status"
+    "auth_mode=$auth_mode" "negative=$negative_mode" "status=$status" \
+    "timeout_seconds=$runner_timeout"
   if [ -n "$container" ]; then
     docker rm -f "$container" >/dev/null 2>&1 || true
   fi

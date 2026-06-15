@@ -206,6 +206,9 @@ Completed slice: once its integration shell is active, the single-node
 JetStream interop runner now applies a bounded outer deadline, preserves
 failure diagnostics through `NATS_TEST_ARTIFACT_DIR`, and records non-secret
 run metadata before cleanup.
+The shared Core and Services interop runner now has the same bounded outer
+deadline, including the timeout in its failure metadata; this bounds the
+legacy cross-SDK path without changing the deterministic local suite.
 Its matrix wrapper also accepts the Object Store scenario explicitly. The
 remaining harness work is to apply the same guarantees to the other legacy
 interop runners, exercise concurrent-run and interruption behavior, and make
