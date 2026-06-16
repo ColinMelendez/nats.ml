@@ -261,8 +261,15 @@ releases. The authenticated fixed-node KV sweep adds another 45 passing cases
 across node-a, node-b, and node-c for the same five modes and three releases.
 The authenticated Object Store companion now passes its corresponding 45
 fixed-node cases across those modes, nodes, and releases. The remaining
-acceptance work is broader multi-node loss, changed-advertisement behavior,
-and management-operation failure coverage.
+acceptance work is broader multi-node loss matrices, changed-advertisement
+behavior, and management-operation failure coverage. The cluster harness now
+has a `multi-node` mode: it uses persistent per-node volumes, removes node-a,
+waits for both clients to reconnect, removes node-b, restores both members,
+and only releases the recovery barrier before the Go peer observes a current
+three-replica stream. This mode intentionally does not promise JetStream
+availability during the two-node quorum loss. The anonymous ordered, KV, and
+Object Store smoke cases pass on `nats:2.10.22`; the three-release and
+authenticated matrices remain pending.
 
 #### D. Make cross-SDK behavior the wire-level oracle
 
@@ -950,7 +957,10 @@ request/reply and subscription primitives.
   the fixed node-a/node-b/node-c sweep adds 45 passing cases on
   `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. The anonymous Ordered,
   KV, and Object Store cluster matrices each pass their expanded 15-case
-  fixed-node/leader/restart sweep. Multi-node-loss combinations remain
+  fixed-node/leader/restart sweep. The source runner now also exposes a
+  sequential two-node-loss mode with explicit no-quorum and full-replica
+  recovery barriers. Anonymous Ordered, KV, and Object Store smoke cases pass
+  on `nats:2.10.22`; the full release and authenticated matrices remain
   separate work.
 - Completed cross-SDK Push reconnect floor: a dedicated runner keeps the same
   Go and OCaml durable Push sessions across a persistent file-backed
@@ -1059,8 +1069,11 @@ semantics before calling the feature complete.
   and a three-node file-backed stream to verify cross-SDK content and metadata
   visibility, post-failure writes and reads, cleanup, fixed node-a/node-b/node-c
   loss, elected-leader loss, and durable seed restart. All 15 cases pass
-  across the three pinned releases. Multi-node, changed-advertisement, and broader
-  management-operation failure topologies remain acceptance work.
+  across the three pinned releases. The source runner now includes a sequential
+  two-node-loss mode, with anonymous Ordered, KV, and Object Store smoke cases
+  passing on `nats:2.10.22`; the full release evidence, changed-advertisement
+  coverage, and broader management-operation failure topologies remain
+  acceptance work.
   Its companion matrix wrapper repeats the 15 default cells and supports
   bounded image and failure-mode selection. Thin authenticated companion
   wrappers now select this Object Store scenario in the existing NKey/JWT/mTLS

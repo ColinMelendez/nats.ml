@@ -295,8 +295,10 @@ consumer sequence or recreates it from the next stream sequence if the
 one-replica consumer leader was also lost. Consumer identity is therefore not
 an invariant of endpoint or stream-leader recovery. The authenticated matrix
 covers NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS under both failures on
-`nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. Additional failure modes
-remain final-acceptance work.
+`nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. Its sequential
+two-node-loss mode also passes anonymous Ordered, KV, and Object Store smoke
+cases on `nats:2.10.22`; broader release, credential, changed-advertisement,
+and management-operation evidence remains final-acceptance work.
 
 Key-Value exposes this state machine through a separate
 `Key_value.Ordered_watch` mode. It retains the ordinary watch's typed entry
@@ -873,8 +875,11 @@ through individual helper functions:
   three pinned releases. The dedicated Object Store interop matrix now covers its
   single-server Go-peer contract in all six anonymous, token, and
   username/password plaintext/TLS modes across the three pinned releases.
-  Broader multi-node, changed-advertisement, and failure-injection matrices
-  remain later work. The dedicated Push
+  The cluster runner now exposes a sequential two-node-loss mode with explicit
+  no-quorum and full-replica barriers; anonymous smoke cases pass on
+  `nats:2.10.22`, while full release evidence and the broader
+  changed-advertisement and management-operation failure matrices remain later
+  work. The dedicated Push
   reconnect runner checks durable consumer recovery across a persistent server
   restart for the same five modes and all three pinned releases.
 - cross-check observable behavior with NATS by Example and at least one

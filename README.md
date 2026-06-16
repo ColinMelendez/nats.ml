@@ -324,18 +324,28 @@ remove that specific member. These fixed-node modes exercise recovery from
 the seed and from each discovered peer; `node-a` is equivalent to the older
 `seed` spelling. They deliberately use the non-restart path, so the permanent
 loss of one replica does not claim full three-replica quorum.
+Set `NATS_TEST_JS_CLUSTER_FAILURE_MODE=multi-node` to use persistent per-node
+volumes, lose node-a, wait for both clients to reconnect, lose node-b, and
+restart both failed members. The runner does not claim JetStream availability
+while two of three replicas are down; it signals recovery only after all three
+servers are ready, and the Go peer then requires the replicated stream to be
+current before post-recovery delivery. The anonymous ordered, KV, and Object
+Store cases pass on `nats:2.10.22`; the three-release sweep and authenticated
+multi-node cases remain pending.
 The companion `./scripts/runtest-interop-jetstream-cluster-matrix.sh` runs the
-node-a, node-b, node-c, leader, and restart modes over the three pinned server
-images by default; `seed` remains accepted as an alias for node-a. Set
+node-a, node-b, node-c, leader, restart, and multi-node modes over the three
+pinned server images by default; `seed` remains accepted as an alias for
+node-a. Set
 `NATS_SERVER_IMAGES` or `NATS_INTEROP_JETSTREAM_CLUSTER_MATRIX_MODES` to select
-a bounded subset. Its 15-case anonymous plaintext sweep passes on
+a bounded subset. Its existing 15-case anonymous plaintext sweep passes on
 `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. The authenticated
 companion `./scripts/runtest-interop-auth-jetstream-cluster-matrix.sh` accepts
-the same five failure modes across the five NKey/JWT/TLS modes. Its new
+the same six failure modes across the five NKey/JWT/TLS modes. Its new
 fixed-node Ordered sweep passes all 45 node-a/node-b/node-c cases across the
 same three pinned releases; the earlier seed/leader/restart sweep remains a
-separate 45-case baseline. Broader cluster-failure matrices remain separate
-work. The base cluster runner also
+separate 45-case baseline. The anonymous multi-node mode has a passing
+`nats:2.10.22` smoke case for each JetStream scenario; authenticated
+multi-node evidence remains pending. The base cluster runner also
 accepts `NATS_TEST_TOKEN` or paired `NATS_TEST_USER`/`NATS_TEST_PASS` values,
 with `NATS_TEST_TLS=1` for their server-required TLS variants; the companion
 matrix intentionally focuses on generated NKey/JWT/mTLS material. The optional
@@ -366,18 +376,21 @@ and sealing. Its six-mode single-server authentication/TLS matrix passes all
 ordered-watch recovery after seed loss, elected-leader loss, and durable seed
 restart in anonymous plaintext mode. Its expanded matrix passes all 15
 node-a/node-b/node-c, leader, and restart cases across the three pinned
-releases. Broader failure topologies remain separate acceptance work for KV
-and Object Store cluster behavior.
+releases. The anonymous multi-node KV smoke passes on `nats:2.10.22`; the
+broader three-release and authenticated multi-node matrices remain separate
+acceptance work for KV and Object Store cluster behavior.
 The authenticated KV companion wrappers
 `./scripts/runtest-interop-auth-key-value-cluster.sh` and
 `./scripts/runtest-interop-auth-key-value-cluster-matrix.sh` now route the five
-generated NKey/JWT/TLS modes through node-a, node-b, node-c, leader, and
-restart failures. The NKey seed smoke and isolated JWT restart cases pass. The
+generated NKey/JWT/TLS modes through node-a, node-b, node-c, leader, restart,
+and multi-node failures. The NKey seed smoke and isolated JWT restart cases
+pass. The
 full 45-cell seed/leader/restart KV sweep passes across all three pinned
 releases under the owned `nats-tests` Colima profile, including the previously
 resource-sensitive 2.12.15 JWT restart case. Authenticated fixed-node KV
 coverage adds another 45 passing cases across node-a, node-b, and node-c for
-the same five modes and three releases. The dedicated
+the same five modes and three releases; authenticated multi-node evidence is
+still pending. The dedicated
 `./scripts/runtest-interop-object-store-cluster.sh`
 runner covers replicated Object Store content, metadata, cross-SDK writes and
 reads, cleanup, seed loss, elected-leader loss, and durable seed restart in
@@ -385,13 +398,16 @@ anonymous plaintext mode. Its expanded matrix passes all 15 node-a/node-b,
 node-c, leader, and restart cases across the three pinned releases;
 the companion matrix repeats those cases by default and accepts
 `NATS_SERVER_IMAGES` or `NATS_INTEROP_OBJECT_STORE_CLUSTER_MODES` for a bounded
-sweep. Multi-node and changed-advertisement scenarios remain separate
-acceptance work. The authenticated companion wrappers reuse the
+sweep. The default matrix also includes the multi-node mode, while
+changed-advertisement scenarios remain separate acceptance work. The
+authenticated companion wrappers reuse the
 NKey/JWT/mTLS cluster matrix and select the same Object Store scenario; their
 five credential/TLS modes across the original seed/leader/restart failures and
 three releases have passed all 45 cells (15 per release). Authenticated
 fixed-node Object Store coverage adds another 45 passing cases across
-node-a, node-b, and node-c for the same five modes and three releases.
+node-a, node-b, and node-c for the same five modes and three releases. The
+anonymous multi-node Object Store smoke passes on `nats:2.10.22`;
+authenticated multi-node evidence is still pending.
 The separate JetStream reconnect runner uses a file-backed stream and durable
 Push consumers on one persistent server container, kills and restarts that
 container, and verifies both the OCaml and Go Push legs recover and exchange
