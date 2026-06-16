@@ -315,16 +315,24 @@ consumer, and delivery metadata in either case. Set
 `NATS_TEST_JS_CLUSTER_FAILURE_MODE=restart` to use run-unique Docker volumes,
 wait until both clients have failed over, restart the seed container, and
 require all three stream replicas to be current before post-restart delivery.
+Set `NATS_TEST_JS_CLUSTER_FAILURE_MODE=node-a`, `node-b`, or `node-c` to make
+the selected cluster member the initial endpoint for both clients and then
+remove that specific member. These fixed-node modes exercise recovery from
+the seed and from each discovered peer; `node-a` is equivalent to the older
+`seed` spelling. They deliberately use the non-restart path, so the permanent
+loss of one replica does not claim full three-replica quorum.
 The companion `./scripts/runtest-interop-jetstream-cluster-matrix.sh` runs the
-seed, leader, and restart modes over the three pinned server images by default;
-set
+node-a, node-b, node-c, leader, and restart modes over the three pinned server
+images by default; `seed` remains accepted as an alias for node-a. Set
 `NATS_SERVER_IMAGES` or `NATS_INTEROP_JETSTREAM_CLUSTER_MATRIX_MODES` to select
-a bounded subset. Its nine-case anonymous plaintext sweep passes on
+a bounded subset. Its 15-case anonymous plaintext sweep passes on
 `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. The authenticated
-companion `./scripts/runtest-interop-auth-jetstream-cluster-matrix.sh` runs
-the five NKey/JWT/TLS modes over seed, leader, and restart failures: all 45
-cross-SDK cases pass across the same three pinned releases. Broader
-cluster-failure matrices remain separate work. The base cluster runner also
+companion `./scripts/runtest-interop-auth-jetstream-cluster-matrix.sh` accepts
+the same five failure modes across the five NKey/JWT/TLS modes. Its new
+fixed-node Ordered sweep passes all 45 node-a/node-b/node-c cases across the
+same three pinned releases; the earlier seed/leader/restart sweep remains a
+separate 45-case baseline. Broader cluster-failure matrices remain separate
+work. The base cluster runner also
 accepts `NATS_TEST_TOKEN` or paired `NATS_TEST_USER`/`NATS_TEST_PASS` values,
 with `NATS_TEST_TLS=1` for their server-required TLS variants; the companion
 matrix intentionally focuses on generated NKey/JWT/mTLS material. The optional
@@ -353,29 +361,34 @@ and sealing. Its six-mode single-server authentication/TLS matrix passes all
 18 cases across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. The dedicated
 `./scripts/runtest-interop-key-value-cluster.sh` runner now covers replicated
 ordered-watch recovery after seed loss, elected-leader loss, and durable seed
-restart in anonymous plaintext mode. Broader authenticated or failure
-topologies remain separate acceptance work for KV and Object Store cluster
-behavior. Additional authenticated evidence and broader failure topologies
-remain separate acceptance work for the KV and Object Store cluster surfaces.
+restart in anonymous plaintext mode. Its expanded matrix passes all 15
+node-a/node-b/node-c, leader, and restart cases across the three pinned
+releases. Broader authenticated or failure topologies remain separate
+acceptance work for KV and Object Store cluster behavior. Additional
+authenticated evidence and broader failure topologies remain separate
+acceptance work for the KV and Object Store cluster surfaces.
 The authenticated KV companion wrappers
 `./scripts/runtest-interop-auth-key-value-cluster.sh` and
 `./scripts/runtest-interop-auth-key-value-cluster-matrix.sh` now route the five
-generated NKey/JWT/TLS modes through the same three failure modes. The NKey
-seed smoke and isolated JWT restart cases pass. The full 45-cell KV sweep now
-passes across all three pinned releases under the owned `nats-tests` Colima
-profile, including the previously resource-sensitive 2.12.15 JWT restart
-case. The dedicated
+generated NKey/JWT/TLS modes through node-a, node-b, node-c, leader, and
+restart failures. The NKey seed smoke and isolated JWT restart cases pass. The
+full 45-cell seed/leader/restart KV sweep passes across all three pinned
+releases under the owned `nats-tests` Colima profile, including the previously
+resource-sensitive 2.12.15 JWT restart case. Authenticated fixed-node KV
+evidence remains a tracked acceptance slice. The dedicated
 `./scripts/runtest-interop-object-store-cluster.sh`
 runner covers replicated Object Store content, metadata, cross-SDK writes and
 reads, cleanup, seed loss, elected-leader loss, and durable seed restart in
-anonymous plaintext mode. Its nine cases pass across the three pinned releases;
+anonymous plaintext mode. Its expanded matrix passes all 15 node-a/node-b,
+node-c, leader, and restart cases across the three pinned releases;
 the companion matrix repeats those cases by default and accepts
 `NATS_SERVER_IMAGES` or `NATS_INTEROP_OBJECT_STORE_CLUSTER_MODES` for a bounded
 sweep. Multi-node and changed-advertisement scenarios remain separate
 acceptance work. The authenticated companion wrappers reuse the
 NKey/JWT/mTLS cluster matrix and select the same Object Store scenario; their
-five credential/TLS modes across three failure modes and three releases have
-passed all 45 cells (15 per release).
+five credential/TLS modes across the original seed/leader/restart failures and
+three releases have passed all 45 cells (15 per release). Authenticated
+fixed-node Object Store evidence remains a tracked acceptance slice.
 The separate JetStream reconnect runner uses a file-backed stream and durable
 Push consumers on one persistent server container, kills and restarts that
 container, and verifies both the OCaml and Go Push legs recover and exchange

@@ -237,23 +237,30 @@ stream-leader loss, seed-node loss, and durable seed restart now have a
 45-case authenticated/TLS cross-SDK matrix over the three pinned releases,
 with the restart mode retaining run-unique per-node data volumes, waiting for
 both clients to fail over, and checking that all three stream replicas are
-current after the seed returns. The remaining cases are each-node loss where
-the replica count allows it, changed advertised client URLs, reconnect during
-management and delivery operations, consumer recreation under more failure
-modes, and multi-node loss. Keep the failure trigger synchronized with a
-flushed, observable barrier so a test failure identifies the lost invariant
-rather than a startup race.
+current after the seed returns. The runner now also has explicit node-a,
+node-b, and node-c loss modes. The anonymous Ordered, KV, and Object Store
+matrices each pass 15 cases across the three releases, and the authenticated
+Ordered fixed-node sweep passes 45 cases across the five credential/TLS modes
+and three releases. The remaining cases are changed advertised client URLs,
+reconnect during management and delivery operations, consumer recreation
+under more failure modes, and multi-node loss. Keep the failure trigger
+synchronized with a flushed, observable barrier so a test failure identifies
+the lost invariant rather than a startup race.
 The anonymous Object Store cluster runner separately covers replicated content
-and metadata recovery after seed loss, elected-leader loss, and durable seed
-restart; all nine cases pass across the three pinned releases. Authenticated,
-multi-node, changed-advertisement, and broader management-operation failure
-topologies remain in this workstream.
+and metadata recovery after fixed node-a/node-b/node-c loss, elected-leader
+loss, and durable seed restart; all 15 cases pass across the three pinned
+releases. Authenticated multi-node, changed-advertisement, and broader
+management-operation failure topologies remain in this workstream.
 The authenticated KV companion wrappers now route the same five generated
 NKey/JWT/TLS modes through the three failure modes and three pinned releases.
 The full 45-cell KV sweep now passes under the owned `nats-tests` Colima
 profile, including the previously resource-sensitive nats-server 2.12.15 JWT
-restart case. The remaining acceptance work is broader multi-node loss,
-changed-advertisement behavior, and management-operation failure coverage.
+restart case. The anonymous KV matrix now also passes all 15 explicit
+node-a/node-b/node-c, leader, and restart cases across the three pinned
+releases.
+The remaining acceptance work is authenticated fixed-node evidence for KV and
+Object Store, broader multi-node loss, changed-advertisement behavior, and
+management-operation failure coverage.
 
 #### D. Make cross-SDK behavior the wire-level oracle
 
@@ -927,17 +934,22 @@ request/reply and subscription primitives.
 - Completed cross-SDK Ordered reconnect slice: a separate Nix-built official Go
   `nats.go` peer and OCaml client share a file-backed, three-replica stream in a
   three-node cluster. Matching and non-matching baseline messages establish
-  filtered stream and consumer sequences; after seed-node loss, elected
-  stream-leader loss, or durable seed restart, both clients reconnect through
-  surviving peer URLs and validate Ordered progress. Restart mode uses
+  filtered stream and consumer sequences; after fixed node-a/node-b/node-c
+  loss, elected stream-leader loss, or durable seed restart, both clients
+  reconnect through surviving peer URLs and validate Ordered progress.
+  Restart mode uses
   run-unique per-node data volumes, waits for both clients to report failover,
   and requires the returned seed to rejoin with all three replicas current
   before post-recovery delivery. A one-replica consumer may either retain its
   identity and continue at consumer sequence 3 or be recreated at sequence 1
   when its consumer leader was also lost. The authenticated matrix covers
   NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS under all three failure
-  modes: all 45 cases pass on `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`.
-  Multi-node-loss combinations remain separate work.
+  modes: the earlier seed/leader/restart baseline has 45 passing cases, and
+  the fixed node-a/node-b/node-c sweep adds 45 passing cases on
+  `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. The anonymous Ordered,
+  KV, and Object Store cluster matrices each pass their expanded 15-case
+  fixed-node/leader/restart sweep. Multi-node-loss combinations remain
+  separate work.
 - Completed cross-SDK Push reconnect floor: a dedicated runner keeps the same
   Go and OCaml durable Push sessions across a persistent file-backed
   nats-server restart, checks recovery barriers and post-restart JetStream
@@ -1012,13 +1024,16 @@ semantics before calling the feature complete.
   `runtest-interop-key-value-cluster.sh` runner uses the official Go
   `jetstream.KeyValue` API and a three-node file-backed stream to verify the
   retained snapshot marker, revision continuity, and ordered-watch recovery
-  after seed loss, elected-leader loss, and durable seed restart. Broader
-  server/version combinations beyond the pinned auth/TLS matrix remain.
+  after fixed node-a/node-b/node-c loss, elected-leader loss, and durable
+  seed restart. Its anonymous matrix passes all 15 cases across the three
+  pinned releases. Broader server/version combinations and authenticated
+  fixed-node evidence remain.
 - Added the authenticated KV cluster wrappers, reusing the established
   JetStream cluster matrix for NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS
   across seed, leader, and restart failures. The full 45-cell matrix now passes
   across the three pinned releases under the owned `nats-tests` Colima profile;
-  its remaining gap is broader multi-node and changed-advertisement evidence.
+  its remaining gap is fixed-node evidence for KV, broader multi-node, and
+  changed-advertisement evidence.
 
 ### Workstream 5B — Object Store
 
@@ -1038,11 +1053,11 @@ semantics before calling the feature complete.
 - Completed anonymous live cluster acceptance: the dedicated
   `runtest-interop-object-store-cluster.sh` runner uses the official Go peer
   and a three-node file-backed stream to verify cross-SDK content and metadata
-  visibility, post-failure writes and reads, cleanup, seed loss, elected-leader
-  loss, and durable seed restart. All nine cases pass across the three pinned
-  releases. Multi-node, changed-advertisement, and broader
+  visibility, post-failure writes and reads, cleanup, fixed node-a/node-b/node-c
+  loss, elected-leader loss, and durable seed restart. All 15 cases pass
+  across the three pinned releases. Multi-node, changed-advertisement, and broader
   management-operation failure topologies remain acceptance work.
-  Its companion matrix wrapper repeats the nine default cells and supports
+  Its companion matrix wrapper repeats the 15 default cells and supports
   bounded image and failure-mode selection. Thin authenticated companion
   wrappers now select this Object Store scenario in the existing NKey/JWT/mTLS
   cluster matrix; the five credential/TLS modes across seed, leader, and
@@ -1074,8 +1089,9 @@ semantics before calling the feature complete.
   official Go peer. Its six-mode single-server authentication/TLS matrix
   passes all 18 cases across the three pinned releases.
 - The dedicated Object Store cluster runner covers the same cross-SDK content
-  and metadata contracts through seed loss, elected-leader loss, and durable
-  seed restart; all nine anonymous cases pass across the three pinned releases.
+  and metadata contracts through fixed node-a/node-b/node-c loss, elected-leader
+  loss, and durable seed restart; all 15 anonymous cases pass across the three
+  pinned releases.
 - Large Object Store transfer, metadata, replacement/deletion ordering,
   interrupted-transfer cleanup, listing/watch boundaries, links, rename,
   sealing, and bucket configuration updates are covered locally; broader
@@ -1101,10 +1117,10 @@ revision semantics before documenting them as stable.
   cleanup, and replacement cleanup for prior tombstone NUIDs are covered by
   focused mock-transport regressions. File-transfer partial-result behavior is
   now explicit in the public documentation.
-- Remaining before a release claim: broader multi-node KV/Object Store failure
-  evidence, including each-node loss, changed advertisements, and management
-  operations during failure, plus the final acceptance evidence described in
-  the production-readiness program.
+- Remaining before a release claim: authenticated KV/Object Store fixed-node
+  evidence, broader multi-node failure evidence, changed advertisements, and
+  management operations during failure, plus the final acceptance evidence
+  described in the production-readiness program.
 
 ## Phase 6 — Services over Core NATS
 
