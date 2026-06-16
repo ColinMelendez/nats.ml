@@ -288,6 +288,26 @@ func runMode(config options) error {
 			return fmt.Errorf("stream is required in jetstream-ordered-reconnect mode")
 		}
 		return runJetStreamOrderedReconnectPeer(config)
+	case "jetstream-ordered-management-failure":
+		if config.signal == "" {
+			return fmt.Errorf("signal-file is required in jetstream-ordered-management-failure mode")
+		}
+		if config.stream == "" {
+			return fmt.Errorf("stream is required in jetstream-ordered-management-failure mode")
+		}
+		config.managementFailure = true
+		return runJetStreamOrderedReconnectPeer(config)
+	case "jetstream-ordered-changed-advertisement":
+		if config.signal == "" {
+			return fmt.Errorf("signal-file is required in jetstream-ordered-changed-advertisement mode")
+		}
+		if config.stream == "" {
+			return fmt.Errorf("stream is required in jetstream-ordered-changed-advertisement mode")
+		}
+		if config.changedAdvertisedURL == "" {
+			return fmt.Errorf("changed-advertised-url is required in jetstream-ordered-changed-advertisement mode")
+		}
+		return runJetStreamOrderedReconnectPeer(config)
 	case "jetstream-ordered-restart":
 		if config.signal == "" {
 			return fmt.Errorf("signal-file is required in jetstream-ordered-restart mode")

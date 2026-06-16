@@ -32,6 +32,37 @@ func waitForJetStreamLeaderKillSignal(signal string) error {
 	return fmt.Errorf("timed out waiting for leader kill signal %s", path)
 }
 
+func waitForJetStreamDisconnectSignal(disconnected <-chan struct{}) error {
+	timer := time.NewTimer(orderedReconnectWait)
+	defer timer.Stop()
+	select {
+	case <-disconnected:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("timed out waiting for JetStream connection disconnect")
+	}
+}
+
+func waitForJetStreamSignalFile(signal, suffix, label string) error {
+	deadline := time.Now().Add(orderedReconnectWait)
+	path := signal + suffix
+	failurePath := signal + ".failed"
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(failurePath); err == nil {
+			return fmt.Errorf("%s failed (see %s)", label, failurePath)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("check %s failure: %w", label, err)
+		}
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("check %s signal: %w", label, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out waiting for %s signal %s", label, path)
+}
+
 func waitForJetStreamSurvivorFile(signal, path string) (string, error) {
 	deadline := time.Now().Add(orderedReconnectWait)
 	failurePath := signal + ".failed"
@@ -223,6 +254,7 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 		return err
 	}
 	reconnected := make(chan struct{}, 1)
+	disconnected := make(chan struct{}, 1)
 	connectionOptions := []nats.Option{
 		nats.Name("ocaml-nats JetStream ordered reconnect interop peer"),
 		nats.DontRandomize(),
@@ -231,6 +263,12 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 		nats.ReconnectHandler(func(*nats.Conn) {
 			select {
 			case reconnected <- struct{}{}:
+			default:
+			}
+		}),
+		nats.DisconnectHandler(func(*nats.Conn) {
+			select {
+			case disconnected <- struct{}{}:
 			default:
 			}
 		}),
@@ -416,6 +454,27 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	if err := baselineMessage.Respond([]byte("go-baseline-ready")); err != nil {
 		return fmt.Errorf("respond baseline completion: %w", err)
 	}
+	if config.changedAdvertisedURL != "" || config.managementFailure {
+		if err := waitForJetStreamDisconnectSignal(disconnected); err != nil {
+			return err
+		}
+		if err := os.WriteFile(config.signal+".go-disconnected", []byte("ready\n"), 0600); err != nil {
+			return fmt.Errorf("write Go disconnect barrier: %w", err)
+		}
+	}
+	if config.managementFailure {
+		if err := waitForJetStreamSignalFile(config.signal, ".management-window-ready", "management failure window"); err != nil {
+			return err
+		}
+		if _, err := jetstream.StreamInfo(config.stream, nats.MaxWait(2*time.Second)); err == nil {
+			return fmt.Errorf("JetStream management request unexpectedly succeeded while disconnected")
+		} else if err := os.WriteFile(config.signal+".go-management-failed", []byte("ready\n"), 0600); err != nil {
+			return fmt.Errorf("write Go management failure barrier: %w", err)
+		}
+		if err := waitForJetStreamSignalFile(config.signal, ".management-recovered", "management recovery"); err != nil {
+			return err
+		}
+	}
 
 	if err := waitForJetStreamReconnectSignal(config.signal); err != nil {
 		return err
@@ -452,7 +511,10 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 			time.Sleep(3 * time.Second)
 		}
 	} else if err := waitJetStreamReconnect(reconnected); err != nil {
-		return err
+		return fmt.Errorf(
+			"first JetStream reconnect: %w (servers=%v discovered=%v status=%v connected=%q last-error=%v)",
+			err, connection.Servers(), connection.DiscoveredServers(), connection.Status(),
+			connection.ConnectedUrl(), connection.LastError())
 	} else {
 		recoveryDeadline = time.Now().Add(orderedReconnectWait)
 		if config.requireReplicatedStream || config.multiNodeLoss {
@@ -466,6 +528,37 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 			}
 			recoveryDeadline = time.Now().Add(orderedReconnectWait)
 		}
+		if config.changedAdvertisedURL != "" {
+			if err := waitForJetStreamSignalFile(config.signal, ".changed-replacement-ready", "changed-advertisement replacement"); err != nil {
+				return err
+			}
+			found := false
+			for _, server := range connection.DiscoveredServers() {
+				if server == config.changedAdvertisedURL {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("discovered server list did not contain changed advertised URL %q", config.changedAdvertisedURL)
+			}
+			if err := os.WriteFile(config.signal+".go-advertised", []byte("ready\n"), 0600); err != nil {
+				return fmt.Errorf("write changed advertisement barrier: %w", err)
+			}
+			if err := waitJetStreamReconnect(reconnected); err != nil {
+				return fmt.Errorf(
+					"second JetStream reconnect: %w (servers=%v discovered=%v status=%v connected=%q last-error=%v)",
+					err, connection.Servers(), connection.DiscoveredServers(), connection.Status(),
+					connection.ConnectedUrl(), connection.LastError())
+			}
+			if err := os.WriteFile(config.signal+".go-second-reconnected", []byte("ready\n"), 0600); err != nil {
+				return fmt.Errorf("write second reconnect barrier: %w", err)
+			}
+			if err := waitForJetStreamSignalFile(config.signal, ".changed-recovered", "changed-advertisement recovery"); err != nil {
+				return err
+			}
+			recoveryDeadline = time.Now().Add(orderedReconnectWait)
+		}
 	}
 	if err != nil {
 		if config.leader != "" {
@@ -474,7 +567,7 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 		return err
 	}
 	if config.leader == "" {
-		if config.requireReplicatedStream || config.multiNodeLoss {
+		if config.requireReplicatedStream || config.multiNodeLoss || config.changedAdvertisedURL != "" {
 			// A restarted node must rejoin the file-backed stream with current
 			// replicas before the peer declares recovery complete.
 			streamInfo, err = retryJetStreamStreamQuorum(jetstream, config.stream, 3, 3, recoveryDeadline)

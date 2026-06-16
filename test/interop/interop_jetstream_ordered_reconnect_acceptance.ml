@@ -27,12 +27,15 @@ let leader_failover () =
   | Some "node-b"
   | Some "node-c"
   | Some "restart"
-  | Some "multi-node" -> false
+  | Some "multi-node"
+  | Some "management"
+  | Some "changed-advertised" -> false
   | Some "leader" -> true
   | Some value ->
       failf
         "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, node-a, node-b, \
-         node-c, leader, restart, or multi-node, got %S"
+         node-c, leader, restart, multi-node, management, or \
+         changed-advertised, got %S"
         value
 
 let multi_node_loss () =
@@ -44,11 +47,52 @@ let multi_node_loss () =
   | Some "node-b"
   | Some "node-c"
   | Some "leader"
-  | Some "restart" -> false
+  | Some "restart"
+  | Some "management"
+  | Some "changed-advertised" -> false
   | Some value ->
       failf
         "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, node-a, node-b, \
-         node-c, leader, restart, or multi-node, got %S"
+         node-c, leader, restart, multi-node, management, or \
+         changed-advertised, got %S"
+        value
+
+let management_failure () =
+  match Sys.getenv_opt "NATS_TEST_JS_CLUSTER_FAILURE_MODE" with
+  | Some "management" -> true
+  | None
+  | Some "seed"
+  | Some "node-a"
+  | Some "node-b"
+  | Some "node-c"
+  | Some "leader"
+  | Some "restart"
+  | Some "multi-node" -> false
+  | Some "changed-advertised" -> false
+  | Some value ->
+      failf
+        "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, node-a, node-b, \
+         node-c, leader, restart, multi-node, management, or \
+         changed-advertised, got %S"
+        value
+
+let changed_advertised () =
+  match Sys.getenv_opt "NATS_TEST_JS_CLUSTER_FAILURE_MODE" with
+  | Some "changed-advertised" -> true
+  | None
+  | Some "seed"
+  | Some "node-a"
+  | Some "node-b"
+  | Some "node-c"
+  | Some "leader"
+  | Some "restart"
+  | Some "multi-node"
+  | Some "management" -> false
+  | Some value ->
+      failf
+        "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, node-a, node-b, \
+         node-c, leader, restart, multi-node, management, or \
+         changed-advertised, got %S"
         value
 
 let endpoint () =
@@ -136,6 +180,29 @@ let expect_reconnected ~clock ~timeout ~failure_file events =
        (function Nats_eio.Event.Reconnected -> true | _ -> false)
        events)
 
+let expect_reconnected_server_info ~clock ~timeout ~failure_file ~names events =
+  let remaining = ref 48 in
+  let info = ref None in
+  let reconnected = ref false in
+  while !remaining > 0 && (Option.is_none !info || not !reconnected) do
+    let event = next_event ~clock ~timeout ~failure_file events in
+    (match event with
+    | Nats_eio.Event.Core (Nats.Event.Info value) ->
+        if
+          Option.fold ~none:false
+            ~some:(fun name -> List.exists (String.equal name) names)
+            (Nats.Info.server_name value)
+        then info := Some value
+    | Nats_eio.Event.Reconnected -> reconnected := true
+    | _ -> ());
+    if Option.is_none !info || not !reconnected then decr remaining
+  done;
+  match (!info, !reconnected) with
+  | Some value, true -> value
+  | _ ->
+      failf "timed out waiting for reconnect and INFO from %s"
+        (String.concat "/" names)
+
 let wait_for_file ~clock ~timeout ~failure_file ~label path =
   let deadline =
     match Mtime.add_span (Eio.Time.Mono.now clock) timeout with
@@ -149,6 +216,26 @@ let wait_for_file ~clock ~timeout ~failure_file ~label path =
     else if Sys.file_exists path then found := true
     else if Mtime.compare (Eio.Time.Mono.now clock) deadline >= 0 then
       failf "timed out waiting for %s" label
+    else Eio.Time.Mono.sleep clock 0.05
+  done
+
+let wait_for_discovered_endpoint ~clock ~timeout ~failure_file connection endpoint =
+  let deadline =
+    match Mtime.add_span (Eio.Time.Mono.now clock) timeout with
+    | Some value -> value
+    | None -> Mtime.max_stamp
+  in
+  let found = ref false in
+  while not !found do
+    if Sys.file_exists failure_file then
+      failf "cluster watcher failed (see %s)" failure_file
+    else if
+      List.exists
+        (Nats.Endpoint.equal endpoint)
+        (Nats_eio.Connection.discovered_servers connection)
+    then found := true
+    else if Mtime.compare (Eio.Time.Mono.now clock) deadline >= 0 then
+      failf "timed out waiting for discovered endpoint %a" Nats.Endpoint.pp endpoint
     else Eio.Time.Mono.sleep clock 0.05
   done
 
@@ -248,6 +335,8 @@ let run env =
   let signal = required "NATS_TEST_INTEROP_SIGNAL" in
   let leader_failover = leader_failover () in
   let multi_node_loss = multi_node_loss () in
+  let management_failure = management_failure () in
+  let changed_advertised = changed_advertised () in
   let restart =
     match Sys.getenv_opt "NATS_TEST_JS_CLUSTER_FAILURE_MODE" with
     | Some "restart" -> true
@@ -261,6 +350,12 @@ let run env =
     |> List.filter (fun value -> not (String.equal value ""))
   in
   let discovered = string_list "NATS_TEST_JS_CLUSTER_DISCOVERED" in
+  let changed_name, changed_url =
+    if changed_advertised then
+      (required "NATS_TEST_JS_CLUSTER_CHANGED_NAME",
+       required "NATS_TEST_JS_CLUSTER_CHANGED_URL")
+    else ("", "")
+  in
   if List.length recovered_names <> 2 then
     failf "NATS_TEST_JS_CLUSTER_RECOVERED_NAMES must contain two names";
   if List.length discovered <> 2 then
@@ -363,12 +458,34 @@ let run env =
           else (
             expect_disconnected ~clock ~timeout:reconnect_timeout ~failure_file
               events;
+            if changed_advertised || management_failure then
+              touch (signal ^ ".ocaml-disconnected");
+            if management_failure then (
+              wait_for_file ~clock ~timeout:reconnect_timeout ~failure_file
+                ~label:"management failure window"
+                (signal ^ ".management-window-ready");
+              match
+                Nats_eio.Jetstream.Stream.info stream
+              with
+              | Ok _ ->
+                  failf
+                    "JetStream management request unexpectedly succeeded while disconnected"
+              | Error _ -> touch (signal ^ ".ocaml-management-failed");
+              wait_for_file ~clock ~timeout:reconnect_timeout ~failure_file
+                ~label:"management recovery" (signal ^ ".management-recovered"));
             let recovered_info =
-              expect_server_info ~clock ~timeout:reconnect_timeout ~failure_file
-                ~names:recovered_names events
+              if changed_advertised then (
+                expect_reconnected_server_info ~clock ~timeout:reconnect_timeout
+                  ~failure_file ~names:recovered_names events)
+              else (
+                let info =
+                  expect_server_info ~clock ~timeout:reconnect_timeout
+                    ~failure_file ~names:recovered_names events
+                in
+                expect_reconnected ~clock ~timeout:reconnect_timeout
+                  ~failure_file events;
+                info)
             in
-            expect_reconnected ~clock ~timeout:reconnect_timeout ~failure_file
-              events;
             (match Nats.Info.server_name recovered_info with
             | Some value when not (String.equal value initial_name) -> ()
             | Some value -> failf "reconnected to killed server %S" value
@@ -377,7 +494,32 @@ let run env =
               touch (signal ^ ".ocaml-reconnected");
               if multi_node_loss then
                 wait_for_file ~clock ~timeout:reconnect_timeout ~failure_file
-                  ~label:"multi-node recovery" (signal ^ ".multi-node-recovered")));
+                  ~label:"multi-node recovery" (signal ^ ".multi-node-recovered"));
+            if changed_advertised then (
+              wait_for_file ~clock ~timeout:reconnect_timeout ~failure_file
+                ~label:"changed-advertisement replacement"
+                (signal ^ ".changed-replacement-ready");
+              let changed_endpoint =
+                match Nats.Endpoint.of_connect_url changed_url with
+                | Ok value -> value
+                | Error error ->
+                    failf "invalid changed advertised endpoint %S: %a" changed_url
+                      Nats.Endpoint.pp_error error
+              in
+              wait_for_discovered_endpoint ~clock ~timeout:reconnect_timeout
+                ~failure_file connection changed_endpoint;
+              touch (signal ^ ".ocaml-advertised");
+              expect_disconnected ~clock ~timeout:reconnect_timeout ~failure_file
+                events;
+              ignore
+                (expect_server_info ~clock ~timeout:reconnect_timeout
+                   ~failure_file ~names:[ changed_name ] events);
+              expect_reconnected ~clock ~timeout:reconnect_timeout ~failure_file
+                events;
+              touch (signal ^ ".ocaml-second-reconnected");
+              wait_for_file ~clock ~timeout:reconnect_timeout ~failure_file
+                ~label:"changed-advertisement recovery"
+                (signal ^ ".changed-recovered")));
           let after_result, after_result_u = Eio.Promise.create () in
           Eio.Fiber.fork ~sw (fun () ->
               Eio.Promise.resolve after_result_u

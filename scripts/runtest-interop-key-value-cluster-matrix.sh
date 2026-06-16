@@ -8,15 +8,15 @@ if [ "${NATS_INTEGRATION_SHELL-}" != 1 ]; then
   LC_ALL=C
   export LC_ALL
   exec nix develop .#integration -c env \
-    NATS_INTEGRATION_SHELL=1 "$script_dir/runtest-interop-jetstream-cluster-matrix.sh" "$@"
+    NATS_INTEGRATION_SHELL=1 "$script_dir/runtest-interop-key-value-cluster-matrix.sh" "$@"
 fi
 
 images=${NATS_SERVER_IMAGES:-nats:2.10.22,nats:2.12.15,nats:2.14.5}
-modes=${NATS_INTEROP_JETSTREAM_CLUSTER_MATRIX_MODES:-node-a,node-b,node-c,leader,restart,multi-node,management,changed-advertised}
+modes=${NATS_INTEROP_KEY_VALUE_CLUSTER_MODES:-node-a,node-b,node-c,leader,restart,multi-node}
 
 case "$modes" in
   ""|,*|*,|*,,*)
-    echo "NATS_INTEROP_JETSTREAM_CLUSTER_MATRIX_MODES must contain node-a, node-b, node-c, leader, restart, multi-node, management, and/or changed-advertised (seed is an alias for node-a) with no empty entries" >&2
+    echo "NATS_INTEROP_KEY_VALUE_CLUSTER_MODES must contain node-a, node-b, node-c, leader, restart, and/or multi-node (seed is an alias for node-a) with no empty entries" >&2
     exit 1
     ;;
 esac
@@ -28,17 +28,17 @@ set -- $modes
 IFS=$old_ifs
 
 if [ "$#" -eq 0 ]; then
-  echo "NATS_INTEROP_JETSTREAM_CLUSTER_MATRIX_MODES must contain at least one mode" >&2
+  echo "NATS_INTEROP_KEY_VALUE_CLUSTER_MODES must contain at least one mode" >&2
   exit 1
 fi
 
 mode_list=
 for mode do
   case "$mode" in
-    seed|node-a|node-b|node-c|leader|restart|multi-node|management|changed-advertised)
+    seed|node-a|node-b|node-c|leader|restart|multi-node)
       ;;
     *)
-      echo "unknown JetStream cluster interop matrix mode: $mode (expected node-a, node-b, node-c, leader, restart, multi-node, management, or changed-advertised)" >&2
+      echo "unknown Key-Value cluster interop mode: $mode (expected node-a, node-b, node-c, leader, restart, or multi-node)" >&2
       exit 1
       ;;
   esac
@@ -46,9 +46,7 @@ for mode do
 done
 
 old_ifs=$IFS
-IFS=', 	'
-# The script has no positional interface; use positional parameters only as a
-# compact, POSIX-compatible way to split the comma-separated image list.
+IFS=', '
 # shellcheck disable=SC2086
 set -- $images
 IFS=$old_ifs
@@ -65,14 +63,14 @@ run_case() {
     unset NATS_TEST_TOKEN NATS_TEST_USER NATS_TEST_PASS NATS_TEST_TLS_CA
     NATS_TEST_TLS=0 NATS_SERVER_IMAGE="$run_image" \
       NATS_TEST_JS_CLUSTER_FAILURE_MODE="$run_mode" \
-      ./scripts/runtest-interop-jetstream-cluster.sh
+      ./scripts/runtest-interop-key-value-cluster.sh
   )
 }
 
 status=0
 case_number=0
-echo "JetStream cluster interop matrix images: $*"
-echo "JetStream cluster interop matrix modes: $mode_list"
+echo "Key-Value cluster interop matrix images: $*"
+echo "Key-Value cluster interop matrix modes: $mode_list"
 for image do
   if [ -z "$image" ]; then
     echo "NATS_SERVER_IMAGES contains an empty image name" >&2
@@ -80,10 +78,10 @@ for image do
     continue
   fi
   if ! docker image inspect "$image" >/dev/null 2>&1; then
-    echo "JetStream cluster interop matrix: pulling $image"
+    echo "Key-Value cluster interop matrix: pulling $image"
     if ! docker pull "$image"; then
       status=1
-      echo "JetStream cluster interop matrix could not pull image: $image" >&2
+      echo "Key-Value cluster interop matrix could not pull image: $image" >&2
       continue
     fi
   fi
@@ -91,12 +89,12 @@ for image do
   # shellcheck disable=SC2086
   for mode in $mode_list; do
     case_number=$((case_number + 1))
-    echo "JetStream cluster interop matrix case $case_number: $image ($mode)"
+    echo "Key-Value cluster interop matrix case $case_number: $image ($mode)"
     if run_case "$image" "$mode"; then
       :
     else
       status=1
-      echo "JetStream cluster interop matrix case $case_number failed: $image ($mode)" >&2
+      echo "Key-Value cluster interop matrix case $case_number failed: $image ($mode)" >&2
     fi
   done
 done

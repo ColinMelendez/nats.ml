@@ -24,9 +24,11 @@ type options struct {
 	signal                  string
 	leader                  string
 	survivor                string
+	changedAdvertisedURL    string
 	mode                    string
 	requireReplicatedStream bool
 	multiNodeLoss           bool
+	managementFailure       bool
 }
 
 func waitMessage(label string, messages <-chan *nats.Msg) (*nats.Msg, error) {
@@ -287,7 +289,8 @@ func main() {
 	flag.StringVar(&config.signal, "signal-file", "", "file written to trigger reconnect in reconnect mode")
 	flag.StringVar(&config.leader, "leader-file", "", "file written with the JetStream stream leader")
 	flag.StringVar(&config.survivor, "survivor-file", "", "file containing the endpoints for the post-failover client")
-	flag.StringVar(&config.mode, "mode", "core", "interop mode: core, service, service-failure, service-parent-close, reconnect, service-reconnect, jetstream, jetstream-admin, jetstream-push, jetstream-ordered, jetstream-kv, jetstream-object, jetstream-push-reconnect, jetstream-ordered-reconnect, jetstream-ordered-restart, jetstream-ordered-multi-node, jetstream-ordered-leader-failover, jetstream-kv-reconnect, jetstream-kv-restart, jetstream-kv-multi-node, jetstream-kv-leader-failover, jetstream-object-reconnect, jetstream-object-restart, jetstream-object-multi-node, or jetstream-object-leader-failover")
+	flag.StringVar(&config.changedAdvertisedURL, "changed-advertised-url", "", "new advertised URL required by changed-advertisement mode")
+	flag.StringVar(&config.mode, "mode", "core", "interop mode: core, service, service-failure, service-parent-close, reconnect, service-reconnect, jetstream, jetstream-admin, jetstream-push, jetstream-ordered, jetstream-kv, jetstream-object, jetstream-push-reconnect, jetstream-ordered-reconnect, jetstream-ordered-management-failure, jetstream-ordered-changed-advertisement, jetstream-ordered-restart, jetstream-ordered-multi-node, jetstream-ordered-leader-failover, jetstream-kv-reconnect, jetstream-kv-restart, jetstream-kv-multi-node, jetstream-kv-leader-failover, jetstream-object-reconnect, jetstream-object-restart, jetstream-object-multi-node, or jetstream-object-leader-failover")
 	flag.Parse()
 	if err := validateOptions(config); err != nil {
 		fmt.Fprintln(os.Stderr, err)

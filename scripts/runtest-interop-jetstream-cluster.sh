@@ -103,6 +103,7 @@ cluster_base_port=
 primary_data_volume=
 secondary_data_volume=
 tertiary_data_volume=
+changed_primary_port=
 peer_pid=
 watcher=
 resolver=
@@ -121,21 +122,50 @@ killed_file="$signal.killed"
 kill_ready_file="$signal.kill-ready"
 go_reconnected_file="$signal.go-reconnected"
 ocaml_reconnected_file="$signal.ocaml-reconnected"
+go_disconnected_file="$signal.go-disconnected"
+ocaml_disconnected_file="$signal.ocaml-disconnected"
 multi_node_recovered_file="$signal.multi-node-recovered"
+go_advertised_file="$signal.go-advertised"
+ocaml_advertised_file="$signal.ocaml-advertised"
+go_second_reconnected_file="$signal.go-second-reconnected"
+ocaml_second_reconnected_file="$signal.ocaml-second-reconnected"
+changed_recovered_file="$signal.changed-recovered"
+changed_replacement_ready_file="$signal.changed-replacement-ready"
+management_window_ready_file="$signal.management-window-ready"
+go_management_failed_file="$signal.go-management-failed"
+ocaml_management_failed_file="$signal.ocaml-management-failed"
+management_recovered_file="$signal.management-recovered"
+primary_replacement_file="$signal.primary-replacement"
+primary_replacement_tmp="$primary_replacement_file.tmp"
+watcher_log="$signal.watcher"
+
+watcher_log() {
+  printf '%s\n' "$*" >>"$watcher_log"
+}
 
 # shellcheck disable=SC1091 # script_dir points at this file's directory.
 . "$script_dir/test-artifacts.sh"
 artifact_init "interop-$cluster_scenario-cluster" "$run_id"
 
 case "$failure_mode" in
-  seed|node-a|node-b|node-c|leader|restart|multi-node) ;;
+  seed|node-a|node-b|node-c|leader|restart|multi-node|management|changed-advertised) ;;
   *)
-    echo "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, node-a, node-b, node-c, leader, restart, or multi-node" >&2
+    echo "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, node-a, node-b, node-c, leader, restart, multi-node, management, or changed-advertised" >&2
     exit 1
     ;;
 esac
 
-if [ "$failure_mode" = restart ] || [ "$failure_mode" = multi-node ]; then
+if [ "$failure_mode" = changed-advertised ] && [ "$cluster_scenario" != ordered ]; then
+  echo "changed-advertised failure mode currently requires the ordered scenario" >&2
+  exit 1
+fi
+if [ "$failure_mode" = management ] && [ "$cluster_scenario" != ordered ]; then
+  echo "management failure mode currently requires the ordered scenario" >&2
+  exit 1
+fi
+
+if [ "$failure_mode" = restart ] || [ "$failure_mode" = multi-node ] ||
+  [ "$failure_mode" = changed-advertised ] || [ "$failure_mode" = management ]; then
   primary_data_volume="$primary_name-data-$volume_suffix"
   secondary_data_volume="$secondary_name-data-$volume_suffix"
   tertiary_data_volume="$tertiary_name-data-$volume_suffix"
@@ -262,6 +292,18 @@ cleanup() {
   artifact_save_file "$status" "$peer_log" go-peer.log
   artifact_save_file "$status" "$ocaml_log" ocaml.log
   artifact_save_file "$status" "$docker_error" docker-launcher.log
+  artifact_save_file "$status" "$watcher_log" watcher.log
+  artifact_save_file "$status" "$primary_replacement_file" primary-replacement
+  artifact_save_file "$status" "$go_disconnected_file" go-disconnected
+  artifact_save_file "$status" "$ocaml_disconnected_file" ocaml-disconnected
+  artifact_save_file "$status" "$go_advertised_file" go-advertised
+  artifact_save_file "$status" "$ocaml_advertised_file" ocaml-advertised
+  artifact_save_file "$status" "$go_second_reconnected_file" go-second-reconnected
+  artifact_save_file "$status" "$ocaml_second_reconnected_file" ocaml-second-reconnected
+  artifact_save_file "$status" "$management_window_ready_file" management-window-ready
+  artifact_save_file "$status" "$go_management_failed_file" go-management-failed
+  artifact_save_file "$status" "$ocaml_management_failed_file" ocaml-management-failed
+  artifact_save_file "$status" "$management_recovered_file" management-recovered
   artifact_save_file "$status" "$peer_ready" peer-ready
   artifact_save_docker_log "$status" "$primary" cluster-a.log
   artifact_save_docker_log "$status" "$secondary" cluster-b.log
@@ -297,7 +339,14 @@ cleanup() {
   rm -f "$signal" "$signal.1" "$signal.failed" "$leader_file" \
     "$survivor_file" "$survivor_tmp" "$killed_file" "$kill_ready_file" \
     "$go_reconnected_file" "$ocaml_reconnected_file" \
-    "$multi_node_recovered_file" "$peer_ready" \
+    "$go_disconnected_file" "$ocaml_disconnected_file" \
+    "$multi_node_recovered_file" "$go_advertised_file" \
+    "$ocaml_advertised_file" "$go_second_reconnected_file" \
+    "$ocaml_second_reconnected_file" "$changed_recovered_file" \
+    "$changed_replacement_ready_file" "$management_window_ready_file" \
+    "$go_management_failed_file" "$ocaml_management_failed_file" \
+    "$management_recovered_file" "$primary_replacement_file" \
+    "$primary_replacement_tmp" "$watcher_log" "$peer_ready" \
     "$peer_log" "$ocaml_log" "$docker_error"
 }
 
@@ -343,12 +392,13 @@ case "$cluster_base_port" in
     exit 1
     ;;
 esac
-if [ "$cluster_base_port" -lt 1 ] || [ "$cluster_base_port" -gt 65533 ]; then
-  echo "NATS_TEST_JS_INTEROP_CLUSTER_BASE_PORT must leave room for three ports" >&2
+if [ "$cluster_base_port" -lt 1 ] || [ "$cluster_base_port" -gt 65532 ]; then
+  echo "NATS_TEST_JS_INTEROP_CLUSTER_BASE_PORT must leave room for the cluster and changed advertisement port" >&2
   exit 1
 fi
 secondary_port=$((cluster_base_port + 1))
 tertiary_port=$((cluster_base_port + 2))
+changed_primary_port=$((cluster_base_port + 3))
 
 client_host=127.0.0.1
 
@@ -359,18 +409,34 @@ endpoint_for_port() {
   printf 'nats://%s:%s' "$client_host" "$1"
 }
 
+go_discovered_endpoint_for_port() {
+  if [ "$tls_enabled" -eq 1 ]; then
+    printf 'tls://%s:%s' "$client_host" "$1"
+  else
+    endpoint_for_port "$1"
+  fi
+}
+
 host_port_for_port() {
   printf '%s:%s' "$client_host" "$1"
 }
+
+changed_advertised_url=
+if [ "$failure_mode" = changed-advertised ]; then
+  changed_advertised_url="$(go_discovered_endpoint_for_port "$changed_primary_port")"
+fi
 
 run_server() {
   node_name=$1
   node_label=$2
   client_port=$3
   routes=$4
+  data_node_name=${5:-$node_name}
+  advertise_name=${6:-$node_name}
   data_option="--tmpfs /data"
-  if [ "$failure_mode" = restart ] || [ "$failure_mode" = multi-node ]; then
-    data_volume="$node_name-data-$volume_suffix"
+  if [ "$failure_mode" = restart ] || [ "$failure_mode" = multi-node ] ||
+    [ "$failure_mode" = changed-advertised ] || [ "$failure_mode" = management ]; then
+    data_volume="$data_node_name-data-$volume_suffix"
     data_option="--volume $data_volume:/data"
   fi
   config_file=
@@ -429,7 +495,7 @@ run_server() {
     --publish "127.0.0.1:$client_port:4222" "$image" $server_debug_args \
     $server_options -js -sd /data -p 4222 -n "$node_label" \
     -cluster nats://0.0.0.0:6222 \
-    -cluster_advertise "$node_name:6222" -routes "$routes" \
+    -cluster_advertise "$advertise_name:6222" -routes "$routes" \
     -cluster_name "$cluster_name" \
     -client_advertise "$client_host:$client_port" 2>>"$docker_error"
 }
@@ -440,7 +506,8 @@ retryable_launch_error() {
 }
 
 docker network create "$network" > /dev/null 2>>"$docker_error"
-if [ "$failure_mode" = restart ]; then
+if [ "$failure_mode" = restart ] || [ "$failure_mode" = changed-advertised ] ||
+  [ "$failure_mode" = management ]; then
   {
     docker volume create "$primary_data_volume"
     docker volume create "$secondary_data_volume"
@@ -710,7 +777,7 @@ fi
     esac
   else
     case "$failure_mode" in
-      seed|node-a|restart|multi-node) target=$primary ;;
+      seed|node-a|restart|multi-node|management|changed-advertised) target=$primary ;;
       node-b) target=$secondary ;;
       node-c) target=$tertiary ;;
       *)
@@ -738,6 +805,136 @@ fi
       touch "$signal.failed"
       exit 1
     fi
+  elif [ "$failure_mode" = management ]; then
+    watcher_log "management: waiting for client disconnect barriers"
+    if ! wait_for_barrier "$go_disconnected_file" "Go disconnect barrier" ||
+      ! wait_for_barrier "$ocaml_disconnected_file" "OCaml disconnect barrier"; then
+      watcher_log "management: client disconnect barrier failed"
+      touch "$signal.failed"
+      exit 1
+    fi
+    watcher_log "management: client disconnect barriers ready"
+    if ! docker kill "$secondary" >/dev/null 2>&1 ||
+      ! docker kill "$tertiary" >/dev/null 2>&1; then
+      watcher_log "management: failed to stop surviving nodes"
+      touch "$signal.failed"
+      exit 1
+    fi
+    watcher_log "management: all cluster nodes are unavailable"
+    touch "$management_window_ready_file"
+    if ! wait_for_barrier "$go_management_failed_file" "Go management failure barrier" ||
+      ! wait_for_barrier "$ocaml_management_failed_file" "OCaml management failure barrier"; then
+      watcher_log "management: management failure barrier failed"
+      touch "$signal.failed"
+      exit 1
+    fi
+    watcher_log "management: both clients observed management failure"
+    if ! docker start "$primary" >/dev/null 2>&1 ||
+      ! docker start "$secondary" >/dev/null 2>&1 ||
+      ! docker start "$tertiary" >/dev/null 2>&1; then
+      watcher_log "management: failed to restart cluster nodes"
+      touch "$signal.failed"
+      exit 1
+    fi
+    if ! wait_until_ready_count "$primary" 2 ||
+      ! wait_until_ready_count "$secondary" 2 ||
+      ! wait_until_ready_count "$tertiary" 2 ||
+      ! wait_for_routes "$primary" ||
+      ! wait_for_routes "$secondary" ||
+      ! wait_for_routes "$tertiary"; then
+      watcher_log "management: recovered route mesh failed"
+      touch "$signal.failed"
+      exit 1
+    fi
+    watcher_log "management: recovered route mesh is ready"
+    touch "$management_recovered_file"
+  elif [ "$failure_mode" = changed-advertised ]; then
+    watcher_log "changed-advertised: waiting for client disconnect barriers"
+    if ! wait_for_barrier "$go_disconnected_file" "Go disconnect barrier" ||
+      ! wait_for_barrier "$ocaml_disconnected_file" "OCaml disconnect barrier"; then
+      watcher_log "changed-advertised: client disconnect barrier failed"
+      touch "$signal.failed"
+      exit 1
+    fi
+    watcher_log "changed-advertised: client disconnect barriers ready"
+    if ! docker rm -f "$target" >/dev/null 2>&1; then
+      watcher_log "changed-advertised: failed to remove original primary $target"
+      touch "$signal.failed"
+      exit 1
+    fi
+    watcher_log "changed-advertised: removed original primary $target"
+    replacement_name="$network-a-replacement"
+    replacement_primary=
+    watcher_log "changed-advertised: launching replacement $replacement_name"
+    if ! replacement_primary=$(run_server "$replacement_name" cluster-a "$changed_primary_port" \
+      "nats://$secondary_name:6222,nats://$tertiary_name:6222" "$primary_name" \
+      "$replacement_name"); then
+      watcher_log "changed-advertised: replacement launch failed: $(cat "$docker_error")"
+      touch "$signal.failed"
+      exit 1
+    fi
+    watcher_log "changed-advertised: replacement launched as $replacement_primary"
+    if ! printf '%s\n' "$replacement_primary" >"$primary_replacement_tmp" ||
+      ! mv "$primary_replacement_tmp" "$primary_replacement_file"; then
+      watcher_log "changed-advertised: failed to publish replacement identity"
+      touch "$signal.failed"
+      exit 1
+    fi
+    if ! wait_until_ready "$replacement_primary"; then
+      watcher_log "changed-advertised: replacement did not become ready"
+      touch "$signal.failed"
+      exit 1
+    fi
+    watcher_log "changed-advertised: replacement is ready"
+    if ! wait_for_routes "$replacement_primary"; then
+      watcher_log "changed-advertised: replacement route mesh failed"
+      touch "$signal.failed"
+      exit 1
+    fi
+    if ! wait_for_routes "$secondary" || ! wait_for_routes "$tertiary"; then
+      watcher_log "changed-advertised: survivor route mesh failed"
+      touch "$signal.failed"
+      exit 1
+    fi
+    watcher_log "changed-advertised: replacement and survivor route meshes ready"
+    touch "$changed_replacement_ready_file"
+    if ! wait_for_barrier "$go_advertised_file" "Go changed-advertisement barrier" ||
+      ! wait_for_barrier "$ocaml_advertised_file" "OCaml changed-advertisement barrier"; then
+      watcher_log "changed-advertised: changed-advertisement barrier failed"
+      touch "$signal.failed"
+      exit 1
+    fi
+    watcher_log "changed-advertised: both clients observed the replacement advertisement"
+    if ! docker kill "$secondary" >/dev/null 2>&1 ||
+      ! docker kill "$tertiary" >/dev/null 2>&1; then
+      watcher_log "changed-advertised: failed to remove surviving original nodes"
+      touch "$signal.failed"
+      exit 1
+    fi
+    watcher_log "changed-advertised: removed both original survivors"
+    if ! wait_for_barrier "$go_second_reconnected_file" "Go second reconnect barrier" ||
+      ! wait_for_barrier "$ocaml_second_reconnected_file" "OCaml second reconnect barrier"; then
+      watcher_log "changed-advertised: second reconnect barrier failed"
+      touch "$signal.failed"
+      exit 1
+    fi
+    watcher_log "changed-advertised: both clients reconnected through the replacement"
+    if ! docker start "$secondary" >/dev/null 2>&1 ||
+      ! docker start "$tertiary" >/dev/null 2>&1; then
+      watcher_log "changed-advertised: failed to restart original survivors"
+      touch "$signal.failed"
+      exit 1
+    fi
+    if ! wait_until_ready_count "$secondary" 2 ||
+      ! wait_until_ready_count "$tertiary" 2 ||
+      ! wait_for_routes "$secondary" ||
+      ! wait_for_routes "$tertiary"; then
+      watcher_log "changed-advertised: recovered survivor route mesh failed"
+      touch "$signal.failed"
+      exit 1
+    fi
+    watcher_log "changed-advertised: recovered survivor route mesh is ready"
+    touch "$changed_recovered_file"
   elif [ "$failure_mode" = multi-node ]; then
     if ! wait_for_barrier "$go_reconnected_file" "Go first reconnect barrier" ||
       ! wait_for_barrier "$ocaml_reconnected_file" "OCaml first reconnect barrier"; then
@@ -793,6 +990,12 @@ elif [ "$failure_mode" = multi-node ]; then
     peer_mode=jetstream-ordered-multi-node
   fi
   peer_server="$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$tertiary_port")"
+elif [ "$failure_mode" = management ]; then
+  peer_mode=jetstream-ordered-management-failure
+  peer_server="$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$tertiary_port")"
+elif [ "$failure_mode" = changed-advertised ]; then
+  peer_mode=jetstream-ordered-changed-advertisement
+  peer_server="$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$tertiary_port")"
 else
   if [ "$cluster_scenario" = kv ]; then
     peer_mode=jetstream-kv-reconnect
@@ -831,6 +1034,7 @@ if [ "$failure_mode" = leader ]; then
     --prefix "$prefix" --stream "$stream" --bucket "$bucket" \
     --ready-file "$peer_ready" \
     --signal-file "$signal" --leader-file "$leader_file" \
+    --changed-advertised-url "$changed_advertised_url" \
     --survivor-file "$survivor_file" >"$peer_log" 2>&1 &
 else
   timeout --signal=TERM --kill-after=5s "${runner_timeout}s" env \
@@ -844,7 +1048,9 @@ else
     --server "$peer_server" \
     --prefix "$prefix" --stream "$stream" --bucket "$bucket" \
     --ready-file "$peer_ready" \
-    --signal-file "$signal" >"$peer_log" 2>&1 &
+    --signal-file "$signal" \
+    --changed-advertised-url "$changed_advertised_url" \
+    >"$peer_log" 2>&1 &
 fi
 peer_pid=$!
 
@@ -880,6 +1086,12 @@ ocaml_server="$(endpoint_for_port "$cluster_base_port")"
 ocaml_initial_name=cluster-a
 ocaml_recovered_names=cluster-b,cluster-c
 ocaml_discovered="$(host_port_for_port "$secondary_port"),$(host_port_for_port "$tertiary_port")"
+ocaml_changed_name=
+ocaml_changed_url=
+if [ "$failure_mode" = changed-advertised ]; then
+  ocaml_changed_name=cluster-a
+  ocaml_changed_url="$(host_port_for_port "$changed_primary_port")"
+fi
 if [ "$failure_mode" = leader ]; then
   leader=$(sed -n '1p' "$leader_file")
   case "$leader" in
@@ -910,7 +1122,7 @@ else
       ocaml_recovered_names=cluster-a,cluster-b
       ocaml_discovered="$(host_port_for_port "$cluster_base_port"),$(host_port_for_port "$secondary_port")"
       ;;
-    seed|node-a|multi-node) ;;
+    seed|node-a|multi-node|management|changed-advertised) ;;
     *)
       echo "unknown non-leader JetStream cluster failure mode: $failure_mode" >&2
       exit 1
@@ -929,6 +1141,8 @@ if run_acceptance \
     NATS_TEST_JS_CLUSTER_INITIAL_NAME="$ocaml_initial_name" \
     NATS_TEST_JS_CLUSTER_RECOVERED_NAMES="$ocaml_recovered_names" \
     NATS_TEST_JS_CLUSTER_DISCOVERED="$ocaml_discovered" \
+    NATS_TEST_JS_CLUSTER_CHANGED_NAME="$ocaml_changed_name" \
+    NATS_TEST_JS_CLUSTER_CHANGED_URL="$ocaml_changed_url" \
     >"$ocaml_log" 2>&1
 then
   :
@@ -955,6 +1169,9 @@ if wait "$watcher"; then
   watcher_status=0
 else
   watcher_status=$?
+fi
+if [ -s "$primary_replacement_file" ]; then
+  primary=$(sed -n '1p' "$primary_replacement_file")
 fi
 if [ "$status" -eq 0 ] && [ "$peer_status" -eq 0 ] &&
   [ "$watcher_status" -ne 0 ]; then

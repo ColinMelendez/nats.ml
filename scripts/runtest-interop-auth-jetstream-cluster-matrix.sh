@@ -13,7 +13,7 @@ fi
 
 images=${NATS_SERVER_IMAGES:-nats:2.10.22,nats:2.12.15,nats:2.14.5}
 modes=${NATS_INTEROP_AUTH_JETSTREAM_CLUSTER_MATRIX_MODES:-nkey,nkey-tls,jwt,jwt-tls,mtls}
-failure_modes=${NATS_INTEROP_AUTH_JETSTREAM_CLUSTER_FAILURE_MODES:-node-a,node-b,node-c,leader,restart,multi-node}
+failure_modes=${NATS_INTEROP_AUTH_JETSTREAM_CLUSTER_FAILURE_MODES:-node-a,node-b,node-c,leader,restart,multi-node,management,changed-advertised}
 
 case "$modes" in
   ""|,*|*,|*,,*)
@@ -23,7 +23,7 @@ case "$modes" in
 esac
 case "$failure_modes" in
   ""|,*|*,|*,,*)
-    echo "NATS_INTEROP_AUTH_JETSTREAM_CLUSTER_FAILURE_MODES must contain node-a, node-b, node-c, leader, restart, and/or multi-node (seed is an alias for node-a) with no empty entries" >&2
+    echo "NATS_INTEROP_AUTH_JETSTREAM_CLUSTER_FAILURE_MODES must contain node-a, node-b, node-c, leader, restart, multi-node, management, and/or changed-advertised (seed is an alias for node-a) with no empty entries" >&2
     exit 1
     ;;
 esac
@@ -66,10 +66,10 @@ fi
 failure_mode_list=
 for failure_mode do
   case "$failure_mode" in
-    seed|node-a|node-b|node-c|leader|restart|multi-node)
+    seed|node-a|node-b|node-c|leader|restart|multi-node|management|changed-advertised)
       ;;
     *)
-      echo "unknown authenticated JetStream cluster failure mode: $failure_mode (expected node-a, node-b, node-c, leader, restart, or multi-node)" >&2
+      echo "unknown authenticated JetStream cluster failure mode: $failure_mode (expected node-a, node-b, node-c, leader, restart, multi-node, management, or changed-advertised)" >&2
       exit 1
       ;;
   esac
