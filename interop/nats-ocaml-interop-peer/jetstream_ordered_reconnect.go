@@ -240,6 +240,10 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
+	if err := expectInitialConnection(connection, config.server); err != nil {
+		connection.Close()
+		return err
+	}
 	defer func() { connection.Close() }()
 
 	jetstream, err := connection.JetStream(nats.MaxWait(orderedReconnectWait))

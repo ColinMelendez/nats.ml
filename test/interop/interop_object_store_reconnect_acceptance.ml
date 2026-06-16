@@ -35,22 +35,34 @@ let endpoint () =
 
 let leader_failover () =
   match Sys.getenv_opt "NATS_TEST_JS_CLUSTER_FAILURE_MODE" with
-  | None | Some "seed" | Some "restart" -> false
+  | None
+  | Some "seed"
+  | Some "node-a"
+  | Some "node-b"
+  | Some "node-c"
+  | Some "restart" ->
+      false
   | Some "leader" -> true
   | Some value ->
       failf
-        "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, restart, or leader, \
-         got %S"
+        "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, node-a, node-b, \
+         node-c, restart, or leader, got %S"
         value
 
 let restart () =
   match Sys.getenv_opt "NATS_TEST_JS_CLUSTER_FAILURE_MODE" with
   | Some "restart" -> true
-  | None | Some "seed" | Some "leader" -> false
+  | None
+  | Some "seed"
+  | Some "node-a"
+  | Some "node-b"
+  | Some "node-c"
+  | Some "leader" ->
+      false
   | Some value ->
       failf
-        "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, restart, or leader, \
-         got %S"
+        "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, node-a, node-b, \
+         node-c, restart, or leader, got %S"
         value
 
 let string_list name =

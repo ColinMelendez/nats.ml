@@ -12,11 +12,11 @@ if [ "${NATS_INTEGRATION_SHELL-}" != 1 ]; then
 fi
 
 images=${NATS_SERVER_IMAGES:-nats:2.10.22,nats:2.12.15,nats:2.14.5}
-modes=${NATS_INTEROP_JETSTREAM_CLUSTER_MATRIX_MODES:-seed,leader,restart}
+modes=${NATS_INTEROP_JETSTREAM_CLUSTER_MATRIX_MODES:-node-a,node-b,node-c,leader,restart}
 
 case "$modes" in
   ""|,*|*,|*,,*)
-    echo "NATS_INTEROP_JETSTREAM_CLUSTER_MATRIX_MODES must contain seed, leader, and/or restart with no empty entries" >&2
+    echo "NATS_INTEROP_JETSTREAM_CLUSTER_MATRIX_MODES must contain node-a, node-b, node-c, leader, and/or restart (seed is an alias for node-a) with no empty entries" >&2
     exit 1
     ;;
 esac
@@ -35,10 +35,10 @@ fi
 mode_list=
 for mode do
   case "$mode" in
-    seed|leader|restart)
+    seed|node-a|node-b|node-c|leader|restart)
       ;;
     *)
-      echo "unknown JetStream cluster interop matrix mode: $mode (expected seed, leader, or restart)" >&2
+      echo "unknown JetStream cluster interop matrix mode: $mode (expected node-a, node-b, node-c, leader, or restart)" >&2
       exit 1
       ;;
   esac

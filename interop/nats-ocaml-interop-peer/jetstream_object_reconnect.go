@@ -162,6 +162,10 @@ func runJetStreamObjectReconnectPeer(config options) error {
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
+	if err := expectInitialConnection(connection, config.server); err != nil {
+		connection.Close()
+		return err
+	}
 	defer connection.Close()
 
 	jetstream, err := natsjetstream.New(connection)

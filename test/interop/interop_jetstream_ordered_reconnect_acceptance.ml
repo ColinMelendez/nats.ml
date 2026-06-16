@@ -21,13 +21,13 @@ let required name =
 
 let leader_failover () =
   match Sys.getenv_opt "NATS_TEST_JS_CLUSTER_FAILURE_MODE" with
-  | None | Some "seed" -> false
+  | None | Some "seed" | Some "node-a" | Some "node-b" | Some "node-c" -> false
   | Some "leader" -> true
   | Some "restart" -> false
   | Some value ->
       failf
-        "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, leader, or restart, \
-         got %S"
+        "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, node-a, node-b, \
+         node-c, leader, or restart, got %S"
         value
 
 let endpoint () =

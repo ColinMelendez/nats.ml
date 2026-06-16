@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -136,6 +137,18 @@ func connectOptions() ([]nats.Option, error) {
 		options = append(options, nats.ClientCert(clientCert, clientKey))
 	}
 	return options, nil
+}
+
+func expectInitialConnection(connection *nats.Conn, servers string) error {
+	expected := strings.TrimSpace(strings.SplitN(servers, ",", 2)[0])
+	if expected == "" {
+		return errors.New("server list did not contain an initial endpoint")
+	}
+	actual := connection.ConnectedUrl()
+	if actual != expected {
+		return fmt.Errorf("connected to %q, expected initial endpoint %q", actual, expected)
+	}
+	return nil
 }
 
 func runPeer(config options) error {

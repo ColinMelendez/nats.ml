@@ -110,9 +110,9 @@ ocaml_reconnected_file="$signal.ocaml-reconnected"
 artifact_init "interop-$cluster_scenario-cluster" "$run_id"
 
 case "$failure_mode" in
-  seed|leader|restart) ;;
+  seed|node-a|node-b|node-c|leader|restart) ;;
   *)
-    echo "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, leader, or restart" >&2
+    echo "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, node-a, node-b, node-c, leader, or restart" >&2
     exit 1
     ;;
 esac
@@ -674,7 +674,15 @@ fi
         ;;
     esac
   else
-    target=$primary
+    case "$failure_mode" in
+      seed|node-a|restart) target=$primary ;;
+      node-b) target=$secondary ;;
+      node-c) target=$tertiary ;;
+      *)
+        touch "$signal.failed"
+        exit 1
+        ;;
+    esac
   fi
 
   if ! docker kill "$target" >/dev/null 2>&1; then
@@ -728,7 +736,21 @@ else
   else
     peer_mode=jetstream-ordered-reconnect
   fi
-  peer_server="$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$tertiary_port")"
+  case "$failure_mode" in
+    node-b)
+      peer_server="$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$tertiary_port")"
+      ;;
+    node-c)
+      peer_server="$(endpoint_for_port "$tertiary_port"),$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$secondary_port")"
+      ;;
+    seed|node-a)
+      peer_server="$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$tertiary_port")"
+      ;;
+    *)
+      echo "unknown non-leader JetStream cluster failure mode: $failure_mode" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 if [ "$failure_mode" = leader ]; then
@@ -806,6 +828,26 @@ if [ "$failure_mode" = leader ]; then
     *)
       echo "Go JetStream ordered leader failover peer reported unknown leader $leader" >&2
       cat "$peer_log" >&2 || true
+      exit 1
+      ;;
+  esac
+else
+  case "$failure_mode" in
+    node-b)
+      ocaml_server="$(endpoint_for_port "$secondary_port")"
+      ocaml_initial_name=cluster-b
+      ocaml_recovered_names=cluster-a,cluster-c
+      ocaml_discovered="$(host_port_for_port "$cluster_base_port"),$(host_port_for_port "$tertiary_port")"
+      ;;
+    node-c)
+      ocaml_server="$(endpoint_for_port "$tertiary_port")"
+      ocaml_initial_name=cluster-c
+      ocaml_recovered_names=cluster-a,cluster-b
+      ocaml_discovered="$(host_port_for_port "$cluster_base_port"),$(host_port_for_port "$secondary_port")"
+      ;;
+    seed|node-a) ;;
+    *)
+      echo "unknown non-leader JetStream cluster failure mode: $failure_mode" >&2
       exit 1
       ;;
   esac
