@@ -74,6 +74,23 @@ else
 fi
 run_id=$$
 dune_build_dir=${NATS_TEST_DUNE_BUILD_DIR:-_build-interop-$run_id}
+acceptance_binary=${NATS_TEST_ACCEPTANCE_BINARY-}
+if [ -n "$acceptance_binary" ]; then
+  case "$acceptance_binary" in
+    /*) ;;
+    *)
+      echo "NATS_TEST_ACCEPTANCE_BINARY must be an absolute path: $acceptance_binary" >&2
+      exit 1
+      ;;
+  esac
+  if [ ! -f "$acceptance_binary" ] || [ ! -x "$acceptance_binary" ]; then
+    echo "NATS_TEST_ACCEPTANCE_BINARY is not an executable file: $acceptance_binary" >&2
+    exit 1
+  fi
+  acceptance_target="binary:$acceptance_binary"
+else
+  acceptance_target="dune:$acceptance_executable"
+fi
 network="ocaml-nats-js-interop-cluster-$run_id"
 cluster_name="ocaml-nats-js-interop-$run_id"
 primary_name="$network-a"
@@ -180,14 +197,29 @@ if [ "$auth_mode" = mtls ]; then
   tls_enabled=1
 fi
 
-if ! integration_command timeout --signal=TERM --kill-after=5s \
-    "${runner_timeout}s" dune build \
-    --build-dir "$dune_build_dir" \
-    "$acceptance_executable"
-then
-  echo "$cluster_scenario cluster acceptance executable did not build" >&2
-  exit 1
+if [ -z "$acceptance_binary" ]; then
+  if ! integration_command timeout --signal=TERM --kill-after=5s \
+      "${runner_timeout}s" dune build \
+      --build-dir "$dune_build_dir" \
+      "$acceptance_executable"
+  then
+    echo "$cluster_scenario cluster acceptance executable did not build" >&2
+    exit 1
+  fi
 fi
+
+run_acceptance() {
+  if [ -n "$acceptance_binary" ]; then
+    integration_command timeout --signal=TERM --kill-after=5s \
+      "${runner_timeout}s" env "$@" \
+      "$acceptance_binary"
+  else
+    integration_command timeout --signal=TERM --kill-after=5s \
+      "${runner_timeout}s" env "$@" dune exec \
+      --build-dir "$dune_build_dir" \
+      "$acceptance_executable"
+  fi
+}
 
 remove_container() {
   container=$1
@@ -241,7 +273,8 @@ cleanup() {
     "runner=interop-jetstream-cluster" "scenario=$cluster_scenario" \
     "image=$image" \
     "failure_mode=$failure_mode" "tls=$tls_enabled" "auth_mode=$auth_mode" \
-    "cluster_port=$cluster_base_port" "build_dir=$dune_build_dir" \
+    "cluster_port=$cluster_base_port" "acceptance=$acceptance_target" \
+    "build_dir=$dune_build_dir" \
     "status=$status"
   remove_cluster
   if [ -n "$primary_data_volume" ]; then
@@ -854,8 +887,7 @@ else
 fi
 
 status=0
-if integration_command timeout --signal=TERM --kill-after=5s \
-    "${runner_timeout}s" env \
+if run_acceptance \
     NATS_TEST_SERVER="$ocaml_server" \
     NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" \
@@ -865,9 +897,6 @@ if integration_command timeout --signal=TERM --kill-after=5s \
     NATS_TEST_JS_CLUSTER_INITIAL_NAME="$ocaml_initial_name" \
     NATS_TEST_JS_CLUSTER_RECOVERED_NAMES="$ocaml_recovered_names" \
     NATS_TEST_JS_CLUSTER_DISCOVERED="$ocaml_discovered" \
-    dune exec \
-    --build-dir "$dune_build_dir" \
-    "$acceptance_executable" \
     >"$ocaml_log" 2>&1
 then
   :
