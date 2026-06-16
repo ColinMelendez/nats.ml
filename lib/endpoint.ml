@@ -256,6 +256,13 @@ module Pool = struct
 
   let base t = deduplicate (t.seeds @ t.discovered)
 
+  let retain_preferred ~seeds ~discovered preferred =
+    match preferred with
+    | Some endpoint
+      when not (contains endpoint seeds) && not (contains endpoint discovered) ->
+        endpoint :: discovered
+    | _ -> discovered
+
   let keep_preferred preferred endpoints =
     match preferred with
     | None -> endpoints
@@ -266,6 +273,9 @@ module Pool = struct
              endpoints
 
   let rebuild_order t ~discovered ~preferred =
+    let discovered =
+      deduplicate (retain_preferred ~seeds:t.seeds ~discovered preferred)
+    in
     let base = deduplicate (t.seeds @ discovered) in
     let existing =
       List.filter (fun endpoint -> contains endpoint base) t.order
@@ -291,7 +301,15 @@ module Pool = struct
   let preferred t = t.preferred
 
   let update_discovered t discovered =
-    rebuild_order t ~discovered:(deduplicate discovered) ~preferred:t.preferred
+    match discovered with
+    | [] -> t
+    | _ ->
+        let discovered =
+          List.filter
+            (fun endpoint -> not (contains endpoint t.seeds))
+            (deduplicate discovered)
+        in
+        rebuild_order t ~discovered ~preferred:t.preferred
 
   let connected t endpoint =
     rebuild_order t ~discovered:t.discovered ~preferred:(Some endpoint)

@@ -65,9 +65,11 @@ module Pool : sig
   (** [preferred pool] is the most recently connected endpoint, when known. *)
 
   val update_discovered : t -> endpoint list -> t
-  (** [update_discovered pool endpoints] replaces the discovered set. Configured
-      seeds remain sticky; removed discovered endpoints disappear after the
-      current preferred endpoint has failed. *)
+  (** [update_discovered pool endpoints] replaces the non-empty advertised set.
+      Configured seeds are never reported as discovered. An empty advertisement
+      leaves the current set unchanged. The currently preferred discovered
+      endpoint remains available when absent from an advertisement until
+      another endpoint becomes current and processes a later advertisement. *)
 
   val connected : t -> endpoint -> t
   (** [connected pool endpoint] makes [endpoint] the first candidate on the next

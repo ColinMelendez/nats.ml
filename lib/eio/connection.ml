@@ -1026,6 +1026,8 @@ let event t event =
 
 let stats t = Stats.snapshot t.stats
 
+let discovered_servers t = Nats.Endpoint.Pool.discovered !(t.pool)
+
 let close_subscription t sid error =
   match Hashtbl.find_opt t.subscriptions sid with
   | None -> ()

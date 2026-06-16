@@ -166,6 +166,13 @@ val stats : t -> Stats.t
     message and reconnect counters. Counter values are non-negative [int64]
     values and saturate at [Int64.max_int]. *)
 
+val discovered_servers : t -> Nats.Endpoint.t list
+(** [discovered_servers connection] is the current server-advertised endpoint
+    set learned from NATS [INFO] messages. Configured seed endpoints are not
+    included. Empty advertisements leave this set unchanged. The endpoint
+    currently in use remains present when absent from an advertisement until
+    another endpoint becomes current and processes a later advertisement. *)
+
 val await_reconnect : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
 (** [await_reconnect ?timeout connection] waits for an in-progress transport
     recovery to complete. It returns immediately when [connection] is usable; it
@@ -184,8 +191,10 @@ val connect :
   (t, Error.t) result
 (** [connect endpoints] resolves and tries the configured endpoint list in
     order. A successful endpoint is preferred on later reconnect passes; DNS is
-    resolved again for every pass. Each [INFO] replaces the discovered candidate
-    set while retaining configured seeds; malformed advertisements are ignored.
+    resolved again for every pass. Each non-empty [INFO] replaces the
+    discovered candidate set while retaining configured seeds. The current
+    discovered endpoint is retained while it is still in use; empty and
+    malformed advertisements are ignored.
     The list must be non-empty. A [tls] endpoint requires [Config.tls] and
     performs TLS before the NATS handshake. A successful result means that the
     initial CONNECT has been written and the event stream is active; server

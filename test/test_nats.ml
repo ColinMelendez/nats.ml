@@ -204,6 +204,64 @@ let () =
                   equal bool true (Nats.Endpoint.equal replacement third)
               | _ -> fail "discovered endpoint replacement changed seed order")
           | _ -> fail "pool did not deduplicate endpoint sources");
+      test "ignores empty advertisements and excludes configured seeds" (fun () ->
+          let endpoint value =
+            match Nats.Endpoint.of_string value with
+            | Ok value -> value
+            | Error error ->
+                fail (Format.asprintf "%a" Nats.Endpoint.pp_error error)
+          in
+          let seed = endpoint "nats://seed.example" in
+          let discovered = endpoint "nats://cluster.example" in
+          let pool =
+            Nats.Endpoint.Pool.v [ seed ]
+            |> fun pool ->
+            Nats.Endpoint.Pool.update_discovered pool
+              [ seed; discovered ]
+          in
+          equal int 1 (List.length (Nats.Endpoint.Pool.discovered pool));
+          equal bool true
+            (match Nats.Endpoint.Pool.discovered pool with
+            | [ value ] -> Nats.Endpoint.equal value discovered
+            | _ -> false);
+          let pool = Nats.Endpoint.Pool.update_discovered pool [] in
+          equal bool true
+            (match Nats.Endpoint.Pool.discovered pool with
+            | [ value ] -> Nats.Endpoint.equal value discovered
+            | _ -> false));
+      test "retains the current discovered endpoint until replacement" (fun () ->
+          let endpoint value =
+            match Nats.Endpoint.of_string value with
+            | Ok value -> value
+            | Error error ->
+                fail (Format.asprintf "%a" Nats.Endpoint.pp_error error)
+          in
+          let seed = endpoint "nats://seed.example" in
+          let current = endpoint "nats://current.example" in
+          let replacement = endpoint "nats://replacement.example" in
+          let pool =
+            Nats.Endpoint.Pool.v [ seed ]
+            |> fun pool ->
+            Nats.Endpoint.Pool.update_discovered pool [ current ]
+            |> fun pool -> Nats.Endpoint.Pool.connected pool current
+            |> fun pool ->
+            Nats.Endpoint.Pool.update_discovered pool [ replacement ]
+          in
+          equal bool true
+            (match Nats.Endpoint.Pool.discovered pool with
+            | first :: second :: [] ->
+                Nats.Endpoint.equal first current
+                && Nats.Endpoint.equal second replacement
+            | _ -> false);
+          let pool =
+            Nats.Endpoint.Pool.connected pool replacement
+            |> fun pool ->
+            Nats.Endpoint.Pool.update_discovered pool [ replacement ]
+          in
+          equal bool true
+            (match Nats.Endpoint.Pool.discovered pool with
+            | [ value ] -> Nats.Endpoint.equal value replacement
+            | _ -> false));
       test "rotates failed candidates and prefers the last success" (fun () ->
           let endpoint value =
             match Nats.Endpoint.of_string value with
@@ -253,6 +311,7 @@ let () =
             Nats.Endpoint.Pool.connected pool old |> fun pool ->
             Nats.Endpoint.Pool.update_discovered pool [ replacement ]
             |> fun pool -> Nats.Endpoint.Pool.connected pool seed
+            |> fun pool -> Nats.Endpoint.Pool.update_discovered pool [ replacement ]
           in
           match Nats.Endpoint.Pool.candidates pool with
           | [ first; second ] ->
