@@ -4,8 +4,8 @@ This review covers the public Key-Value and Object Store surfaces in
 `nats-eio`: bucket capabilities, revisioned entries, streaming transfers,
 watch ownership, metadata commit behavior, structured errors, and cancellation.
 It closes the API-shape portion of G5. It does not claim that the remaining
-authenticated, multi-node, and changed-advertisement cluster/failure matrices
-have passed.
+broader multi-node and changed-advertisement cluster/failure matrices have
+passed.
 
 ## Method
 
@@ -179,8 +179,8 @@ cleanup cannot leave stale content indefinitely.
 
 The API review does not close the remaining operational evidence work:
 
-- broader authenticated, multi-node, and changed-advertisement KV and Object
-  Store cluster/failure-injection coverage remains outside the current matrix;
+- broader multi-node and changed-advertisement KV and Object Store
+  cluster/failure-injection coverage remains outside the current matrix;
 - ordinary watch reconnect remains weaker than ordered-watch recovery by design;
 - a list is a best-effort snapshot while metadata may change concurrently;
 - manager status/name listers eagerly retain their result lists; and

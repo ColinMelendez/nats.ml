@@ -161,7 +161,10 @@ Set
 `NATS_TEST_RUN_TIMEOUT` to a positive number of seconds to adjust it. Set
 `NATS_TEST_ARTIFACT_DIR` to a caller-owned directory to preserve logs, Docker
 state, the image identity, and run metadata when an interop case
-fails. The JetStream matrix accepts `pull`, `push`, `ordered`, `kv`, and
+fails. When an acceptance executable is already built, set
+`NATS_TEST_ACCEPTANCE_BINARY` to its absolute executable path to bypass only
+the Dune build/exec step; the live server and Go-peer checks still run. The
+JetStream matrix accepts `pull`, `push`, `ordered`, `kv`, and
 `object` scenarios; the default remains the smaller `pull,push` slice.
 
 The system-account cluster runner uses three ephemeral routed containers and
@@ -363,10 +366,8 @@ and sealing. Its six-mode single-server authentication/TLS matrix passes all
 ordered-watch recovery after seed loss, elected-leader loss, and durable seed
 restart in anonymous plaintext mode. Its expanded matrix passes all 15
 node-a/node-b/node-c, leader, and restart cases across the three pinned
-releases. Broader authenticated or failure topologies remain separate
-acceptance work for KV and Object Store cluster behavior. Additional
-authenticated evidence and broader failure topologies remain separate
-acceptance work for the KV and Object Store cluster surfaces.
+releases. Broader failure topologies remain separate acceptance work for KV
+and Object Store cluster behavior.
 The authenticated KV companion wrappers
 `./scripts/runtest-interop-auth-key-value-cluster.sh` and
 `./scripts/runtest-interop-auth-key-value-cluster-matrix.sh` now route the five
@@ -375,7 +376,8 @@ restart failures. The NKey seed smoke and isolated JWT restart cases pass. The
 full 45-cell seed/leader/restart KV sweep passes across all three pinned
 releases under the owned `nats-tests` Colima profile, including the previously
 resource-sensitive 2.12.15 JWT restart case. Authenticated fixed-node KV
-evidence remains a tracked acceptance slice. The dedicated
+coverage adds another 45 passing cases across node-a, node-b, and node-c for
+the same five modes and three releases. The dedicated
 `./scripts/runtest-interop-object-store-cluster.sh`
 runner covers replicated Object Store content, metadata, cross-SDK writes and
 reads, cleanup, seed loss, elected-leader loss, and durable seed restart in
@@ -388,7 +390,8 @@ acceptance work. The authenticated companion wrappers reuse the
 NKey/JWT/mTLS cluster matrix and select the same Object Store scenario; their
 five credential/TLS modes across the original seed/leader/restart failures and
 three releases have passed all 45 cells (15 per release). Authenticated
-fixed-node Object Store evidence remains a tracked acceptance slice.
+fixed-node Object Store coverage adds another 45 passing cases across
+node-a, node-b, and node-c for the same five modes and three releases.
 The separate JetStream reconnect runner uses a file-backed stream and durable
 Push consumers on one persistent server container, kills and restarts that
 container, and verifies both the OCaml and Go Push legs recover and exchange

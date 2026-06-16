@@ -257,10 +257,12 @@ The full 45-cell KV sweep now passes under the owned `nats-tests` Colima
 profile, including the previously resource-sensitive nats-server 2.12.15 JWT
 restart case. The anonymous KV matrix now also passes all 15 explicit
 node-a/node-b/node-c, leader, and restart cases across the three pinned
-releases.
-The remaining acceptance work is authenticated fixed-node evidence for KV and
-Object Store, broader multi-node loss, changed-advertisement behavior, and
-management-operation failure coverage.
+releases. The authenticated fixed-node KV sweep adds another 45 passing cases
+across node-a, node-b, and node-c for the same five modes and three releases.
+The authenticated Object Store companion now passes its corresponding 45
+fixed-node cases across those modes, nodes, and releases. The remaining
+acceptance work is broader multi-node loss, changed-advertisement behavior,
+and management-operation failure coverage.
 
 #### D. Make cross-SDK behavior the wire-level oracle
 
@@ -1026,14 +1028,16 @@ semantics before calling the feature complete.
   retained snapshot marker, revision continuity, and ordered-watch recovery
   after fixed node-a/node-b/node-c loss, elected-leader loss, and durable
   seed restart. Its anonymous matrix passes all 15 cases across the three
-  pinned releases. Broader server/version combinations and authenticated
-  fixed-node evidence remain.
+  pinned releases. The authenticated fixed-node companion matrix also passes
+  45 cases across node-a/node-b/node-c, five credential/TLS modes, and the
+  three pinned releases.
 - Added the authenticated KV cluster wrappers, reusing the established
   JetStream cluster matrix for NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS
   across seed, leader, and restart failures. The full 45-cell matrix now passes
   across the three pinned releases under the owned `nats-tests` Colima profile;
-  its remaining gap is fixed-node evidence for KV, broader multi-node, and
-  changed-advertisement evidence.
+  its fixed-node companion adds another 45 passing cases across node-a,
+  node-b, and node-c. Broader multi-node and changed-advertisement evidence
+  remains.
 
 ### Workstream 5B — Object Store
 
@@ -1062,7 +1066,8 @@ semantics before calling the feature complete.
   wrappers now select this Object Store scenario in the existing NKey/JWT/mTLS
   cluster matrix; the five credential/TLS modes across seed, leader, and
   restart failures passed all 45 cells across nats-server 2.10.22, 2.12.15,
-  and 2.14.5.
+  and 2.14.5. The fixed-node companion adds another 45 passing cases across
+  node-a, node-b, and node-c for the same five modes and releases.
 - Keep transfer chunks incremental; never require a whole object as one
   `string`.
 - Preserve the metadata rollup as the commit point and define cancellation,
@@ -1095,8 +1100,8 @@ semantics before calling the feature complete.
 - Large Object Store transfer, metadata, replacement/deletion ordering,
   interrupted-transfer cleanup, listing/watch boundaries, links, rename,
   sealing, and bucket configuration updates are covered locally; broader
-  authenticated and multi-node cluster/failure coverage remains acceptance
-  work.
+  multi-node and changed-advertisement cluster/failure coverage remains
+  acceptance work.
 - No direct dependence by these modules on a private socket or private
   connection lifecycle.
 
@@ -1117,10 +1122,9 @@ revision semantics before documenting them as stable.
   cleanup, and replacement cleanup for prior tombstone NUIDs are covered by
   focused mock-transport regressions. File-transfer partial-result behavior is
   now explicit in the public documentation.
-- Remaining before a release claim: authenticated KV/Object Store fixed-node
-  evidence, broader multi-node failure evidence, changed advertisements, and
-  management operations during failure, plus the final acceptance evidence
-  described in the production-readiness program.
+- Remaining before a release claim: broader multi-node failure evidence,
+  changed advertisements, and management operations during failure, plus the
+  final acceptance evidence described in the production-readiness program.
 
 ## Phase 6 — Services over Core NATS
 

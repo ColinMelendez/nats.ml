@@ -868,11 +868,13 @@ through individual helper functions:
   the dedicated Ordered reconnect runner also checks cross-SDK stream and
   consumer recovery under seed loss, elected-leader loss, and durable seed
   restart for five authenticated or TLS modes across all three pinned
-  releases. The dedicated Object Store interop matrix now covers its
+  releases. The authenticated KV and Object Store cluster companions also
+  cover fixed node-a/node-b/node-c loss for the same five modes across all
+  three pinned releases. The dedicated Object Store interop matrix now covers its
   single-server Go-peer contract in all six anonymous, token, and
   username/password plaintext/TLS modes across the three pinned releases.
-  Broader Object Store cluster/reconnect and failure-injection matrices remain
-  later work. The dedicated Push
+  Broader multi-node, changed-advertisement, and failure-injection matrices
+  remain later work. The dedicated Push
   reconnect runner checks durable consumer recovery across a persistent server
   restart for the same five modes and all three pinned releases.
 - cross-check observable behavior with NATS by Example and at least one
