@@ -191,6 +191,13 @@ runs do not collide, that interruption preserves the signal status, and that
 every process and readiness phase has a deadline. The harness must not rely on
 global Docker cleanup or a large VM, and the documented local Colima baseline
 is a 10 GiB disk with room to increase only when evidence requires it.
+For heavier matrices, the opt-in `scripts/runtest-with-colima.sh` wrapper owns
+a separate `nats-tests` profile with 4 CPUs, 6 GiB RAM, and a 12 GiB disk by
+default. It restores the previous Docker context and stops the profile only
+when this invocation started it; an existing profile is never resized, and an
+already-running profile is not stopped. Named profiles are serialized so
+concurrent runs cannot start or stop the same VM. The lightweight
+`scripts/start-colima.sh` baseline remains unchanged.
 
 Expose the layers as explicit commands rather than attaching Docker work to
 the default `dune runtest` alias:
@@ -243,10 +250,10 @@ multi-node, changed-advertisement, and broader management-operation failure
 topologies remain in this workstream.
 The authenticated KV companion wrappers now route the same five generated
 NKey/JWT/TLS modes through the three failure modes and three pinned releases.
-An NKey seed smoke and an isolated JWT restart case pass. The full 45-cell KV
-sweep remains a release gate: a sequential run reached nats-server 2.12.15's
-`JSInsufficientResourcesErr` after earlier cells, while the same JWT restart
-case passed in isolation.
+The full 45-cell KV sweep now passes under the owned `nats-tests` Colima
+profile, including the previously resource-sensitive nats-server 2.12.15 JWT
+restart case. The remaining acceptance work is broader multi-node loss,
+changed-advertisement behavior, and management-operation failure coverage.
 
 #### D. Make cross-SDK behavior the wire-level oracle
 
@@ -1009,9 +1016,9 @@ semantics before calling the feature complete.
   server/version combinations beyond the pinned auth/TLS matrix remain.
 - Added the authenticated KV cluster wrappers, reusing the established
   JetStream cluster matrix for NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS
-  across seed, leader, and restart failures. The first smoke and isolated
-  restart evidence pass; the full matrix remains pending because a sequential
-  run encountered nats-server 2.12.15's `JSInsufficientResourcesErr`.
+  across seed, leader, and restart failures. The full 45-cell matrix now passes
+  across the three pinned releases under the owned `nats-tests` Colima profile;
+  its remaining gap is broader multi-node and changed-advertisement evidence.
 
 ### Workstream 5B — Object Store
 
@@ -1094,9 +1101,10 @@ revision semantics before documenting them as stable.
   cleanup, and replacement cleanup for prior tombstone NUIDs are covered by
   focused mock-transport regressions. File-transfer partial-result behavior is
   now explicit in the public documentation.
-- Remaining before a release claim: full authenticated and multi-node KV/
-  Object Store failure evidence, plus the final acceptance evidence described
-  in the production-readiness program.
+- Remaining before a release claim: broader multi-node KV/Object Store failure
+  evidence, including each-node loss, changed advertisements, and management
+  operations during failure, plus the final acceptance evidence described in
+  the production-readiness program.
 
 ## Phase 6 — Services over Core NATS
 

@@ -178,6 +178,31 @@ scenarios are split into focused runners; the server reconnect runner starts
 two single-node servers, kills the active one, checks pending-request failure,
 checks Core subscription recovery, and checks Service endpoint and monitoring
 recovery through the same failover.
+
+For heavier matrices, use the owned test profile wrapper:
+
+```text
+./scripts/runtest-with-colima.sh \
+  ./scripts/runtest-interop-auth-key-value-cluster-matrix.sh
+```
+
+It defaults to a separate `nats-tests` profile with 4 CPUs, 6 GiB of RAM, and
+a 12 GiB disk. It restores the Docker context that was active before the run
+and stops the profile only when this invocation started it. If the profile is
+already present, it uses the stored allocation without resizing it; a running
+profile is not stopped. Override `NATS_TEST_COLIMA_PROFILE`,
+`NATS_TEST_COLIMA_CPUS`,
+`NATS_TEST_COLIMA_MEMORY_GIB`, or `NATS_TEST_COLIMA_DISK_GIB` when the host
+requires a different allocation for a new profile. `DOCKER_HOST` must be unset
+so the wrapper can isolate Docker access to the selected profile. The wrapper
+serializes use of a named profile; choose distinct profile names for concurrent
+VM-backed runs. It records the owner PID and reports a possibly stale lock when
+that process no longer exists, but never removes a lock automatically; after
+an uncatchable termination it reports the exact path for manual inspection.
+The lock should be removed only after confirming no test wrapper is running.
+The KV matrix pulls its pinned NATS images on demand, while the system-account
+runners keep their cached-image-only contract.
+
 The cluster runner starts a three-node route mesh, connects only to the seed,
 checks the advertised client URLs, kills the seed, verifies recovery to a
 discovered peer, then kills that active peer and verifies recovery to the last
@@ -336,10 +361,10 @@ The authenticated KV companion wrappers
 `./scripts/runtest-interop-auth-key-value-cluster.sh` and
 `./scripts/runtest-interop-auth-key-value-cluster-matrix.sh` now route the five
 generated NKey/JWT/TLS modes through the same three failure modes. The NKey
-seed smoke and isolated JWT restart cases pass; the full 45-cell KV sweep
-remains a release gate after a sequential run reached a server-side
-`JSInsufficientResourcesErr` on nats-server 2.12.15, while the same JWT restart
-case passed in isolation. The dedicated
+seed smoke and isolated JWT restart cases pass. The full 45-cell KV sweep now
+passes across all three pinned releases under the owned `nats-tests` Colima
+profile, including the previously resource-sensitive 2.12.15 JWT restart
+case. The dedicated
 `./scripts/runtest-interop-object-store-cluster.sh`
 runner covers replicated Object Store content, metadata, cross-SDK writes and
 reads, cleanup, seed loss, elected-leader loss, and durable seed restart in
