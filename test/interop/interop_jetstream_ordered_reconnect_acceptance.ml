@@ -21,13 +21,34 @@ let required name =
 
 let leader_failover () =
   match Sys.getenv_opt "NATS_TEST_JS_CLUSTER_FAILURE_MODE" with
-  | None | Some "seed" | Some "node-a" | Some "node-b" | Some "node-c" -> false
+  | None
+  | Some "seed"
+  | Some "node-a"
+  | Some "node-b"
+  | Some "node-c"
+  | Some "restart"
+  | Some "multi-node" -> false
   | Some "leader" -> true
+  | Some value ->
+      failf
+        "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, node-a, node-b, \
+         node-c, leader, restart, or multi-node, got %S"
+        value
+
+let multi_node_loss () =
+  match Sys.getenv_opt "NATS_TEST_JS_CLUSTER_FAILURE_MODE" with
+  | Some "multi-node" -> true
+  | None
+  | Some "seed"
+  | Some "node-a"
+  | Some "node-b"
+  | Some "node-c"
+  | Some "leader"
   | Some "restart" -> false
   | Some value ->
       failf
         "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, node-a, node-b, \
-         node-c, leader, or restart, got %S"
+         node-c, leader, restart, or multi-node, got %S"
         value
 
 let endpoint () =
@@ -226,6 +247,7 @@ let run env =
   let stream_name = required "NATS_TEST_INTEROP_STREAM" in
   let signal = required "NATS_TEST_INTEROP_SIGNAL" in
   let leader_failover = leader_failover () in
+  let multi_node_loss = multi_node_loss () in
   let restart =
     match Sys.getenv_opt "NATS_TEST_JS_CLUSTER_FAILURE_MODE" with
     | Some "restart" -> true
@@ -351,7 +373,11 @@ let run env =
             | Some value when not (String.equal value initial_name) -> ()
             | Some value -> failf "reconnected to killed server %S" value
             | None -> failf "reconnect INFO had no server name");
-            if restart then touch (signal ^ ".ocaml-reconnected"));
+            if restart || multi_node_loss then (
+              touch (signal ^ ".ocaml-reconnected");
+              if multi_node_loss then
+                wait_for_file ~clock ~timeout:reconnect_timeout ~failure_file
+                  ~label:"multi-node recovery" (signal ^ ".multi-node-recovered")));
           let after_result, after_result_u = Eio.Promise.create () in
           Eio.Fiber.fork ~sw (fun () ->
               Eio.Promise.resolve after_result_u

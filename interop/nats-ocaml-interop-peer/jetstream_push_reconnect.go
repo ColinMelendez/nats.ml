@@ -54,6 +54,26 @@ func waitForJetStreamReconnectSignal(signal string) error {
 	return fmt.Errorf("timed out waiting for reconnect signal %s", path)
 }
 
+func waitForJetStreamMultiNodeRecoverySignal(signal string) error {
+	deadline := time.Now().Add(jetStreamReconnectWait)
+	path := signal + ".multi-node-recovered"
+	failurePath := signal + ".failed"
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(failurePath); err == nil {
+			return fmt.Errorf("multi-node failure watcher failed (see %s)", failurePath)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("check multi-node failure watcher: %w", err)
+		}
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("check multi-node recovery signal: %w", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out waiting for multi-node recovery signal %s", path)
+}
+
 func retryJetStreamConsumerInfo(jetstream nats.JetStreamContext, stream, consumer string, deadline time.Time) (*nats.ConsumerInfo, error) {
 	var lastError error
 	for time.Now().Before(deadline) {

@@ -297,6 +297,15 @@ func runMode(config options) error {
 		}
 		config.requireReplicatedStream = true
 		return runJetStreamOrderedReconnectPeer(config)
+	case "jetstream-ordered-multi-node":
+		if config.signal == "" {
+			return fmt.Errorf("signal-file is required in jetstream-ordered-multi-node mode")
+		}
+		if config.stream == "" {
+			return fmt.Errorf("stream is required in jetstream-ordered-multi-node mode")
+		}
+		config.multiNodeLoss = true
+		return runJetStreamOrderedReconnectPeer(config)
 	case "jetstream-ordered-leader-failover":
 		if config.signal == "" {
 			return fmt.Errorf("signal-file is required in jetstream-ordered-leader-failover mode")
@@ -328,6 +337,15 @@ func runMode(config options) error {
 		}
 		config.requireReplicatedStream = true
 		return runJetStreamKeyValueOrderedReconnectPeer(config)
+	case "jetstream-kv-multi-node":
+		if config.signal == "" {
+			return fmt.Errorf("signal-file is required in jetstream-kv-multi-node mode")
+		}
+		if config.bucket == "" {
+			return fmt.Errorf("bucket is required in jetstream-kv-multi-node mode")
+		}
+		config.multiNodeLoss = true
+		return runJetStreamKeyValueOrderedReconnectPeer(config)
 	case "jetstream-kv-leader-failover":
 		if config.signal == "" {
 			return fmt.Errorf("signal-file is required in jetstream-kv-leader-failover mode")
@@ -358,6 +376,15 @@ func runMode(config options) error {
 			return fmt.Errorf("bucket is required in jetstream-object-restart mode")
 		}
 		config.requireReplicatedStream = true
+		return runJetStreamObjectReconnectPeer(config)
+	case "jetstream-object-multi-node":
+		if config.signal == "" {
+			return fmt.Errorf("signal-file is required in jetstream-object-multi-node mode")
+		}
+		if config.bucket == "" {
+			return fmt.Errorf("bucket is required in jetstream-object-multi-node mode")
+		}
+		config.multiNodeLoss = true
 		return runJetStreamObjectReconnectPeer(config)
 	case "jetstream-object-leader-failover":
 		if config.signal == "" {

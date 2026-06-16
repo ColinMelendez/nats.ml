@@ -12,11 +12,11 @@ if [ "${NATS_INTEGRATION_SHELL-}" != 1 ]; then
 fi
 
 images=${NATS_SERVER_IMAGES:-nats:2.10.22,nats:2.12.15,nats:2.14.5}
-modes=${NATS_INTEROP_OBJECT_STORE_CLUSTER_MODES:-node-a,node-b,node-c,leader,restart}
+modes=${NATS_INTEROP_OBJECT_STORE_CLUSTER_MODES:-node-a,node-b,node-c,leader,restart,multi-node}
 
 case "$modes" in
   ""|,*|*,|*,,*)
-    echo "NATS_INTEROP_OBJECT_STORE_CLUSTER_MODES must contain node-a, node-b, node-c, leader, and/or restart (seed is an alias for node-a) with no empty entries" >&2
+    echo "NATS_INTEROP_OBJECT_STORE_CLUSTER_MODES must contain node-a, node-b, node-c, leader, restart, and/or multi-node (seed is an alias for node-a) with no empty entries" >&2
     exit 1
     ;;
 esac
@@ -35,10 +35,10 @@ fi
 mode_list=
 for mode do
   case "$mode" in
-    seed|node-a|node-b|node-c|leader|restart)
+    seed|node-a|node-b|node-c|leader|restart|multi-node)
       ;;
     *)
-      echo "unknown Object Store cluster interop mode: $mode (expected node-a, node-b, node-c, leader, or restart)" >&2
+      echo "unknown Object Store cluster interop mode: $mode (expected node-a, node-b, node-c, leader, restart, or multi-node)" >&2
       exit 1
       ;;
   esac

@@ -455,10 +455,16 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 		return err
 	} else {
 		recoveryDeadline = time.Now().Add(orderedReconnectWait)
-		if config.requireReplicatedStream {
+		if config.requireReplicatedStream || config.multiNodeLoss {
 			if err := os.WriteFile(config.signal+".go-reconnected", []byte("ready\n"), 0600); err != nil {
 				return fmt.Errorf("write Go reconnect barrier: %w", err)
 			}
+		}
+		if config.multiNodeLoss {
+			if err := waitForJetStreamMultiNodeRecoverySignal(config.signal); err != nil {
+				return err
+			}
+			recoveryDeadline = time.Now().Add(orderedReconnectWait)
 		}
 	}
 	if err != nil {
@@ -468,7 +474,7 @@ func runJetStreamOrderedReconnectPeer(config options) error {
 		return err
 	}
 	if config.leader == "" {
-		if config.requireReplicatedStream {
+		if config.requireReplicatedStream || config.multiNodeLoss {
 			// A restarted node must rejoin the file-backed stream with current
 			// replicas before the peer declares recovery complete.
 			streamInfo, err = retryJetStreamStreamQuorum(jetstream, config.stream, 3, 3, recoveryDeadline)

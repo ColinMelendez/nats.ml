@@ -121,20 +121,21 @@ killed_file="$signal.killed"
 kill_ready_file="$signal.kill-ready"
 go_reconnected_file="$signal.go-reconnected"
 ocaml_reconnected_file="$signal.ocaml-reconnected"
+multi_node_recovered_file="$signal.multi-node-recovered"
 
 # shellcheck disable=SC1091 # script_dir points at this file's directory.
 . "$script_dir/test-artifacts.sh"
 artifact_init "interop-$cluster_scenario-cluster" "$run_id"
 
 case "$failure_mode" in
-  seed|node-a|node-b|node-c|leader|restart) ;;
+  seed|node-a|node-b|node-c|leader|restart|multi-node) ;;
   *)
-    echo "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, node-a, node-b, node-c, leader, or restart" >&2
+    echo "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, node-a, node-b, node-c, leader, restart, or multi-node" >&2
     exit 1
     ;;
 esac
 
-if [ "$failure_mode" = restart ]; then
+if [ "$failure_mode" = restart ] || [ "$failure_mode" = multi-node ]; then
   primary_data_volume="$primary_name-data-$volume_suffix"
   secondary_data_volume="$secondary_name-data-$volume_suffix"
   tertiary_data_volume="$tertiary_name-data-$volume_suffix"
@@ -295,7 +296,8 @@ cleanup() {
   fi
   rm -f "$signal" "$signal.1" "$signal.failed" "$leader_file" \
     "$survivor_file" "$survivor_tmp" "$killed_file" "$kill_ready_file" \
-    "$go_reconnected_file" "$ocaml_reconnected_file" "$peer_ready" \
+    "$go_reconnected_file" "$ocaml_reconnected_file" \
+    "$multi_node_recovered_file" "$peer_ready" \
     "$peer_log" "$ocaml_log" "$docker_error"
 }
 
@@ -367,7 +369,7 @@ run_server() {
   client_port=$3
   routes=$4
   data_option="--tmpfs /data"
-  if [ "$failure_mode" = restart ]; then
+  if [ "$failure_mode" = restart ] || [ "$failure_mode" = multi-node ]; then
     data_volume="$node_name-data-$volume_suffix"
     data_option="--volume $data_volume:/data"
   fi
@@ -708,7 +710,7 @@ fi
     esac
   else
     case "$failure_mode" in
-      seed|node-a|restart) target=$primary ;;
+      seed|node-a|restart|multi-node) target=$primary ;;
       node-b) target=$secondary ;;
       node-c) target=$tertiary ;;
       *)
@@ -736,6 +738,27 @@ fi
       touch "$signal.failed"
       exit 1
     fi
+  elif [ "$failure_mode" = multi-node ]; then
+    if ! wait_for_barrier "$go_reconnected_file" "Go first reconnect barrier" ||
+      ! wait_for_barrier "$ocaml_reconnected_file" "OCaml first reconnect barrier"; then
+      touch "$signal.failed"
+      exit 1
+    fi
+    if ! docker kill "$secondary" >/dev/null 2>&1; then
+      touch "$signal.failed"
+      exit 1
+    fi
+    if ! docker start "$primary" >/dev/null 2>&1 ||
+      ! docker start "$secondary" >/dev/null 2>&1; then
+      touch "$signal.failed"
+      exit 1
+    fi
+    if ! wait_until_ready_count "$primary" 2 ||
+      ! wait_until_ready_count "$secondary" 2; then
+      touch "$signal.failed"
+      exit 1
+    fi
+    touch "$multi_node_recovered_file"
   fi
   if [ "$failure_mode" = leader ]; then
     touch "$killed_file"
@@ -759,6 +782,15 @@ elif [ "$failure_mode" = restart ]; then
     peer_mode=jetstream-object-restart
   else
     peer_mode=jetstream-ordered-restart
+  fi
+  peer_server="$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$tertiary_port")"
+elif [ "$failure_mode" = multi-node ]; then
+  if [ "$cluster_scenario" = kv ]; then
+    peer_mode=jetstream-kv-multi-node
+  elif [ "$cluster_scenario" = object ]; then
+    peer_mode=jetstream-object-multi-node
+  else
+    peer_mode=jetstream-ordered-multi-node
   fi
   peer_server="$(endpoint_for_port "$cluster_base_port"),$(endpoint_for_port "$secondary_port"),$(endpoint_for_port "$tertiary_port")"
 else
@@ -878,7 +910,7 @@ else
       ocaml_recovered_names=cluster-a,cluster-b
       ocaml_discovered="$(host_port_for_port "$cluster_base_port"),$(host_port_for_port "$secondary_port")"
       ;;
-    seed|node-a) ;;
+    seed|node-a|multi-node) ;;
     *)
       echo "unknown non-leader JetStream cluster failure mode: $failure_mode" >&2
       exit 1

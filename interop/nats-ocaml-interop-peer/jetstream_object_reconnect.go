@@ -358,9 +358,14 @@ func runJetStreamObjectReconnectPeer(config options) error {
 	} else if err := waitJetStreamReconnect(reconnected); err != nil {
 		return err
 	} else {
-		if config.requireReplicatedStream {
+		if config.requireReplicatedStream || config.multiNodeLoss {
 			if err := os.WriteFile(config.signal+".go-reconnected", []byte("ready\n"), 0600); err != nil {
 				return fmt.Errorf("write Go reconnect barrier: %w", err)
+			}
+		}
+		if config.multiNodeLoss {
+			if err := waitForJetStreamMultiNodeRecoverySignal(config.signal); err != nil {
+				return err
 			}
 		}
 		recoveryDeadline = time.Now().Add(objectReconnectWait)
@@ -371,7 +376,7 @@ func runJetStreamObjectReconnectPeer(config options) error {
 		}
 		return err
 	}
-	if config.leader == "" && config.requireReplicatedStream {
+	if config.leader == "" && (config.requireReplicatedStream || config.multiNodeLoss) {
 		if _, err = retryJetStreamStreamQuorum(legacyJetstream, streamName, 8, 8, recoveryDeadline); err != nil {
 			return err
 		}
