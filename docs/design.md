@@ -294,11 +294,13 @@ each client either continues the existing Ordered consumer at the next
 consumer sequence or recreates it from the next stream sequence if the
 one-replica consumer leader was also lost. Consumer identity is therefore not
 an invariant of endpoint or stream-leader recovery. The authenticated matrix
-covers NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS under both failures on
-`nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. Its sequential
-two-node-loss mode also passes anonymous Ordered, KV, and Object Store smoke
-cases on `nats:2.10.22`; broader release, credential, changed-advertisement,
-and management-operation evidence remains final-acceptance work.
+covers NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS under seed loss,
+elected-leader loss, durable restart, full management unavailability, and
+changed client advertisements on `nats:2.10.22`, `nats:2.12.15`, and
+`nats:2.14.5`. Its sequential two-node-loss mode also passes anonymous
+Ordered, KV, and Object Store smoke cases on `nats:2.10.22`; authenticated
+Ordered, KV, and Object Store multi-node matrices each pass 15 cases across
+the three releases and five credential/TLS modes.
 
 Key-Value exposes this state machine through a separate
 `Key_value.Ordered_watch` mode. It retains the ordinary watch's typed entry
@@ -562,9 +564,13 @@ drains; preserves live subscription handles, queues, and replay intent; closes
 the old flow idempotently; and redials through the stored connection seam. The
 connection accepts validated endpoint seeds, resolves each candidate again for
 every dial pass, tries every returned stream address, prefers the successful
-endpoint, and rotates failures. An `INFO` replaces the discovered candidate
-set while configured seeds remain sticky; both full endpoint URLs and bare
-`host[:port]` advertisements are accepted. Bare advertisements inherit the
+endpoint, and rotates failures. Each non-empty `INFO.connect_urls` replaces
+the non-seed discovered candidate set while configured seeds remain sticky;
+empty advertisements are no-ops, and the currently connected discovered
+endpoint remains available when absent from an advertisement until another
+endpoint becomes current and processes a later advertisement.
+Both full endpoint URLs and bare `host[:port]` advertisements are accepted.
+Bare advertisements inherit the
 current endpoint's scheme, so a server-required TLS upgrade remains a
 plaintext-INFO-then-upgrade reconnect rather than becoming a TLS-first dial.
 Initial handshake failures fail over across remaining configured seeds. The
@@ -585,8 +591,10 @@ and username/password authentication, server-required TLS, request timeout and
 cancellation cleanup, auto-unsubscribe, subscription drain, connection drain,
 bounded slow-consumer handling, parent-switch cleanup, reconnect recovery,
 three-node cluster discovery/failover with subscription recovery, and lame-duck
-INFO/event handling with continued use of the existing connection. Advanced
-cluster failure scenarios and broader cross-SDK acceptance remain later work.
+INFO/event handling with continued use of the existing connection. The
+authenticated multi-node KV and Object Store acceptance slices now pass across
+the five credential/TLS modes and three pinned releases; this is evidence for
+the existing recovery operation, not a new Core discovery or Ordered API.
 
 The normal user operations should be direct-style and result-returning:
 
@@ -877,11 +885,12 @@ through individual helper functions:
   username/password plaintext/TLS modes across the three pinned releases.
   The cluster runner now exposes a sequential two-node-loss mode with explicit
   no-quorum and full-replica barriers; anonymous smoke cases pass on
-  `nats:2.10.22`, while full release evidence and the broader
-  changed-advertisement and management-operation failure matrices remain later
-  work. The dedicated Push
-  reconnect runner checks durable consumer recovery across a persistent server
-  restart for the same five modes and all three pinned releases.
+  `nats:2.10.22`. The authenticated multi-node KV and Object Store matrices
+  also pass all 15 cases each across the five credential/TLS modes and three
+  pinned releases. Changed-advertisement and management-operation failure
+  matrices are defined by the Ordered runner. The dedicated Push reconnect
+  runner checks durable consumer recovery across a persistent server restart
+  for the same five modes and all three pinned releases.
 - cross-check observable behavior with NATS by Example and at least one
   official client for each feature family.
 

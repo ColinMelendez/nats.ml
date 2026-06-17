@@ -24,8 +24,8 @@ marked as covered.
 | Server-wide administration | Monitoring and selected controls covered by the optional `nats-eio-system` package | This privileged `$SYS` surface is separate from JetStream and outside the pinned Go JetStream package parity claim; claims, resolver, and user-management operations remain out of scope and explicit system-account authorization is required |
 | JetStream publishing | Covered, including async futures, retries, TTL/schedule headers, atomic and fast batches | Shared async acknowledgement multiplexing is a throughput optimization, not a capability gap |
 | JetStream consumption | Covered: pull, push, ordered, fetch, no-wait, heartbeats, flow control, priority, and continuous consumption | Go callback/channel receive shapes and threshold/error-handler tuning are represented by direct Eio iteration and structured results |
-| Key-Value | Covered: CRUD, CAS, history, ordinary and ordered watches, listers, managers, policy fields, composition, TTL, purge-marker cleanup, the 45-cell authenticated seed/leader/restart matrix, the separate 45-cell authenticated fixed-node matrix, the expanded 15-cell anonymous fixed-node/leader/restart matrix across three pinned releases, and an anonymous multi-node-loss smoke case on `nats:2.10.22` | Ordinary and ordered watch behavior remain separate contracts; broader release and authenticated multi-node-loss, changed-advertisement, and management-operation evidence remains acceptance work |
-| Object Store | Covered: streaming CRUD, links, metadata, watches, listing, sealing, managers, file helpers, Go interop, the 45-cell authenticated seed/leader/restart matrix, the separate 45-cell authenticated fixed-node matrix, the expanded 15-cell anonymous fixed-node/leader/restart cluster matrix, the six-mode single-server authentication/TLS matrix across three pinned releases, and an anonymous multi-node-loss smoke case on `nats:2.10.22` | No material data-plane gap; broader release and authenticated multi-node-loss, changed-advertisement, and management-operation evidence remains acceptance work |
+| Key-Value | Covered: CRUD, CAS, history, ordinary and ordered watches, listers, managers, policy fields, composition, TTL, purge-marker cleanup, the 45-cell authenticated seed/leader/restart matrix, the separate 45-cell authenticated fixed-node matrix, the 15-cell authenticated multi-node matrix, the expanded 15-cell anonymous fixed-node/leader/restart matrix across three pinned releases, and an anonymous multi-node-loss smoke case on `nats:2.10.22` | Ordinary and ordered watch behavior remain separate contracts |
+| Object Store | Covered: streaming CRUD, links, metadata, watches, listing, sealing, managers, file helpers, Go interop, the 45-cell authenticated seed/leader/restart matrix, the separate 45-cell authenticated fixed-node matrix, the 15-cell authenticated multi-node matrix, the expanded 15-cell anonymous fixed-node/leader/restart cluster matrix, the six-mode single-server authentication/TLS matrix across three pinned releases, and an anonymous multi-node-loss smoke case on `nats:2.10.22` | No material data-plane gap |
 | Services | Covered for the pinned `micro` surface and lifecycle matrices | Future server/SDK versions and transport-specific integration hooks remain separate work |
 
 ## Core, authentication, and transport
@@ -186,12 +186,15 @@ the ordinary watch's duplicate and loss semantics stable.
 The local mock suite covers retained/live and empty snapshots, metadata-only
 delivery, and deterministic gap recovery. The authenticated fixed-node
 cross-SDK matrix adds 45 live cases across the three pinned releases and five
-credential/TLS modes. The cluster runner now has a sequential two-node-loss
-mode with explicit barriers for no-quorum loss and full three-replica recovery;
-anonymous Ordered, KV, and Object Store smoke cases pass on `nats:2.10.22`,
-while the full release, authenticated, and changed-advertisement tests remain
-acceptance work. The lower-level ordered consumer already has the corresponding
-live recovery harness.
+credential/TLS modes. The Ordered cluster runner also covers full management
+unavailability and changed client advertisements; those additions contribute
+30 authenticated cases across the same releases and modes, in addition to the
+anonymous cases. The cluster runner's sequential two-node-loss mode still has
+anonymous Ordered, KV, and Object Store smoke coverage on `nats:2.10.22`;
+the authenticated Ordered, KV, and Object Store multi-node matrices each pass
+15 cases across the three releases and five credential/TLS modes. The
+lower-level ordered consumer already has the corresponding live recovery
+harness.
 
 The pinned Go interop runner covers revisions, stale CAS, tombstones, watches,
 purge markers, and cleanup across the supported single-server matrix.
@@ -216,11 +219,13 @@ releases. The dedicated anonymous cluster runner also covers fixed
 node-a/node-b/node-c loss, elected-leader loss, and durable seed restart across
 all 15 pinned server-version/mode cells. The cluster runner also exposes a
 sequential two-node-loss mode; its anonymous Object Store smoke case passes
-on `nats:2.10.22`. Authenticated multi-node-loss and changed-advertisement
-evidence remain separate acceptance work rather than an unimplemented Object
-Store API. The authenticated fixed-node companion adds
-45 passing cases across node-a/node-b/node-c, five credential/TLS modes, and
-the three pinned releases.
+on `nats:2.10.22`. Its authenticated multi-node-loss companion now passes 15
+cases across the five credential/TLS modes and three pinned releases; this is
+acceptance evidence rather than an unimplemented Object Store API. Changed
+advertisement and management-operation failure are defined by the Ordered
+runner, not by the Object Store scenario. The authenticated fixed-node
+companion adds 45 passing cases across node-a/node-b/node-c, five
+credential/TLS modes, and the three pinned releases.
 
 ## Services
 

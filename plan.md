@@ -52,9 +52,13 @@ limit, `None` permits unlimited attempts, and `Some 0` disables recovery.
 Validated endpoint seeds and candidate selection are now part of that Eio
 surface: each dial pass resolves every candidate again, tries all returned
 stream addresses, prefers the endpoint that connected, and rotates failed
-endpoints. Each `INFO.connect_urls` replaces the discovered set while
-configured seeds remain sticky; both full endpoint URLs and bare `host[:port]`
-advertisements are accepted. Initial handshake failures fail over across the
+endpoints. Each non-empty `INFO.connect_urls` replaces the non-seed discovered
+set while configured seeds remain sticky; empty advertisements leave the
+current candidates unchanged, and the currently connected discovered endpoint
+remains available when absent from an advertisement until another endpoint
+becomes current and processes a later advertisement. Both full endpoint URLs
+and bare `host[:port]` advertisements are accepted. Initial handshake failures
+fail over across the
 remaining configured seeds. Explicit `tls://` endpoint dialing now performs a
 bounded TLS handshake before the NATS handshake, and bare advertisements
 inherit the active session scheme. The caller-owned TLS configuration supplies
@@ -129,10 +133,10 @@ recovery, including durable confirmation and ephemeral recreation. Its
 cross-SDK authenticated/TLS restart matrix now covers NKey, JWT,
 NKey-over-TLS, JWT-over-TLS, and mTLS across the three pinned releases. The
 cross-SDK Ordered reconnect harness now covers seed-node loss, elected
-JetStream-leader loss, and durable seed restart under NKey, JWT, NKey-over-TLS,
-JWT-over-TLS, and mTLS across the three pinned server releases; additional
-cluster failure scenarios and the broader cross-SDK acceptance matrix remain
-in the final acceptance phase. Current consumer confidence combines local mock
+JetStream-leader loss, durable seed restart, full management unavailability,
+and changed client advertisements under NKey, JWT, NKey-over-TLS, JWT-over-TLS,
+and mTLS across the three pinned server releases. Current consumer confidence
+combines local mock
 transport and pure-boundary tests with the passing single-server and
 authenticated cluster acceptance slices. Priority-group pull consumers are
 now modeled locally:
@@ -155,6 +159,16 @@ connection seam; replays INFO/TLS/CONNECT and subscriptions; emits
 non-terminal `Disconnected`/`Reconnected` events; and defers unsubscribe
 commands until the replacement session is ready. It does not replay
 arbitrary publishes or pending requests.
+
+The latest acceptance slice closes the Ordered-consumer endpoint-failure
+scenarios that were previously only planned. The endpoint pool now matches the
+Go SDK's observable discovery behavior for empty advertisements, configured
+seeds, and the currently connected discovered endpoint. Anonymous Ordered
+`management` and `changed-advertised` cases pass on all three pinned releases;
+the authenticated companion adds 30 passing cases across NKey, JWT,
+NKey-over-TLS, JWT-over-TLS, and mTLS. The changed-advertised harness also
+normalizes the Go SDK's `tls://` discovered URL form before comparing it. The
+`nats-tests` Colima VM is stopped by the wrapper after each matrix run.
 
 ### Go parity checkpoint
 
@@ -241,16 +255,18 @@ current after the seed returns. The runner now also has explicit node-a,
 node-b, and node-c loss modes. The anonymous Ordered, KV, and Object Store
 matrices each pass 15 cases across the three releases, and the authenticated
 Ordered fixed-node sweep passes 45 cases across the five credential/TLS modes
-and three releases. The remaining cases are changed advertised client URLs,
-reconnect during management and delivery operations, consumer recreation
-under more failure modes, and multi-node loss. Keep the failure trigger
+and three releases. The Ordered management-outage and changed-advertised
+scenarios now pass anonymously on all three releases and add 30 authenticated
+cases across those modes and releases. Keep the failure trigger
 synchronized with a flushed, observable barrier so a test failure identifies
 the lost invariant rather than a startup race.
 The anonymous Object Store cluster runner separately covers replicated content
 and metadata recovery after fixed node-a/node-b/node-c loss, elected-leader
 loss, and durable seed restart; all 15 cases pass across the three pinned
-releases. Authenticated multi-node, changed-advertisement, and broader
-management-operation failure topologies remain in this workstream.
+releases. Authenticated multi-node loss now also passes 15 cases for each of
+the KV and Object Store feature-family runners across the five credential/TLS
+modes and three pinned releases; the Ordered management and changed-advertised
+topologies are covered below.
 The authenticated KV companion wrappers now route the same five generated
 NKey/JWT/TLS modes through the three failure modes and three pinned releases.
 The full 45-cell KV sweep now passes under the owned `nats-tests` Colima
@@ -261,15 +277,19 @@ releases. The authenticated fixed-node KV sweep adds another 45 passing cases
 across node-a, node-b, and node-c for the same five modes and three releases.
 The authenticated Object Store companion now passes its corresponding 45
 fixed-node cases across those modes, nodes, and releases. The remaining
-acceptance work is broader multi-node loss matrices, changed-advertisement
-behavior, and management-operation failure coverage. The cluster harness now
+acceptance work is broader cross-SDK and server-version coverage outside these
+failure scenarios; changed-advertisement and management-operation failures are
+currently defined for the Ordered-consumer scenario only. The
+cluster harness now
 has a `multi-node` mode: it uses persistent per-node volumes, removes node-a,
 waits for both clients to reconnect, removes node-b, restores both members,
 and only releases the recovery barrier before the Go peer observes a current
 three-replica stream. This mode intentionally does not promise JetStream
 availability during the two-node quorum loss. The anonymous ordered, KV, and
-Object Store smoke cases pass on `nats:2.10.22`; the three-release and
-authenticated matrices remain pending.
+Object Store smoke cases pass on `nats:2.10.22`; the authenticated Ordered
+multi-node matrix now passes all 15 cases across the three releases.
+The authenticated KV and Object Store multi-node matrices each pass all 15
+cases across the five credential/TLS modes and three pinned releases.
 
 #### D. Make cross-SDK behavior the wire-level oracle
 
@@ -293,12 +313,15 @@ dedicated positive matrix passes all five non-anonymous modes across the three
 pinned server releases; its companion negative matrix passes invalid NKey/JWT
 signatures and missing mTLS client certificates across the same releases for
 both SDKs. The cross-SDK Ordered reconnect matrix also passes those five modes
-under seed failure, elected-leader failure, and durable seed restart on all
-three releases. Authenticated
+under seed failure, elected-leader failure, durable seed restart, full
+management unavailability, and changed client advertisements on all three
+releases. The management and changed-advertised additions contribute 30
+passing authenticated cases. Authenticated
 JetStream Push restart now passes the same five modes across all three
-releases; authenticated multi-node loss and other feature-family combinations
-remain later acceptance increments, with server-version and feature-gate
-differences documented there.
+releases; the Ordered multi-node matrix now passes those five modes as well.
+Authenticated KV and Object Store multi-node loss and other feature-family
+combinations remain later acceptance increments, with server-version and
+feature-gate differences documented there.
 The routed system-account acceptance matrix now covers seven privileged
 credential/TLS modes—username/password, username/password over TLS, NKey, NKey
 over TLS, JWT, JWT over TLS, and certificate-mapped mTLS—across the same three
@@ -556,8 +579,10 @@ concurrency while keeping all protocol transitions inside `Nats.Client`.
 - Dial an endpoint seed list through Eio; the adapter now supports
   deterministic configured/discovered candidate selection, per-pass DNS
   resolution, address fallback, preferred-endpoint ordering, and failure
-  rotation. `INFO.connect_urls` replaces the discovered set without removing
-  configured seeds, and bare `host[:port]` advertisements are accepted.
+  rotation. Non-empty `INFO.connect_urls` replaces the non-seed discovered set
+  without removing configured seeds; empty advertisements are no-ops, the
+  current discovered endpoint remains available while it is still in use, and
+  bare `host[:port]` advertisements are accepted.
   Initial handshake failures are bounded and fail over across remaining
   configured seeds. Explicit `tls://` candidates perform bounded TLS before
   the NATS handshake; peer identity and SNI remain caller-owned through
@@ -668,8 +693,10 @@ cluster restart combinations remain later work.
   discovered peer while preserving subscription intent.
 - A live server's lame-duck `INFO` sets the typed mode flag, emits the
   `Lame_duck_mode` event, and leaves the existing connection usable.
-- Dynamic `INFO` updates replace the discovered candidate set while retaining
-  configured seeds; server discovery and endpoint rotation are observable.
+- Dynamic non-empty `INFO` updates replace the non-seed discovered candidate
+  set while retaining configured seeds; empty advertisements are no-ops, the
+  current discovered endpoint remains available while it is still in use, and
+  server discovery and endpoint rotation are observable.
 - New Core publishes accepted during reconnect are flushed from the bounded
   reconnect buffer after the replacement handshake; interrupted mutations are
   not reconciled by the client.
@@ -960,8 +987,9 @@ request/reply and subscription primitives.
   fixed-node/leader/restart sweep. The source runner now also exposes a
   sequential two-node-loss mode with explicit no-quorum and full-replica
   recovery barriers. Anonymous Ordered, KV, and Object Store smoke cases pass
-  on `nats:2.10.22`; the full release and authenticated matrices remain
-  separate work.
+on `nats:2.10.22`; the authenticated Ordered, KV, and Object Store multi-node
+matrices each pass 15 cases across the five credential/TLS modes and three
+pinned releases.
 - Completed cross-SDK Push reconnect floor: a dedicated runner keeps the same
   Go and OCaml durable Push sessions across a persistent file-backed
   nats-server restart, checks recovery barriers and post-restart JetStream
@@ -981,9 +1009,8 @@ request/reply and subscription primitives.
   JetStream-leader targeting, durable seed restart, or multi-node loss; those
   are covered by the cross-SDK Ordered reconnect runner only where its protocol
   assertions apply.
-- Remaining: additional real cluster failure scenarios, authenticated/TLS
-  multi-node-loss matrices, feature gates for remaining server-version
-  differences, and broader cross-SDK JetStream cluster coverage.
+- Remaining: feature gates for remaining server-version differences and
+  broader cross-SDK JetStream coverage outside the Ordered scenario.
 
 ### Gate G4 — JetStream API stabilization
 
@@ -1046,8 +1073,10 @@ semantics before calling the feature complete.
   across seed, leader, and restart failures. The full 45-cell matrix now passes
   across the three pinned releases under the owned `nats-tests` Colima profile;
   its fixed-node companion adds another 45 passing cases across node-a,
-  node-b, and node-c. Broader multi-node and changed-advertisement evidence
-  remains.
+  node-b, and node-c. Broader cross-SDK and server-version evidence remains for
+  the feature-family data paths outside these failure scenarios; the
+  changed-advertised and management scenarios are intentionally covered by the
+  Ordered runner only.
 
 ### Workstream 5B — Object Store
 
@@ -1071,9 +1100,10 @@ semantics before calling the feature complete.
   loss, elected-leader loss, and durable seed restart. All 15 cases pass
   across the three pinned releases. The source runner now includes a sequential
   two-node-loss mode, with anonymous Ordered, KV, and Object Store smoke cases
-  passing on `nats:2.10.22`; the full release evidence, changed-advertisement
-  coverage, and broader management-operation failure topologies remain
-  acceptance work.
+  passing on `nats:2.10.22`. Its authenticated multi-node companion also
+  passes 15 cases across the five credential/TLS modes and three pinned
+  releases. Changed-advertisement and management-operation coverage is defined
+  by the Ordered runner.
   Its companion matrix wrapper repeats the 15 default cells and supports
   bounded image and failure-mode selection. Thin authenticated companion
   wrappers now select this Object Store scenario in the existing NKey/JWT/mTLS
@@ -1112,9 +1142,9 @@ semantics before calling the feature complete.
   pinned releases.
 - Large Object Store transfer, metadata, replacement/deletion ordering,
   interrupted-transfer cleanup, listing/watch boundaries, links, rename,
-  sealing, and bucket configuration updates are covered locally; broader
-  multi-node and changed-advertisement cluster/failure coverage remains
-  acceptance work.
+  sealing, and bucket configuration updates are covered locally; authenticated
+  multi-node cluster coverage also passes for the feature-family interop
+  scenarios.
 - No direct dependence by these modules on a private socket or private
   connection lifecycle.
 
@@ -1135,9 +1165,11 @@ revision semantics before documenting them as stable.
   cleanup, and replacement cleanup for prior tombstone NUIDs are covered by
   focused mock-transport regressions. File-transfer partial-result behavior is
   now explicit in the public documentation.
-- Remaining before a release claim: broader multi-node failure evidence,
-  changed advertisements, and management operations during failure, plus the
-  final acceptance evidence described in the production-readiness program.
+- Remaining before a release claim: the final acceptance evidence described in
+  the production-readiness program and broader cross-SDK/server-version
+  coverage outside the exercised failure scenarios. Changed advertisements
+  and management operations during failure are covered by the Ordered-consumer
+  runner rather than these feature-family runners.
 
 ## Phase 6 — Services over Core NATS
 
