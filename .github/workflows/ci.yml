@@ -16,7 +16,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Format
+        run: nix develop -c dune build @fmt
       - name: Build
-        run: nix develop -c dune build @default
+        run: nix develop -c dune build @all
+      - name: Documentation
+        run: nix develop -c dune build @doc
       - name: Test
         run: nix develop -c dune runtest
+
+  integration-tools:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Check integration scripts
+        run: nix develop .#integration -c shellcheck scripts/*.sh
+      - name: Check Go interoperability peer
+        run: >-
+          nix develop .#integration -c sh -c
+          'cd interop/nats-ocaml-interop-peer && go test ./...'

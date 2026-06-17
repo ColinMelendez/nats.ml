@@ -1,0 +1,3 @@
+(executable
+ (name core_publish)
+ (libraries nats nats-eio eio_main))

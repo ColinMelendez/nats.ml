@@ -1,11 +1,12 @@
 (lang dune 3.22)
 (name nats)
+(generate_opam_files true)
 
 (package
  (name nats)
- (synopsis "A modern NATS client SDK for OCaml")
+ (synopsis "I/O-neutral NATS protocol core for OCaml")
  (description
-  "An I/O-neutral NATS protocol core, with Core NATS, JetStream, Key-Value, Object Store, Services, and runtime adapters planned as layered capabilities.")
+  "I/O-neutral Core NATS protocol types, codecs, parsing, and state-machine primitives for OCaml.")
  (license ISC)
  (authors "Colin <cwrmcolin@gmail.com>")
  (maintainers "Colin <cwrmcolin@gmail.com>")
@@ -19,15 +20,15 @@
 
 (package
  (name nats-eio)
- (synopsis "Eio connection facade for the NATS client SDK")
+ (synopsis "Eio NATS client SDK for OCaml")
  (description
-  "A structured-concurrency Eio transport and direct-style facade over the nats protocol core.")
+  "A structured-concurrency Eio TCP/TLS client with Core NATS, JetStream, Key-Value, Object Store, and Services APIs.")
  (license ISC)
  (authors "Colin <cwrmcolin@gmail.com>")
  (maintainers "Colin <cwrmcolin@gmail.com>")
  (depends
   (ocaml (>= 5.5))
-  nats
+  (nats (= :version))
   bytesrw
   jsont
   eio
@@ -51,8 +52,8 @@
  (maintainers "Colin <cwrmcolin@gmail.com>")
  (depends
   (ocaml (>= 5.5))
-  nats
-  nats-eio
+  (nats (= :version))
+  (nats-eio (= :version))
   bytesrw
   jsont
   eio
@@ -70,7 +71,7 @@
  (maintainers "Colin <cwrmcolin@gmail.com>")
  (depends
   (ocaml (>= 5.5))
-  nats-eio
+  (nats-eio (= :version))
   eio
   mtime
   opentelemetry
