@@ -6,8 +6,9 @@ structured errors, and the ownership and cancellation rules around them. The
 Key-Value, Object Store, Services, and privileged system-account APIs compose
 with this surface but have their own acceptance and documentation gates.
 
-The review closes the API-shape portion of G4. It does not claim that the
-remaining live-server and version-matrix work is complete.
+The review closes the API-shape portion of G4. It did not originally claim
+completion of the live-server and version-matrix work; the follow-up evidence
+is recorded in [`release-evidence.md`](release-evidence.md).
 
 ## Method
 

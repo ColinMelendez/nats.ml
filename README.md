@@ -125,9 +125,9 @@ remain part of the production-readiness acceptance program.
 ## Development
 
 The default current-line server pin advanced from `nats:2.14.5` to
-`nats:2.14.6` during release preparation. Historical past-tense pass counts
-below were recorded with 2.14.5 as the current-line cell unless they explicitly
-name 2.14.6. Repeating those gates on 2.14.6 is required before release.
+`nats:2.14.6` during release preparation. Its working-tree acceptance refresh
+passed; [`docs/release-evidence.md`](docs/release-evidence.md) records its scope
+and the remaining clean-tree release gate.
 
 Enter the development shell and run the build or tests with Dune:
 
@@ -422,9 +422,9 @@ between Go and OCaml. Its matrix covers the same six anonymous/authenticated
 plaintext/TLS modes across all three pinned releases; all 18 baseline cases
 pass. The Object Store interop runner uses the same official Go peer to
 exchange chunked content and metadata, updates, links, listing, tombstones,
-and sealing. Its six-mode single-server authentication/TLS matrix has recorded
-passing evidence across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`; the
-current `nats:2.14.6` release-candidate rerun remains an acceptance gate. The
+and sealing. Earlier 2.10.22 and 2.12.15 runs plus the current 2.14.6 refresh
+provide passing evidence for its six-mode single-server authentication/TLS
+matrix across all three pinned releases. The
 dedicated `./scripts/runtest-interop-key-value-cluster.sh` runner now covers
 replicated ordered-watch recovery after seed loss, elected-leader loss, and
 durable seed restart in anonymous plaintext mode. Its expanded matrix passes
@@ -510,10 +510,10 @@ eleven plaintext/TLS authentication modes (33 cases by default); set
 `NATS_SERVER_IMAGES` or `NATS_INTEROP_SERVICE_MATRIX_MODES` to select a
 bounded subset. Set `NATS_INTEROP_SERVICE_MATRIX_SCENARIOS` to
 `service-failure` and/or `service-parent-close` to apply the same matrix to
-the focused lifecycle cases; both scenarios pass all 33 version/authentication
-cells through the previous `nats:2.14.5` current-line pin. The 2.14.6 rerun is
-part of the release gate. Cross-SDK reconnect coverage remains separate from
-that version matrix.
+the focused lifecycle cases. Earlier 2.10.22 and 2.12.15 runs plus the current
+2.14.6 refresh provide passing evidence for all 33 version/authentication cells
+in each scenario. Cross-SDK reconnect coverage remains separate from that
+version matrix.
 The Service reconnect runner reuses the
 three-server failover harness, performs bidirectional endpoint requests before
 each kill, waits for both clients to report recovery, and checks endpoint

@@ -127,7 +127,7 @@ Service endpoint and monitoring recovery across a two-server reconnect, and
 exercises chunked content, metadata, links, listing, deletion and tombstones,
 watches, sealing, and cleanup. Its six-mode single-server authentication/TLS
 matrix passes all 18 cases across `nats:2.10.22`, `nats:2.12.15`, and
-`nats:2.14.5`. Push reconnect restoration is
+`nats:2.14.6`. Push reconnect restoration is
 implemented through replayable subscription
 recovery, including durable confirmation and ephemeral recreation. Its
 cross-SDK authenticated/TLS restart matrix now covers NKey, JWT,
@@ -647,7 +647,7 @@ following matrix tracks the acceptance surface; the remaining scenarios
 require additional server configuration or failure-injection control.
 
 The server matrix runner repeats the server lifecycle, cluster discovery, and
-lame-duck harnesses across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`.
+lame-duck harnesses across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.6`.
 It is a bounded nine-cell version sweep of the existing live-server contracts;
 authentication and JetStream variables apply only to the server lifecycle
 cell, while cluster and lame-duck cells intentionally remain anonymous. It
@@ -748,7 +748,7 @@ server-version, reconnect, or product-surface matrix for G3.
 
 The interop matrix runner now defines a bounded Core gate across the
 established `nats:2.10.22` compatibility floor, the `nats:2.12.15` older
-release line, and the current `nats:2.14.5` release. Each image runs the Core
+release line, and the current `nats:2.14.6` release. Each image runs the Core
 cross-SDK exchange, single-server TLS Core traffic, the repeated plaintext
 failover exchange, and the repeated TLS failover exchange, for twelve
 sequential cases by default. `NATS_SERVER_IMAGES` selects another
@@ -982,7 +982,7 @@ request/reply and subscription primitives.
   NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS under all three failure
   modes: the earlier seed/leader/restart baseline has 45 passing cases, and
   the fixed node-a/node-b/node-c sweep adds 45 passing cases on
-  `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. The anonymous Ordered,
+  `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.6`. The anonymous Ordered,
   KV, and Object Store cluster matrices each pass their expanded 15-case
   fixed-node/leader/restart sweep. The source runner now also exposes a
   sequential two-node-loss mode with explicit no-quorum and full-replica
@@ -1036,9 +1036,10 @@ semantics before calling the feature complete.
 - Completed: publish an explicit server/feature support matrix in
   `docs/support.md`. The server remains authoritative for feature availability;
   `INFO.version` is diagnostic rather than a client-side capability oracle.
-- Remaining before a broad compatibility claim: rerun the live
-  authenticated/TLS and cluster-failure acceptance gates on the current
-  release pins.
+- Completed on the release-candidate working tree: the current `nats:2.14.6`
+  refresh passed the live authenticated/TLS, single-server, and
+  cluster-failure gates. The exact scope and remaining clean-tree gate are in
+  [`docs/release-evidence.md`](docs/release-evidence.md).
 
 ## Phase 5 — Key-Value and Object Store
 
@@ -1059,7 +1060,7 @@ semantics before calling the feature complete.
 - Completed cross-SDK baseline: a Nix-built official Go `nats.go` peer and the
   OCaml client alternate bucket creation, revisioned updates, stale CAS,
   tombstones, watches, purge markers, and cleanup. The matrix passes across
-  `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` in anonymous, token,
+  `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.6` in anonymous, token,
   username/password, and corresponding server-required TLS modes.
 - Completed live cluster acceptance: the dedicated
   `runtest-interop-key-value-cluster.sh` runner uses the official Go
@@ -1092,7 +1093,7 @@ semantics before calling the feature complete.
   chunked content and metadata, applies updates, resolves object and bucket
   links, checks listing and tombstones, and validates sealing. Its six-mode
   single-server authentication/TLS matrix passes all 18 cases across
-  `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. Stream updates omit
+  `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.6`. Stream updates omit
   default values for version-gated fields absent from an older server's INFO,
   preserving Object Store sealing compatibility on the pinned 2.12 release.
 - Completed anonymous live cluster acceptance: the dedicated
@@ -1111,7 +1112,7 @@ semantics before calling the feature complete.
   wrappers now select this Object Store scenario in the existing NKey/JWT/mTLS
   cluster matrix; the five credential/TLS modes across seed, leader, and
   restart failures passed all 45 cells across nats-server 2.10.22, 2.12.15,
-  and 2.14.5. The fixed-node companion adds another 45 passing cases across
+  and 2.14.6. The fixed-node companion adds another 45 passing cases across
   node-a, node-b, and node-c for the same five modes and releases.
 - Keep transfer chunks incremental; never require a whole object as one
   `string`.
@@ -1167,11 +1168,11 @@ revision semantics before documenting them as stable.
   cleanup, and replacement cleanup for prior tombstone NUIDs are covered by
   focused mock-transport regressions. File-transfer partial-result behavior is
   now explicit in the public documentation.
-- Remaining before a release claim: the final acceptance evidence described in
-  the production-readiness program and broader cross-SDK/server-version
-  coverage outside the exercised failure scenarios. Changed advertisements
-  and management operations during failure are covered by the Ordered-consumer
-  runner rather than these feature-family runners.
+- Completed on the release-candidate working tree: the current-line Key-Value
+  and Object Store single-server and cluster-failure acceptance refresh is in
+  [`docs/release-evidence.md`](docs/release-evidence.md). Changed
+  advertisements and management operations during failure remain covered by
+  the Ordered-consumer runner rather than these feature-family runners.
 
 ## Phase 6 — Services over Core NATS
 
@@ -1206,7 +1207,7 @@ subscriptions, queue groups, and request/reply.
   delivery.
 - Completed: the dedicated official-Go Service interop runner now checks
   bidirectional custom endpoint statistics data, and its matrix repeats the
-  contract across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` under
+  contract across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.6` under
   anonymous, token, username/password, NKey, JWT, mTLS, and their supported
   TLS variants. The shared authentication helper is used by the Service
   acceptance executable, so the advanced matrix modes exercise the OCaml
@@ -1293,11 +1294,11 @@ ordinary `nats-eio` package.
   fan-out, account monitoring, reload, and a live account-connect event.
 - Completed: parameterize that runner over ordered client endpoints and add a
   reusable three-node routed system-account fixture. The pinned
-  `nats:2.14.5` scenario now verifies exact system-monitor fan-out, primary
+  `nats:2.14.6` scenario now verifies exact system-monitor fan-out, primary
   loss and Core reconnect, reduced post-failure fan-out, and replay of the
   account event subscription on a recovered connection.
 - Completed: add a cached-image system-account matrix for
-  `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. It uses the same small
+  `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.6`. It uses the same small
   ephemeral fixture for each release and refuses to pull missing images.
 - Completed: expand the routed system-account matrix to username/password,
   username/password over TLS, NKey, NKey over TLS, JWT, JWT over TLS, and

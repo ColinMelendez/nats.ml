@@ -297,7 +297,7 @@ an invariant of endpoint or stream-leader recovery. The authenticated matrix
 covers NKey, JWT, NKey-over-TLS, JWT-over-TLS, and mTLS under seed loss,
 elected-leader loss, durable restart, full management unavailability, and
 changed client advertisements on `nats:2.10.22`, `nats:2.12.15`, and
-`nats:2.14.5`. Its sequential two-node-loss mode also passes anonymous
+`nats:2.14.6`. Its sequential two-node-loss mode also passes anonymous
 Ordered, KV, and Object Store smoke cases on `nats:2.10.22`; authenticated
 Ordered, KV, and Object Store multi-node matrices each pass 15 cases across
 the three releases and five credential/TLS modes.

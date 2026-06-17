@@ -4,9 +4,11 @@ This review covers the public Key-Value and Object Store surfaces in
 `nats-eio`: bucket capabilities, revisioned entries, streaming transfers,
 watch ownership, metadata commit behavior, structured errors, and cancellation.
 It closes the API-shape portion of G5. The anonymous sequential multi-node
-smoke cases now pass on `nats:2.10.22`, but the remaining broader release,
-credential, and changed-advertisement cluster/failure matrices have not
-passed.
+smoke cases pass on `nats:2.10.22`, and the broader release and credential
+matrices have since passed. Changed-advertisement and management-operation
+failure semantics are exercised through the shared Ordered-consumer runner.
+The follow-up evidence is recorded in
+[`release-evidence.md`](release-evidence.md).
 
 ## Method
 

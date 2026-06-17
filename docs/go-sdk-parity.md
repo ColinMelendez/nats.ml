@@ -13,10 +13,11 @@ and its [Services package](https://github.com/nats-io/nats.go/tree/v1.53.1/micro
 The repository's interop runners provide behavioral evidence for the rows
 marked as covered.
 
-The recorded server-matrix counts in this audit used `nats:2.14.5` as their
-current-line cell. The default candidate is now `nats:2.14.6`; rerunning the
-acceptance gates on that patch is required before release and does not alter
-the API parity conclusion.
+The original server-matrix counts in this audit used `nats:2.14.5` as their
+current-line cell. The default candidate is now `nats:2.14.6`, and its
+working-tree acceptance refresh passed without changing the API parity
+conclusion. See [`release-evidence.md`](release-evidence.md) for its scope and
+remaining clean-tree release gate.
 
 ## Status at a glance
 
