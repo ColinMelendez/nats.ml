@@ -1025,7 +1025,6 @@ let event t event =
       else Error (Error.Slow_consumer Error.Events)
 
 let stats t = Stats.snapshot t.stats
-
 let discovered_servers t = Nats.Endpoint.Pool.discovered !(t.pool)
 
 let close_subscription t sid error =

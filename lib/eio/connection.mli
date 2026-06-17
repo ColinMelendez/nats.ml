@@ -191,15 +191,14 @@ val connect :
   (t, Error.t) result
 (** [connect endpoints] resolves and tries the configured endpoint list in
     order. A successful endpoint is preferred on later reconnect passes; DNS is
-    resolved again for every pass. Each non-empty [INFO] replaces the
-    discovered candidate set while retaining configured seeds. The current
-    discovered endpoint is retained while it is still in use; empty and
-    malformed advertisements are ignored.
-    The list must be non-empty. A [tls] endpoint requires [Config.tls] and
-    performs TLS before the NATS handshake. A successful result means that the
-    initial CONNECT has been written and the event stream is active; server
-    authorization failures are reported asynchronously as Core server-error
-    events. *)
+    resolved again for every pass. Each non-empty [INFO] replaces the discovered
+    candidate set while retaining configured seeds. The current discovered
+    endpoint is retained while it is still in use; empty and malformed
+    advertisements are ignored. The list must be non-empty. A [tls] endpoint
+    requires [Config.tls] and performs TLS before the NATS handshake. A
+    successful result means that the initial CONNECT has been written and the
+    event stream is active; server authorization failures are reported
+    asynchronously as Core server-error events. *)
 
 val publish_msg : t -> Nats.Message.t -> (unit, Error.t) result
 (** [publish_msg connection message] accepts a new publish during reconnect

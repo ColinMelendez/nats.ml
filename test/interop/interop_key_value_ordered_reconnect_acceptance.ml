@@ -76,7 +76,8 @@ let multi_node_loss () =
   | Some "node-b"
   | Some "node-c"
   | Some "leader"
-  | Some "restart" -> false
+  | Some "restart" ->
+      false
   | Some value ->
       failf
         "NATS_TEST_JS_CLUSTER_FAILURE_MODE must be seed, node-a, node-b, \
@@ -396,7 +397,8 @@ let run env =
               touch (signal ^ ".ocaml-reconnected");
               if multi_node_loss then
                 wait_for_file ~clock ~timeout:reconnect_timeout ~failure_file
-                  ~label:"multi-node recovery" (signal ^ ".multi-node-recovered")));
+                  ~label:"multi-node recovery"
+                  (signal ^ ".multi-node-recovered")));
           let recovery_result, recovery_result_u = Eio.Promise.create () in
           Eio.Fiber.fork ~sw (fun () ->
               Eio.Promise.resolve recovery_result_u

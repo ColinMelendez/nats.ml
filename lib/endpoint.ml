@@ -259,7 +259,8 @@ module Pool = struct
   let retain_preferred ~seeds ~discovered preferred =
     match preferred with
     | Some endpoint
-      when not (contains endpoint seeds) && not (contains endpoint discovered) ->
+      when (not (contains endpoint seeds)) && not (contains endpoint discovered)
+      ->
         endpoint :: discovered
     | _ -> discovered
 
