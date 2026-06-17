@@ -2,9 +2,10 @@
 set -eu
 
 script_dir=$(CDPATH=; export CDPATH; cd "$(dirname "$0")" && pwd)
+default_images=$("$script_dir/default-server-images.sh")
 cd "$script_dir/.."
 
-images=${NATS_SERVER_IMAGES:-nats:2.10.22,nats:2.12.15,nats:2.14.5}
+images=${NATS_SERVER_IMAGES:-$default_images}
 scenarios=${NATS_INTEROP_JETSTREAM_MATRIX_SCENARIOS:-pull,push}
 modes=${NATS_INTEROP_JETSTREAM_MATRIX_MODES:-anonymous,anonymous-tls}
 

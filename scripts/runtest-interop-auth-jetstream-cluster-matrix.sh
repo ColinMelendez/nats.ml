@@ -2,6 +2,7 @@
 set -eu
 
 script_dir=$(CDPATH=; export CDPATH; cd "$(dirname "$0")" && pwd)
+default_images=$("$script_dir/default-server-images.sh")
 cd "$script_dir/.."
 
 if [ "${NATS_INTEGRATION_SHELL-}" != 1 ]; then
@@ -11,7 +12,7 @@ if [ "${NATS_INTEGRATION_SHELL-}" != 1 ]; then
     NATS_INTEGRATION_SHELL=1 "$script_dir/runtest-interop-auth-jetstream-cluster-matrix.sh" "$@"
 fi
 
-images=${NATS_SERVER_IMAGES:-nats:2.10.22,nats:2.12.15,nats:2.14.5}
+images=${NATS_SERVER_IMAGES:-$default_images}
 modes=${NATS_INTEROP_AUTH_JETSTREAM_CLUSTER_MATRIX_MODES:-nkey,nkey-tls,jwt,jwt-tls,mtls}
 failure_modes=${NATS_INTEROP_AUTH_JETSTREAM_CLUSTER_FAILURE_MODES:-node-a,node-b,node-c,leader,restart,multi-node,management,changed-advertised}
 

@@ -11,7 +11,7 @@ if [ "${NATS_INTEGRATION_SHELL-}" != 1 ]; then
     NATS_INTEGRATION_SHELL=1 "$script_dir/runtest-system-cluster.sh" "$@"
 fi
 
-image=${NATS_SERVER_IMAGE:-nats:2.14.5}
+image=${NATS_SERVER_IMAGE:-nats:2.14.6}
 if ! docker image inspect "$image" >/dev/null 2>&1; then
   echo "system cluster requires cached image $image; refusing to pull it" >&2
   exit 1

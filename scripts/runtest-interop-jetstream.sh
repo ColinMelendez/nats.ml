@@ -52,7 +52,7 @@ case "$jetstream_mode" in
     peer_mode=jetstream-admin
     # Consumer reset support requires the JetStream API in NATS 2.14.
     if [ -z "${NATS_SERVER_IMAGE+x}" ]; then
-      image=nats:2.14.2
+      image=nats:2.14.6
     fi
     ;;
   push) peer_mode=jetstream-push ;;

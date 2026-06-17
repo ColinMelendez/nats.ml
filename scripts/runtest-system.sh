@@ -4,7 +4,7 @@ set -eu
 script_dir=$(CDPATH=; export CDPATH; cd "$(dirname "$0")" && pwd)
 cd "$script_dir/.."
 
-image=${NATS_SERVER_IMAGE:-nats:2.14.5}
+image=${NATS_SERVER_IMAGE:-nats:2.14.6}
 container=
 log=$(mktemp "${TMPDIR:-/tmp}/ocaml-nats-system.XXXXXX")
 

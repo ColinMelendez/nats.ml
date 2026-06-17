@@ -2,9 +2,10 @@
 set -eu
 
 script_dir=$(CDPATH=; export CDPATH; cd "$(dirname "$0")" && pwd)
+default_images=$("$script_dir/default-server-images.sh")
 cd "$script_dir/.."
 
-images=${NATS_SYSTEM_SERVER_IMAGES:-nats:2.10.22,nats:2.12.15,nats:2.14.5}
+images=${NATS_SYSTEM_SERVER_IMAGES:-$default_images}
 auth_modes=${NATS_SYSTEM_AUTH_MODES:-user-pass,user-pass-tls,nkey,nkey-tls,jwt,jwt-tls,mtls}
 case "$images" in
   ""|,*|*,|*,,*)

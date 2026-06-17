@@ -45,7 +45,7 @@
             pname = "nats-ocaml-interop-peer";
             version = "0.1.0";
             src = ./interop/nats-ocaml-interop-peer;
-            vendorHash = "sha256-iAnaEm8vuPf/Px4e3tOk0uRvBjPlslN9rOwNb1+OzWs=";
+            vendorHash = "sha256-8t5NY4M6KtSLVgKhRbRsKqzx1PncBVd31JtD6Pl4Sqk=";
             ldflags = [
               "-s"
               "-w"
@@ -61,6 +61,7 @@
             packages =
               base_packages
               ++ (with pkgs; [
+                go
                 openssl
                 nsc
                 shellcheck
