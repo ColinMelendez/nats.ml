@@ -129,7 +129,7 @@ let run env =
   let system_account_name =
     Option.value ~default:"SYS" (Sys.getenv_opt "NATS_TEST_SYSTEM_ACCOUNT_NAME")
   in
-  let reload_disconnect_allowed =
+  let reload_connection_loss_allowed =
     match Sys.getenv_opt "NATS_TEST_SYSTEM_AUTH_MODE" with
     | Some value -> String.equal value "jwt" || String.equal value "jwt-tls"
     | None -> false
@@ -308,7 +308,10 @@ let run env =
        with
       | Ok () -> ()
       | Error (Nats_eio_system.Error.Connection Nats_eio.Error.Disconnected)
-        when reload_disconnect_allowed ->
+        when reload_connection_loss_allowed ->
+          ()
+      | Error (Nats_eio_system.Error.Connection Nats_eio.Error.Timeout)
+        when reload_connection_loss_allowed ->
           ()
       | Error error -> failf "reload: %s" (system_error error));
       print_endline "system administration: ok")

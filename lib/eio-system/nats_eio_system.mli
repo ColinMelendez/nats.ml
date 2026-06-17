@@ -246,6 +246,12 @@ module Control : sig
     t ->
     server:string ->
     (unit, Error.t) result
+  (** [reload system ~server] requests a configuration reload from [server]. A
+      reload that changes or refreshes the active connection's credentials can
+      take effect before its reply is delivered. In that case the request
+      returns [Error (Connection Timeout)] after reconnect; the timeout does not
+      establish that the reload failed. Do not retry an ambiguous reload without
+      first inspecting server state. *)
 
   val kick :
     ?timeout:Mtime.Span.t ->
