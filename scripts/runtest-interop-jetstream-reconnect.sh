@@ -144,60 +144,68 @@ EOF
 fi
 
 run_server() {
-  config_file=
+  config_source=
   docker_options=
   server_options=
   case "$auth_mode" in
     anonymous)
       if [ "$tls_enabled" -eq 1 ]; then
-        config_file="$script_dir/nats-server-tls.conf"
+        config_source="$script_dir/nats-server-tls.conf"
       fi
       ;;
     token)
       docker_options="--env NATS_TEST_TOKEN"
       if [ "$tls_enabled" -eq 1 ]; then
-        config_file="$script_dir/nats-server-token-tls.conf"
+        config_source="$script_dir/nats-server-token-tls.conf"
       else
         server_options="--auth $auth_token"
       fi
       ;;
     user_pass)
-      config_file="$script_dir/nats-server-auth.conf"
+      config_source="$script_dir/nats-server-auth.conf"
       if [ "$tls_enabled" -eq 1 ]; then
-        config_file="$script_dir/nats-server-auth-tls.conf"
+        config_source="$script_dir/nats-server-auth-tls.conf"
       fi
       docker_options="--env NATS_TEST_USER --env NATS_TEST_PASS"
       ;;
     nkey)
       if [ "$tls_enabled" -eq 1 ]; then
-        config_file="$script_dir/nats-server-nkey-tls.conf"
+        config_source="$script_dir/nats-server-nkey-tls.conf"
       else
-        config_file="$script_dir/nats-server-nkey.conf"
+        config_source="$script_dir/nats-server-nkey.conf"
       fi
       docker_options="--env NATS_TEST_NKEY_PUBLIC"
       ;;
     jwt)
       if [ "$tls_enabled" -eq 1 ]; then
-        config_file="$auth_dir/nats-tls.conf"
+        config_source="$auth_dir/nats-tls.conf"
       else
-        config_file="$auth_dir/nats.conf"
+        config_source="$auth_dir/nats.conf"
       fi
       ;;
     mtls)
-      config_file="$script_dir/nats-server-mtls.conf"
+      config_source="$script_dir/nats-server-mtls.conf"
       ;;
   esac
-  if [ -n "$config_file" ]; then
-    docker_options="$docker_options --volume $config_file:/etc/nats/nats.conf:ro"
-    server_options="$server_options -c /etc/nats/nats.conf"
+  runtime_config="$data_dir/nats.conf"
+  if [ -n "$config_source" ]; then
+    cp "$config_source" "$runtime_config"
+  else
+    : >"$runtime_config"
   fi
+  # This runner deliberately uses SIGKILL and then requires acknowledged
+  # messages not to reappear. Make the server sync each file-store write so a
+  # completed consumer-state flush is durable when the process is killed.
+  printf '\njetstream {\n  store_dir: "/data"\n  sync_interval: always\n}\n' \
+    >>"$runtime_config"
+  server_options="$server_options -c /data/nats.conf"
   if [ -n "$cert_dir" ]; then
     docker_options="$docker_options --volume $cert_dir:/etc/nats/certs:ro"
   fi
   # shellcheck disable=SC2086 # validated auth and fixed path options expand into words.
   docker run --detach --name "$candidate_name" --volume "$data_dir:/data" \
     --publish "127.0.0.1:$port:4222" $docker_options "$image" \
-    $server_options -js -sd /data 2>"$docker_error"
+    $server_options 2>"$docker_error"
 }
 
 port=$((16000 + ($$ % 1000)))
@@ -247,6 +255,11 @@ fi
   while [ ! -e "$signal.1" ]; do
     sleep 1
   done
+  # JetStream batches consumer-state writes at approximately 10 updates per
+  # second. AckSync and ConsumerInfo observe the in-memory state, so leave more
+  # than one batch interval for the acknowledged state to reach the file store
+  # before testing hard-restart recovery.
+  sleep 1
   if ! docker kill "$container" >/dev/null 2>&1; then
     touch "$signal.failed"
     exit 1
