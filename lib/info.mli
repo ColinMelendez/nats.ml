@@ -12,7 +12,12 @@ type t
 val of_string : string -> (t, error) result
 val server_id : t -> string option
 val server_name : t -> string option
+
 val version : t -> string option
+(** [version info] is the server-reported version text. It is diagnostic data,
+    not a negotiated capability set; optional server features remain
+    server-authoritative. *)
+
 val proto : t -> int option
 val max_payload : t -> int
 val headers : t -> bool

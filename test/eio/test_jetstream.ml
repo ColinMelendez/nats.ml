@@ -2589,7 +2589,7 @@ let () =
               Eio.Promise.resolve info_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:1
-                      {|{"config":{"name":"ORDERS","subjects":["orders.>"],"description":"before","storage":"file","retention":"limits","discard":"new","max_msgs":-1,"max_msgs_per_subject":-1,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":false,"allow_direct":false,"deny_delete":true,"deny_purge":true,"num_replicas":3,"sealed":true,"placement":{"cluster":"west"},"metadata":{"owner":"server"},"republish":{"src":"orders.in","dest":"orders.out"}},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}));
+                      {|{"config":{"name":"ORDERS","subjects":["orders.>"],"description":"before","storage":"file","retention":"limits","discard":"new","max_msgs":-1,"max_msgs_per_subject":-1,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_msg_ttl":true,"allow_rollup_hdrs":false,"allow_direct":false,"deny_delete":true,"deny_purge":true,"num_replicas":3,"sealed":true,"placement":{"cluster":"west"},"metadata":{"owner":"server"},"republish":{"src":"orders.in","dest":"orders.out"}},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}));
               yield_n 5;
               let trace = Buffer.contents trace in
               if not (contains_substring ~needle:"STREAM.UPDATE.ORDERS" trace)
@@ -2615,10 +2615,21 @@ let () =
                 fail "stream update cleared deny-purge";
               if not (contains_substring ~needle:"no_ack\\\":false" trace) then
                 fail "stream update omitted the no-ack false value";
-              if contains_substring ~needle:"allow_batched\\\":false" trace then
-                fail
-                  "stream update sent an unsupported default allow-batched \
-                   field";
+              List.iter
+                (fun field ->
+                  if contains_substring ~needle:field trace then
+                    fail
+                      ("stream update sent unsupported default field " ^ field))
+                [
+                  "allow_msg_counter\\\":false";
+                  "allow_atomic\\\":false";
+                  "allow_msg_schedules\\\":false";
+                  "persist_mode\\\":\\\"default";
+                  "allow_batched\\\":false";
+                  "subject_delete_marker_ttl\\\":0";
+                ];
+              if not (contains_substring ~needle:"allow_msg_ttl\\\":true" trace)
+              then fail "stream update cleared an enabled message TTL flag";
               if count_substring ~needle:"num_replicas\\\":2" trace < 1 then
                 fail "stream update did not replace the replica count";
               if count_substring ~needle:"sealed\\\":true" trace < 2 then
@@ -2638,7 +2649,7 @@ let () =
               Eio.Promise.resolve update_response_u
                 (Ok
                    (consumer_info_wire_with_sid ~sid:2
-                      {|{"config":{"name":"ORDERS","subjects":["orders.>"],"description":"updated","storage":"file","retention":"limits","discard":"new","max_msgs":-1,"max_msgs_per_subject":5,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_msg_counter":true,"persist_mode":"async","allow_rollup_hdrs":false,"allow_direct":true,"deny_delete":true,"deny_purge":true,"num_replicas":2,"sealed":true,"placement":{"cluster":"east"},"compression":"s2","metadata":{"owner":"client"},"republish":{"src":"orders.in","dest":"orders.out"}},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}));
+                      {|{"config":{"name":"ORDERS","subjects":["orders.>"],"description":"updated","storage":"file","retention":"limits","discard":"new","max_msgs":-1,"max_msgs_per_subject":5,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_msg_ttl":true,"allow_msg_counter":true,"persist_mode":"async","allow_rollup_hdrs":false,"allow_direct":true,"deny_delete":true,"deny_purge":true,"num_replicas":2,"sealed":true,"placement":{"cluster":"east"},"compression":"s2","metadata":{"owner":"client"},"republish":{"src":"orders.in","dest":"orders.out"}},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}));
               let info = expect_jetstream_ok (Eio.Promise.await result) in
               equal (option string) (Some "updated")
                 (Nats_eio.Jetstream.Stream.Config.description
@@ -2662,6 +2673,70 @@ let () =
               (match Nats_eio.Jetstream.Stream.Config.metadata config with
               | [ ("owner", "client") ] -> ()
               | _ -> fail "stream update lost stream metadata");
+              expect_ok (Nats_eio.Connection.close connection);
+              Eio.Promise.resolve hold_u (Error End_of_file)));
+      test "stream update omits absent version-gated defaults" (fun () ->
+          let info_response, info_response_u = Eio.Promise.create () in
+          let update_response, update_response_u = Eio.Promise.create () in
+          let hold, hold_u = Eio.Promise.create () in
+          with_connection_traced
+            ~reads:
+              [
+                `Return info_wire;
+                `Await info_response;
+                `Await update_response;
+                `Await hold;
+              ]
+            (fun ~sw ~trace connection ->
+              let jetstream =
+                expect_jetstream_ok (Nats_eio.Jetstream.v connection)
+              in
+              let stream =
+                expect_jetstream_ok
+                  (Nats_eio.Jetstream.Stream.bind jetstream ~name:"LEGACY")
+              in
+              let config =
+                expect_jetstream_config_ok
+                  (Nats_eio.Jetstream.Stream.Config.v ~name:"LEGACY"
+                     ~subjects:[ Nats.Subject.Filter.literal "legacy.>" ]
+                     ~description:"updated" ())
+              in
+              let result, result_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                  Eio.Promise.resolve result_u
+                    (Nats_eio.Jetstream.Stream.update stream config));
+              yield_n 5;
+              Eio.Promise.resolve info_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:1
+                      {|{"config":{"name":"LEGACY","subjects":["legacy.>"],"description":"before","storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":-1,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":false,"allow_direct":false,"deny_delete":false,"deny_purge":false,"num_replicas":1,"sealed":false},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}));
+              yield_n 5;
+              let trace = Buffer.contents trace in
+              if not (contains_substring ~needle:"STREAM.UPDATE.LEGACY" trace)
+              then fail "legacy stream update was not sent";
+              List.iter
+                (fun field ->
+                  if contains_substring ~needle:field trace then
+                    fail
+                      ("legacy stream update sent unsupported default field "
+                     ^ field))
+                [
+                  "allow_msg_ttl\\\":false";
+                  "allow_msg_counter\\\":false";
+                  "allow_atomic\\\":false";
+                  "allow_msg_schedules\\\":false";
+                  "persist_mode\\\":\\\"default";
+                  "allow_batched\\\":false";
+                  "subject_delete_marker_ttl\\\":0";
+                ];
+              Eio.Promise.resolve update_response_u
+                (Ok
+                   (consumer_info_wire_with_sid ~sid:2
+                      {|{"config":{"name":"LEGACY","subjects":["legacy.>"],"description":"updated","storage":"file","retention":"limits","discard":"old","max_msgs":-1,"max_msgs_per_subject":-1,"max_bytes":-1,"max_age":0,"max_msg_size":-1,"allow_rollup_hdrs":false,"allow_direct":false,"deny_delete":false,"deny_purge":false,"num_replicas":1,"sealed":false},"state":{"messages":0,"bytes":0,"first_seq":0,"last_seq":0,"consumer_count":0}}|}));
+              let info = expect_jetstream_ok (Eio.Promise.await result) in
+              equal (option string) (Some "updated")
+                (Nats_eio.Jetstream.Stream.Config.description
+                   (Nats_eio.Jetstream.Stream.Info.config info));
               expect_ok (Nats_eio.Connection.close connection);
               Eio.Promise.resolve hold_u (Error End_of_file)));
       test "stream direct reads reject invalid replies" (fun () ->
@@ -2934,6 +3009,10 @@ let () =
               then fail "consumer update did not preserve pause deadline";
               if not (contains_substring ~needle:"metadata\\\":{}" clear_trace)
               then fail "consumer update did not clear metadata";
+              if contains_substring ~needle:"priority_timeout\\\":0" clear_trace
+              then
+                fail
+                  "consumer update sent an unsupported default priority timeout";
               if
                 not
                   (contains_substring ~needle:"future_field\\\":true"

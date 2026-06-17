@@ -101,7 +101,6 @@ module Error : sig
 end
 
 type t
-
 type jetstream = t
 
 val v : ?prefix:string -> Connection.t -> (t, Error.t) result
@@ -169,8 +168,8 @@ module Stream : sig
 
   module Config : sig
     (** Validated stream configuration values and their persistent updates. A
-        configuration may describe ordinary capture subjects, a mirror, or
-        one or more sources. *)
+        configuration may describe ordinary capture subjects, a mirror, or one
+        or more sources. *)
 
     type storage = Memory | File
     type retention = Limits | Interest | Work_queue
@@ -180,8 +179,9 @@ module Stream : sig
       | Uncompressed
       | S2  (** The server-side stream compression policy. *)
 
-    type persist_mode = Default | Async
-    (** The server's stream persistence acknowledgement policy. *)
+    type persist_mode =
+      | Default
+      | Async  (** The server's stream persistence acknowledgement policy. *)
 
     module Placement : sig
       type t
@@ -216,6 +216,7 @@ module Stream : sig
     module Transform : sig
       type t
       (** A subject mapping used by a stream, source, or republish rule. *)
+
       type error = Error.config
 
       val v :
@@ -234,13 +235,11 @@ module Stream : sig
     module External : sig
       type t
       (** Cross-account or cross-domain JetStream API and delivery prefixes. *)
+
       type error = Error.config
 
       val v :
-        api_prefix:string ->
-        ?deliver_prefix:string ->
-        unit ->
-        (t, error) result
+        api_prefix:string -> ?deliver_prefix:string -> unit -> (t, error) result
       (** [v ~api_prefix ?deliver_prefix ()] qualifies a source in another
           account or JetStream domain using the server's wire prefixes. *)
 
@@ -252,11 +251,12 @@ module Stream : sig
       type start =
         | Sequence of int64
         | Time of Ptime.t
-      (** A source's optional replay start point. Sequence numbers are
-          positive; times are encoded as RFC3339 timestamps. *)
+            (** A source's optional replay start point. Sequence numbers are
+                positive; times are encoded as RFC3339 timestamps. *)
 
       type t
       (** A mirror or source stream reference. *)
+
       type error = Error.config
 
       val v :
@@ -267,8 +267,8 @@ module Stream : sig
         ?external_:External.t ->
         unit ->
         (t, error) result
-      (** [v ~name ()] describes a mirrored or sourced stream. A source may
-          have one filter or a non-empty list of transforms, but not both. *)
+      (** [v ~name ()] describes a mirrored or sourced stream. A source may have
+          one filter or a non-empty list of transforms, but not both. *)
 
       val name : t -> string
       val start : t -> start option
@@ -280,6 +280,7 @@ module Stream : sig
     module Republish : sig
       type t
       (** A post-storage subject republish rule. *)
+
       type error = Error.config
 
       val v :
@@ -344,7 +345,14 @@ module Stream : sig
         [-1] for the JetStream unlimited value when supplied. [replicas] must be
         between 1 and 5. A mirror requires an empty [subjects] list and cannot
         be combined with [sources]. [deny_delete] controls whether stream-level
-        message deletion is rejected. *)
+        message deletion is rejected.
+
+        Feature availability remains server-authoritative. Per-message TTL and
+        subject delete-marker lifetime require nats-server 2.11; counters,
+        atomic publishing, schedules, and asynchronous persistence require 2.12;
+        fast batch publishing requires 2.14. Creating a configuration for an
+        older server succeeds locally and the server returns a structured
+        JetStream API error when the enabled feature is unsupported. *)
 
     val name : t -> string
     val subjects : t -> Nats.Subject.Filter.t list
@@ -352,16 +360,22 @@ module Stream : sig
     val storage : t -> storage
     val replicas : t -> int
     val placement : t -> Placement.t option
+
     val mirror : t -> Source.t option
     (** [mirror config] is the configured mirror, if any. *)
+
     val sources : t -> Source.t list
     (** [sources config] is the ordered list of source streams. *)
+
     val subject_transform : t -> Transform.t option
     (** [subject_transform config] is the input subject mapping, if any. *)
+
     val republish : t -> Republish.t option
     (** [republish config] is the post-storage republish rule, if any. *)
+
     val mirror_direct : t -> bool
     (** [mirror_direct config] controls direct reads through a mirror. *)
+
     val compression : t -> compression
     val metadata : t -> (string * string) list
     val retention : t -> retention
@@ -489,18 +503,21 @@ module Stream : sig
     (** [with_no_ack config value] replaces whether the stream disables message
         acknowledgements. *)
 
-    val with_duplicate_window :
-      t -> Mtime.Span.t option -> (t, error) result
+    val with_duplicate_window : t -> Mtime.Span.t option -> (t, error) result
     (** [with_duplicate_window config value] replaces the duplicate detection
         window. [None] requests the server default. *)
 
     val with_allow_msg_ttl : t -> bool -> (t, error) result
     (** [with_allow_msg_ttl config value] replaces whether message-level TTL
-        headers are accepted by the stream. *)
+        headers are accepted by the stream. A server-reported enabled value is
+        preserved by {!Stream.update} because the server permits only enabling
+        this feature. *)
 
     val with_allow_msg_counter : t -> bool -> (t, error) result
     (** [with_allow_msg_counter config value] replaces whether per-message
-        counters are enabled for the stream. *)
+        counters are enabled for the stream. A server-reported enabled value is
+        preserved by {!Stream.update} because the server permits only enabling
+        this feature. *)
 
     val with_allow_atomic_publish : t -> bool -> (t, error) result
     (** [with_allow_atomic_publish config value] replaces whether atomic batch
@@ -508,11 +525,13 @@ module Stream : sig
 
     val with_allow_msg_schedules : t -> bool -> (t, error) result
     (** [with_allow_msg_schedules config value] replaces whether scheduled
-        messages are accepted by the stream. *)
+        messages are accepted by the stream. A server-reported enabled value is
+        preserved by {!Stream.update} because the server permits only enabling
+        this feature. *)
 
     val with_persist_mode : t -> persist_mode -> (t, error) result
-    (** [with_persist_mode config value] replaces when stream writes are
-        flushed relative to their publish acknowledgements. *)
+    (** [with_persist_mode config value] replaces when stream writes are flushed
+        relative to their publish acknowledgements. *)
 
     val with_allow_batch_publish : t -> bool -> (t, error) result
     (** [with_allow_batch_publish config value] replaces whether fast batch
@@ -538,8 +557,8 @@ module Stream : sig
 
     val with_deny_purge : t -> bool -> (t, error) result
     (** [with_deny_purge config value] sets whether purging the stream is
-        rejected. Once the server has set this flag, it cannot be cleared by
-        an update. *)
+        rejected. Once the server has set this flag, it cannot be cleared by an
+        update. *)
 
     val with_first_sequence : t -> int64 option -> (t, error) result
     (** [with_first_sequence config value] replaces the initial retained
@@ -607,7 +626,12 @@ module Stream : sig
       not modeled by {!Config.t}; every modeled field is replaced, and [None]
       clears its corresponding limit. Values omitted from [Config.v] use that
       constructor's defaults. Concurrent changes use last-writer-wins semantics.
-      The configuration name must equal [name stream]. *)
+      The configuration name must equal [name stream].
+
+      Disabled version-gated fields that were absent from the current server
+      response remain absent from the update request. Features that the server
+      permits only to be enabled—message TTLs, counters, and schedules—remain
+      enabled once observed in the current configuration. *)
 
   val list :
     ?subject:Nats.Subject.Filter.t -> jetstream -> (Info.t list, Error.t) result
@@ -705,8 +729,20 @@ end
 
 module Consumer : sig
   module Config : sig
-    type ack_policy = No_ack | All | Explicit | Flow_control
-    type priority_policy = Overflow | Pinned_client | Prioritized
+    type ack_policy =
+      | No_ack
+      | All
+      | Explicit
+      | Flow_control
+          (** The server acknowledgement policy. [Flow_control] requires
+              nats-server 2.14. *)
+
+    type priority_policy =
+      | Overflow
+      | Pinned_client
+      | Prioritized
+          (** Pull-consumer priority policy. [Overflow] and [Pinned_client]
+              require nats-server 2.11; [Prioritized] requires 2.12. *)
 
     type deliver_policy =
       | All
@@ -754,12 +790,14 @@ module Consumer : sig
       ?mem_storage:bool ->
       unit ->
       (t, error) result
-    (** [v] validates the complete consumer policy before encoding it. A
-        push idle heartbeat must be at least 100 ms, and a pull
-        [max_expires] limit must be at least 1 ms. [Last_per_subject] requires
-        either a singular or multi-subject filter. Priority groups and policy
-        must be supplied together; a priority timeout is valid only with
-        [Pinned_client]. Other server-defaulted fields remain optional. *)
+    (** [v] validates the complete consumer policy before encoding it. A push
+        idle heartbeat must be at least 100 ms, and a pull [max_expires] limit
+        must be at least 1 ms. [Last_per_subject] requires either a singular or
+        multi-subject filter. Priority groups and policy must be supplied
+        together; a priority timeout is valid only with [Pinned_client]. Other
+        server-defaulted fields remain optional. Consumer pause and priority
+        fields require nats-server 2.11 or later; unsupported enabled fields are
+        reported by the server as structured JetStream API errors. *)
 
     val name : t -> string option
     val durable_name : t -> string option
@@ -839,8 +877,8 @@ module Consumer : sig
     (** [with_deliver_group config value] replaces the push queue group. *)
 
     val with_idle_heartbeat : t -> Mtime.Span.t option -> (t, error) result
-    (** [with_idle_heartbeat config value] replaces the idle heartbeat. A
-        push value below 100 ms is rejected. *)
+    (** [with_idle_heartbeat config value] replaces the idle heartbeat. A push
+        value below 100 ms is rejected. *)
 
     val with_flow_control : t -> bool option -> (t, error) result
     (** [with_flow_control config value] replaces flow control. *)
@@ -881,8 +919,8 @@ module Consumer : sig
     val with_priority_groups : t -> string list -> (t, error) result
     (** [with_priority_groups config groups] replaces the priority group names.
         The existing policy and timeout are preserved. Priority groups are
-        pull-only; each name is at most sixteen ASCII letters, digits, [/],
-        [_], [-], or [=] characters. Use {!with_priority} to change the groups and
+        pull-only; each name is at most sixteen ASCII letters, digits, [/], [_],
+        [-], or [=] characters. Use {!with_priority} to change the groups and
         policy atomically. *)
 
     val with_priority :
@@ -892,8 +930,9 @@ module Consumer : sig
       timeout:Mtime.Span.t option ->
       (t, error) result
     (** [with_priority config ~groups ~policy ~timeout] replaces the complete
-        priority configuration atomically. Pass [~groups:[] ~policy:None
-        ~timeout:None] to clear priority configuration. *)
+        priority configuration atomically. Pass
+        [~groups:[] ~policy:None ~timeout:None] to clear priority configuration.
+    *)
 
     val with_priority_policy : t -> priority_policy option -> (t, error) result
     (** [with_priority_policy config policy] replaces the priority policy. A
@@ -1023,12 +1062,12 @@ module Consumer : sig
       returns a handle for it. *)
 
   val create :
-      ?timeout:Mtime.Span.t -> stream -> Config.t -> (t, Error.t) result
+    ?timeout:Mtime.Span.t -> stream -> Config.t -> (t, Error.t) result
   (** [create ?timeout stream config] requests the server's create-only action
-      and returns the resulting consumer handle. A conflicting named consumer
-      is reported by the server rather than updated; an identical existing
-      configuration may still be treated as an idempotent create by the
-      server. Use [create_or_update] when replacement semantics are intended. *)
+      and returns the resulting consumer handle. A conflicting named consumer is
+      reported by the server rather than updated; an identical existing
+      configuration may still be treated as an idempotent create by the server.
+      Use [create_or_update] when replacement semantics are intended. *)
 
   val create_or_update :
     ?timeout:Mtime.Span.t -> stream -> Config.t -> (t, Error.t) result
@@ -1048,8 +1087,8 @@ module Consumer : sig
       to [name consumer]; a supplied durable name must match it, while an
       omitted durable name retains an existing durable identity. Concurrent
       changes use last-writer-wins semantics. Priority groups and policy are
-      replaced with the values in [config]; immutable fields are rejected by
-      the server. *)
+      replaced with the values in [config]; immutable fields are rejected by the
+      server. *)
 
   val pause :
     ?timeout:Mtime.Span.t -> t -> until:Ptime.t -> (Pause.t, Error.t) result
@@ -1241,10 +1280,10 @@ module Consumer : sig
         while missing ephemeral consumers are recreated from their last
         configuration. A configured public name is retained, and every
         replacement becomes owned by the session for cleanup. The session is
-        single-owner: do not call [next] or
-        [next_with_timeout] concurrently on one value. Cancellation of a blocked
-        read propagates without closing the session; explicitly call [close]
-        when the session is no longer needed. *)
+        single-owner: do not call [next] or [next_with_timeout] concurrently on
+        one value. Cancellation of a blocked read propagates without closing the
+        session; explicitly call [close] when the session is no longer needed.
+    *)
 
     val create :
       sw:Eio.Switch.t ->
@@ -1254,18 +1293,17 @@ module Consumer : sig
       (t, Error.t) result
     (** [create ~sw ?timeout stream config] creates and owns an ephemeral push
         consumer. [timeout] bounds the initial consumer creation and
-        configuration lookup.
-        If [config] has no delivery subject, a fresh inbox is chosen. Durable
-        names are rejected. A five-minute inactive threshold and memory storage
-        are supplied when absent. The delivery subscription is installed before
-        the consumer is created, so retained messages cannot race the initial
-        subscription. An explicit public name must be unique to the caller;
-        create-only semantics reject a conflicting existing configuration, but
-        the server may treat an identical configuration as an idempotent
-        create. The consumer is deleted when [close] is called. Switch release
-        also attempts cleanup, but that asynchronous
-        cleanup is best effort; call [close] and inspect its result when
-        deletion must be confirmed. *)
+        configuration lookup. If [config] has no delivery subject, a fresh inbox
+        is chosen. Durable names are rejected. A five-minute inactive threshold
+        and memory storage are supplied when absent. The delivery subscription
+        is installed before the consumer is created, so retained messages cannot
+        race the initial subscription. An explicit public name must be unique to
+        the caller; create-only semantics reject a conflicting existing
+        configuration, but the server may treat an identical configuration as an
+        idempotent create. The consumer is deleted when [close] is called.
+        Switch release also attempts cleanup, but that asynchronous cleanup is
+        best effort; call [close] and inspect its result when deletion must be
+        confirmed. *)
 
     val consumer : t -> consumer
     (** [consumer push] is the current server-side consumer. An ephemeral
@@ -1307,8 +1345,8 @@ module Consumer : sig
         cleanup. *)
 
     val release : t -> (unit, Error.t) result
-    (** [release push] stops the subscription and starts a best-effort delete
-        of an owned consumer without waiting for the server's response. It is
+    (** [release push] stops the subscription and starts a best-effort delete of
+        an owned consumer without waiting for the server's response. It is
         intended for deadline- and cancellation-sensitive cleanup; use [close]
         when confirmed deletion is required. *)
   end
@@ -1337,20 +1375,19 @@ module Consumer : sig
       (t, Error.t) result
     (** [v ~sw stream] creates a client-managed ephemeral pull consumer.
         [timeout] bounds the initial consumer creation and pull-subscription
-        setup. The
-        initial delivery policy defaults to [All], and [filter_subject] is
-        exclusive with [filter_subjects]. Ordered sessions always use [No_ack],
-        one-replica memory storage, and a five-minute inactive threshold unless
-        [inactive_threshold] is supplied; they request idle heartbeats (five
-        seconds by default) to detect a lost consumer. [headers_only],
-        [replay_policy], [metadata], and [name_prefix] are applied to every
-        generation. [max_reset_attempts] bounds one recovery cycle; [0] or an
-        omitted value means unlimited retries. The session owns its pull
-        subscription and recreates the ephemeral consumer after a
+        setup. The initial delivery policy defaults to [All], and
+        [filter_subject] is exclusive with [filter_subjects]. Ordered sessions
+        always use [No_ack], one-replica memory storage, and a five-minute
+        inactive threshold unless [inactive_threshold] is supplied; they request
+        idle heartbeats (five seconds by default) to detect a lost consumer.
+        [headers_only], [replay_policy], [metadata], and [name_prefix] are
+        applied to every generation. [max_reset_attempts] bounds one recovery
+        cycle; [0] or an omitted value means unlimited retries. The session owns
+        its pull subscription and recreates the ephemeral consumer after a
         consumer-sequence gap, a missing heartbeat, consumer deletion, or a
         non-replayed transport disconnect. Recreated consumers resume at the
-        next stream sequence. When [name_prefix] is omitted, the session uses
-        a unique internal name prefix so an uncertain create response can be
+        next stream sequence. When [name_prefix] is omitted, the session uses a
+        unique internal name prefix so an uncertain create response can be
         cleaned up; supplying [name_prefix] makes generation names predictable
         to the caller. The consumer identity is not preserved across every
         recovery. *)
@@ -1364,10 +1401,10 @@ module Consumer : sig
         needed. *)
 
     val initial_pending : t -> int64 option
-    (** [initial_pending ordered] is the pending count reported when the
-        initial ephemeral consumer was created. [None] means that the server
-        did not include the count in its creation response. The value does not
-        change when the session recreates its consumer. *)
+    (** [initial_pending ordered] is the pending count reported when the initial
+        ephemeral consumer was created. [None] means that the server did not
+        include the count in its creation response. The value does not change
+        when the session recreates its consumer. *)
 
     val next_with_timeout : timeout:Mtime.Span.t -> t -> (Msg.t, Error.t) result
     (** [next_with_timeout ~timeout ordered] uses an absolute caller deadline
@@ -1421,16 +1458,17 @@ module Publish_options : sig
       constructed and applied only if the corresponding header is absent from
       the caller's message. *)
 
-  type schedule = At of Ptime.t | Every of Mtime.Span.t | Cron of string
-  (** Scheduled delivery. [Every] requires an interval of at least one second;
-      [Cron] is passed to the server unchanged. *)
+  type schedule =
+    | At of Ptime.t
+    | Every of Mtime.Span.t
+    | Cron of string
+        (** Scheduled delivery. [Every] requires an interval of at least one
+            second; [Cron] is passed to the server unchanged. *)
 
   type schedule_ttl = Duration of Mtime.Span.t | Never
-
   type t
 
   val empty : t
-
   val with_msg_id : string -> t -> (t, Error.t) result
   val with_expected_stream : string -> t -> (t, Error.t) result
   val with_expected_last_msg_id : string -> t -> (t, Error.t) result
@@ -1442,11 +1480,13 @@ module Publish_options : sig
 
   val with_ttl : Mtime.Span.t -> t -> (t, Error.t) result
   val with_schedule : schedule -> t -> (t, Error.t) result
+
   val with_schedule_target : Nats.Subject.t -> t -> (t, Error.t) result
   (** The target is required when [schedule] is set. *)
 
   val with_schedule_source : Nats.Subject.t -> t -> (t, Error.t) result
   val with_schedule_ttl : schedule_ttl -> t -> (t, Error.t) result
+
   val with_schedule_timezone : string -> t -> (t, Error.t) result
   (** A time zone is valid only with a [Cron] schedule. *)
 
@@ -1486,9 +1526,9 @@ module Publisher : sig
     (t, Error.t) result
   (** [v ~sw ~clock ?max_pending ?stall_wait ?ack_timeout jetstream] creates a
       switch-owned asynchronous publisher. A bounded publisher waits up to
-      [stall_wait] for a pending slot; the default bound is 256 and the
-      default stall wait is 200 ms. [ack_timeout] defaults to the connection's
-      request timeout. *)
+      [stall_wait] for a pending slot; the default bound is 256 and the default
+      stall wait is 200 ms. [ack_timeout] defaults to the connection's request
+      timeout. *)
 
   val publish :
     ?headers:Nats.Header.t ->
@@ -1499,12 +1539,12 @@ module Publisher : sig
     string ->
     (Publish.t, Error.t) result
   (** [publish publisher subject payload] submits a publish without waiting for
-      its acknowledgement. Only [No_responders] failures are retried, using
-      the retry policy in [options]. *)
+      its acknowledgement. Only [No_responders] failures are retried, using the
+      retry policy in [options]. *)
 
   val pending : t -> int
-  (** [pending publisher] is the number of submitted publishes not yet
-      settled. *)
+  (** [pending publisher] is the number of submitted publishes not yet settled.
+  *)
 
   val await_all : ?timeout:Mtime.Span.t -> t -> (unit, Error.t) result
   (** [await_all ?timeout publisher] waits until all submitted publishes have
@@ -1518,9 +1558,9 @@ module Atomic_batch : sig
     jetstream ->
     Nats.Message.t list ->
     (Publish_ack.t, Error.t) result
-  (** [publish ?timeout ~id jetstream messages] stages and commits [messages]
-      as one server-side atomic batch. The server either makes the complete
-      batch visible or discards it. Messages must not carry reply subjects or
+  (** [publish ?timeout ~id jetstream messages] stages and commits [messages] as
+      one server-side atomic batch. The server either makes the complete batch
+      visible or discards it. Messages must not carry reply subjects or
       batch-control headers. *)
 end
 
@@ -1537,10 +1577,10 @@ module Batch : sig
     (Publish_ack.t, Error.t) result
   (** [publish ?timeout ?flow ?gap ~id jetstream messages] publishes a fast
       batch using the server flow-control reply protocol. [flow] is the
-      requested acknowledgement interval; zero asks the server for its
-      default. [gap] controls whether the server rejects sequence gaps. The
-      returned acknowledgement includes the server batch and count when they
-      are present. *)
+      requested acknowledgement interval; zero asks the server for its default.
+      [gap] controls whether the server rejects sequence gaps. The returned
+      acknowledgement includes the server batch and count when they are present.
+  *)
 end
 
 val publish :

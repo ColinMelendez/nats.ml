@@ -2470,6 +2470,33 @@ module Stream = struct
     }
 
   let wire_config_for_update ~(current : wire_config) value =
+    let optional_bool ~current value =
+      match (current, value) with
+      | Some _, value -> Some value
+      | None, true -> Some true
+      | None, false -> None
+    in
+    let optional_monotonic_bool ~current value =
+      match current with
+      | Some true -> Some true
+      | Some false -> Some value
+      | None -> if value then Some true else None
+    in
+    let optional_persist_mode ~current value =
+      match (current, value) with
+      | Some _, value -> Some value
+      | None, Config.Async -> Some Config.Async
+      | None, Config.Default -> None
+    in
+    let optional_span ~current value =
+      match (current, value) with
+      | Some _, value ->
+          Some
+            (Option.value ~default:0L
+               (Option.map Mtime.Span.to_uint64_ns value))
+      | None, Some value -> Some (Mtime.Span.to_uint64_ns value)
+      | None, None -> None
+    in
     let subjects =
       List.map Nats.Subject.Filter.to_string (Config.subjects value)
     in
@@ -2518,23 +2545,27 @@ module Stream = struct
           (Option.value ~default:0L
              (Option.map Mtime.Span.to_uint64_ns
                 (Config.duplicate_window value)));
-      allow_msg_ttl = Some (Config.allow_msg_ttl value);
-      allow_msg_counter = Some (Config.allow_msg_counter value);
-      allow_atomic_publish = Some (Config.allow_atomic_publish value);
-      allow_msg_schedules = Some (Config.allow_msg_schedules value);
-      persist_mode = Some (Config.persist_mode value);
+      allow_msg_ttl =
+        optional_monotonic_bool ~current:current.allow_msg_ttl
+          (Config.allow_msg_ttl value);
+      allow_msg_counter =
+        optional_monotonic_bool ~current:current.allow_msg_counter
+          (Config.allow_msg_counter value);
+      allow_atomic_publish =
+        optional_bool ~current:current.allow_atomic_publish
+          (Config.allow_atomic_publish value);
+      allow_msg_schedules =
+        optional_monotonic_bool ~current:current.allow_msg_schedules
+          (Config.allow_msg_schedules value);
+      persist_mode =
+        optional_persist_mode ~current:current.persist_mode
+          (Config.persist_mode value);
       allow_batch_publish =
-        (match
-           (current.allow_batch_publish, Config.allow_batch_publish value)
-         with
-        | Some _, value -> Some value
-        | None, true -> Some true
-        | None, false -> None);
+        optional_bool ~current:current.allow_batch_publish
+          (Config.allow_batch_publish value);
       subject_delete_marker_ttl =
-        Some
-          (Option.value ~default:0L
-             (Option.map Mtime.Span.to_uint64_ns
-                (Config.subject_delete_marker_ttl value)));
+        optional_span ~current:current.subject_delete_marker_ttl
+          (Config.subject_delete_marker_ttl value);
       allow_rollup = Config.allow_rollup value;
       allow_direct = Config.allow_direct value;
       deny_delete = current.deny_delete || Config.deny_delete value;
@@ -5294,7 +5325,10 @@ module Consumer = struct
   let wire_config_for_update ~(current : wire_config) value =
     let value = wire_config value in
     let priority_timeout =
-      Some (Option.value ~default:0L value.priority_timeout)
+      match (current.priority_timeout, value.priority_timeout) with
+      | Some _, value -> Some (Option.value ~default:0L value)
+      | None, Some value -> Some value
+      | None, None -> None
     in
     {
       value with
