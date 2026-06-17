@@ -1122,7 +1122,7 @@ else
       ocaml_recovered_names=cluster-a,cluster-b
       ocaml_discovered="$(host_port_for_port "$cluster_base_port"),$(host_port_for_port "$secondary_port")"
       ;;
-    seed|node-a|multi-node|management|changed-advertised) ;;
+    seed|node-a|restart|multi-node|management|changed-advertised) ;;
     *)
       echo "unknown non-leader JetStream cluster failure mode: $failure_mode" >&2
       exit 1
