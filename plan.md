@@ -172,7 +172,7 @@ normalizes the Go SDK's `tls://` discovered URL form before comparing it. The
 
 ### Go parity checkpoint
 
-Against the pinned official Go `nats.go v1.52.0` surface, the material Eio
+Against the pinned official Go `nats.go v1.53.1` surface, the material Eio
 capabilities are now implemented: JetStream account and resource management,
 stream persistence/message-counter and publish controls, pull/push/ordered and
 continuous consumption, multiple priority groups, KV managers and composed
@@ -1033,10 +1033,12 @@ semantics before calling the feature complete.
   update, including the atomic public combinator and clear-path coverage for
   coupled priority fields. Switch-release cleanup is documented as best effort;
   explicit `close` remains the confirming operation.
-- Remaining before a broad compatibility claim: choose whether to expose a
-  server capability/version projection or publish an explicit supported
-  feature matrix; expand the live authenticated/TLS and cluster-failure
-  acceptance work already listed above.
+- Completed: publish an explicit server/feature support matrix in
+  `docs/support.md`. The server remains authoritative for feature availability;
+  `INFO.version` is diagnostic rather than a client-side capability oracle.
+- Remaining before a broad compatibility claim: rerun the live
+  authenticated/TLS and cluster-failure acceptance gates on the current
+  release pins.
 
 ## Phase 5 — Key-Value and Object Store
 

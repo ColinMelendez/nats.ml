@@ -1,17 +1,22 @@
 # Go SDK capability parity audit
 
 This audit compares the Eio SDK in this repository with the official Go SDK
-pinned by the interop peer: `github.com/nats-io/nats.go v1.52.0`. Pinning the
+pinned by the interop peer: `github.com/nats-io/nats.go v1.53.1`. Pinning the
 reference makes the scope reproducible; a later server or SDK release must be
 audited separately. The comparison is about user-visible capabilities, not a
 one-for-one translation of Go method names. Eio's direct style, switch-owned
 lifetimes, and typed OCaml values are intentional API differences.
 
 The primary references are the [nats.go repository](https://github.com/nats-io/nats.go),
-its [JetStream package](https://github.com/nats-io/nats.go/tree/v1.52.0/jetstream),
-and its [Services package](https://github.com/nats-io/nats.go/tree/v1.52.0/micro).
+its [JetStream package](https://github.com/nats-io/nats.go/tree/v1.53.1/jetstream),
+and its [Services package](https://github.com/nats-io/nats.go/tree/v1.53.1/micro).
 The repository's interop runners provide behavioral evidence for the rows
 marked as covered.
+
+The recorded server-matrix counts in this audit used `nats:2.14.5` as their
+current-line cell. The default candidate is now `nats:2.14.6`; rerunning the
+acceptance gates on that patch is required before release and does not alter
+the API parity conclusion.
 
 ## Status at a glance
 
@@ -20,7 +25,7 @@ marked as covered.
 | Core NATS | Covered for the Eio model | Go-specific dialers, proxy knobs, diagnostics, and alternative transports are not part of the Eio surface |
 | Authentication and TLS | Covered | The callback/dialer breadth is narrower because credentials and TLS flows are explicit values |
 | Reconnect, discovery, drain | Covered | Lifecycle callbacks use the Eio event stream; cumulative message and reconnect statistics are exposed as race-safe snapshots rather than mutable Go-style fields |
-| JetStream management | Covered for the material v1.52.0 surface | No material protocol gap; future server-only fields remain an acceptance concern |
+| JetStream management | Covered for the material v1.53.1 surface | No material protocol gap; future server-only fields remain an acceptance concern |
 | Server-wide administration | Monitoring and selected controls covered by the optional `nats-eio-system` package | This privileged `$SYS` surface is separate from JetStream and outside the pinned Go JetStream package parity claim; claims, resolver, and user-management operations remain out of scope and explicit system-account authorization is required |
 | JetStream publishing | Covered, including async futures, retries, TTL/schedule headers, atomic and fast batches | Shared async acknowledgement multiplexing is a throughput optimization, not a capability gap |
 | JetStream consumption | Covered: pull, push, ordered, fetch, no-wait, heartbeats, flow control, priority, and continuous consumption | Go callback/channel receive shapes and threshold/error-handler tuning are represented by direct Eio iteration and structured results |
@@ -86,8 +91,20 @@ The typed stream configuration includes mirrors, sources and transforms,
 republish, placement, compression, per-subject limits, consumer limits,
 message TTL and counters, persistence mode, atomic and scheduled publishing,
 fast batch publishing, direct reads, rollup, deletion policy, initial
-sequence, and the other material v1.52.0 stream fields. Configuration
+sequence, and the other material v1.53.1 stream fields. Configuration
 constructors enforce the local invariants before a request is sent.
+
+### v1.53 reference update
+
+The v1.53 release delta does not introduce an uncovered wire capability. Its
+asynchronous publish acknowledgement handler is represented by explicit OCaml
+publish futures and their structured results. Legacy acknowledgement flow
+control, Service endpoint metadata, the newer Key-Value compare-and-set error
+code, and rejection of keys containing consecutive dots are already covered
+by the corresponding OCaml APIs and codecs. The v1.53.1 patch does not change
+that conclusion. See the official
+[v1.53.0](https://github.com/nats-io/nats.go/releases/tag/v1.53.0) and
+[v1.53.1](https://github.com/nats-io/nats.go/releases/tag/v1.53.1) releases.
 
 This is a capability over Core NATS request/reply, not a second transport.
 Name listers collect paged responses into ordered OCaml lists; callers that

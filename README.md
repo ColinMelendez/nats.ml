@@ -1,11 +1,12 @@
 # NATS for OCaml
 
-This repository is building a modern NATS client SDK for OCaml.
+This repository provides a modern NATS client SDK for OCaml 5.5 and newer.
 
 The implementation is organized around an I/O-neutral Core NATS protocol
-state machine and runtime adapters. The first adapter will target Eio. The
-long-term feature set includes Core NATS, JetStream, Key-Value, Object Store,
-and Services; NATS Streaming/STAN is intentionally out of scope.
+state machine and an Eio TCP/TLS adapter. It includes Core NATS, JetStream,
+Key-Value, Object Store, Services, optional privileged system-account
+administration, and an optional OpenTelemetry bridge. NATS Streaming/STAN and
+alternative transports are intentionally out of scope for the first release.
 
 The research and architecture proposal is in
 [`docs/design.md`](docs/design.md). The phased implementation roadmap is in
@@ -15,8 +16,43 @@ The research and architecture proposal is in
 [`docs/durable-feature-api-review.md`](docs/durable-feature-api-review.md).
 The current observability boundary is described in
 [`docs/observability.md`](docs/observability.md).
+Supported server lines, feature minima, and the release acceptance contract
+are defined in [`docs/support.md`](docs/support.md).
 The optional `nats-eio-opentelemetry` package bridges that boundary to
 OpenTelemetry without adding an observability dependency to `nats-eio`.
+
+## Quickstart
+
+Connect to a local NATS server, publish a message, wait for the server barrier,
+and close the connection:
+
+```ocaml
+let or_fail pp = function
+  | Ok value -> value
+  | Error error -> failwith (Format.asprintf "%a" pp error)
+
+let run env =
+  Eio.Switch.run @@ fun sw ->
+  let endpoint =
+    or_fail Nats.Endpoint.pp_error
+      (Nats.Endpoint.of_string "nats://127.0.0.1:4222")
+  in
+  let connection =
+    or_fail Nats_eio.Error.pp
+      (Nats_eio.Connection.connect ~sw ~net:(Eio.Stdenv.net env)
+         ~clock:(Eio.Stdenv.mono_clock env)
+         [ endpoint ])
+  in
+  let subject = Nats.Subject.literal "hello" in
+  or_fail Nats_eio.Error.pp
+    (Nats_eio.Connection.publish connection subject "world");
+  or_fail Nats_eio.Error.pp (Nats_eio.Connection.flush connection);
+  or_fail Nats_eio.Error.pp (Nats_eio.Connection.close connection)
+
+let () = Eio_main.run run
+```
+
+The same source is compiled as [`examples/core_publish.ml`](examples/core_publish.ml).
 
 ## Capability comparisons
 
@@ -87,6 +123,11 @@ gap recovery with replay. Live-server, cluster-failure, and Go-peer coverage
 remain part of the production-readiness acceptance program.
 
 ## Development
+
+The default current-line server pin advanced from `nats:2.14.5` to
+`nats:2.14.6` during release preparation. Historical past-tense pass counts
+below were recorded with 2.14.5 as the current-line cell unless they explicitly
+name 2.14.6. Repeating those gates on 2.14.6 is required before release.
 
 Enter the development shell and run the build or tests with Dune:
 
@@ -212,9 +253,9 @@ discovered peer, then kills that active peer and verifies recovery to the last
 node with subscription replay.
 The system-account runner extends that routed check to privileged account
 administration, server/account monitoring, system events, reload, and the same
-failover path. Its matrix covers username/password, username/password over
+failover path. Its matrix targets username/password, username/password over
 TLS, NKey, NKey over TLS, JWT, JWT over TLS, and certificate-mapped mTLS across
-`nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` (21 cases by default). Set
+`nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.6` (21 cases by default). Set
 `NATS_SYSTEM_SERVER_IMAGES` or `NATS_SYSTEM_AUTH_MODES` to select a bounded
 subset; the runner refuses uncached images. JWT resolver accounts have dynamic
 public IDs, so the test derives both the account request target and event
@@ -230,9 +271,9 @@ acknowledgement before killing the seed, then verifies reconnect, replicated
 stream/consumer state, and a second publish/delivery on a surviving node. The
 cross-SDK Ordered reconnect runner adds elected stream-leader targeting and
 durable seed restart recovery, and checks both the OCaml client and the
-official Go peer. Its authenticated companion covers NKey, JWT, NKey-over-TLS,
+official Go peer. Its authenticated companion targets NKey, JWT, NKey-over-TLS,
 JWT-over-TLS, and mTLS across `nats:2.10.22`, `nats:2.12.15`, and
-`nats:2.14.5`. Its `management` mode takes all three persistent nodes out of
+`nats:2.14.6`. Its `management` mode takes all three persistent nodes out of
 service long enough to require JetStream management requests to fail, then
 checks recovery. Its `changed-advertised` mode replaces the original seed with
 a new client endpoint, requires both clients to observe the new advertisement,
@@ -251,9 +292,9 @@ ASCII letters, digits, underscores, and hyphens; choose exactly one
 authentication mode.
 The dedicated auth interop matrix generates ephemeral NKey/JWT material with
 the Nix-provided `nsc`, generates a short-lived certificate authority and
-client certificates with OpenSSL, and checks NKey, JWT, NKey-over-TLS,
+client certificates with OpenSSL, and targets NKey, JWT, NKey-over-TLS,
 JWT-over-TLS, and mTLS against `nats:2.10.22`, `nats:2.12.15`, and
-`nats:2.14.5`. Its companion negative matrix checks rejected NKey/JWT
+`nats:2.14.6`. Its companion negative matrix checks rejected NKey/JWT
 signatures and missing mTLS client certificates from both the OCaml client and
 the official Go peer.
 The harness then requires anonymous connection rejection as well as successful
@@ -277,7 +318,7 @@ mutations, history, tombstones, filtered keys, and a live watch, followed by
 an Object Store acceptance executable covering chunked content, metadata,
 links, listing, deletion, watches, sealing, and cleanup.
 The server matrix runner repeats the server, cluster, and lame-duck runners for
-`nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` (nine sequential cases by
+`nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.6` (nine sequential cases by
 default); set `NATS_SERVER_IMAGES` or `NATS_SERVER_MATRIX_SCENARIOS` to select
 another bounded version sweep. Token, username/password, and JetStream
 variables apply only to its `server` scenario; cluster and lame-duck cases
@@ -381,11 +422,13 @@ between Go and OCaml. Its matrix covers the same six anonymous/authenticated
 plaintext/TLS modes across all three pinned releases; all 18 baseline cases
 pass. The Object Store interop runner uses the same official Go peer to
 exchange chunked content and metadata, updates, links, listing, tombstones,
-and sealing. Its six-mode single-server authentication/TLS matrix passes all
-18 cases across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`. The dedicated
-`./scripts/runtest-interop-key-value-cluster.sh` runner now covers replicated
-ordered-watch recovery after seed loss, elected-leader loss, and durable seed
-restart in anonymous plaintext mode. Its expanded matrix passes all 15
+and sealing. Its six-mode single-server authentication/TLS matrix has recorded
+passing evidence across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5`; the
+current `nats:2.14.6` release-candidate rerun remains an acceptance gate. The
+dedicated `./scripts/runtest-interop-key-value-cluster.sh` runner now covers
+replicated ordered-watch recovery after seed loss, elected-leader loss, and
+durable seed restart in anonymous plaintext mode. Its expanded matrix passes
+all 15
 node-a/node-b/node-c, leader, and restart cases across the three pinned
 releases. The anonymous multi-node KV smoke passes on `nats:2.10.22`; the
 authenticated KV multi-node matrix adds 15 passing cases across the five
@@ -435,7 +478,7 @@ runner as described above.
 The Core interop matrix runner (`./scripts/runtest-interop-matrix.sh`) is a
 bounded Core gate: by
 default it spans the established `nats:2.10.22` floor, `nats:2.12.15`, and the
-current `nats:2.14.5` release, and runs Core traffic, repeated plaintext
+current `nats:2.14.6` release, and runs Core traffic, repeated plaintext
 reconnect, single-server TLS Core traffic, and repeated TLS reconnect for each
 image. The twelve cases run
 sequentially; set `NATS_SERVER_IMAGES` to a comma-separated image list or
@@ -461,14 +504,16 @@ service-error headers, named INFO/STATS discovery, queue and metadata
 declarations, exact endpoint counters, custom endpoint statistics data in both
 directions, and a request/reply completion barrier. It supports anonymous,
 token, username/password, NKey, JWT, mTLS, and server-required TLS modes
-against the pinned `nats:2.10.22` image. The Service matrix runner repeats
-that exchange across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.5` in all
+against the pinned `nats:2.10.22` image. The Service matrix runner targets
+that exchange across `nats:2.10.22`, `nats:2.12.15`, and `nats:2.14.6` in all
 eleven plaintext/TLS authentication modes (33 cases by default); set
 `NATS_SERVER_IMAGES` or `NATS_INTEROP_SERVICE_MATRIX_MODES` to select a
 bounded subset. Set `NATS_INTEROP_SERVICE_MATRIX_SCENARIOS` to
 `service-failure` and/or `service-parent-close` to apply the same matrix to
 the focused lifecycle cases; both scenarios pass all 33 version/authentication
-cells. Cross-SDK reconnect coverage remains separate from that version matrix.
+cells through the previous `nats:2.14.5` current-line pin. The 2.14.6 rerun is
+part of the release gate. Cross-SDK reconnect coverage remains separate from
+that version matrix.
 The Service reconnect runner reuses the
 three-server failover harness, performs bidirectional endpoint requests before
 each kill, waits for both clients to report recovery, and checks endpoint
