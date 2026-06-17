@@ -26,6 +26,12 @@ let required name =
   | Some value when not (String.equal value "") -> value
   | Some _ | None -> failf "%s is required" name
 
+let marker_ttl_supported () =
+  match required "NATS_TEST_KV_MARKER_TTL" with
+  | "0" -> false
+  | "1" -> true
+  | value -> failf "NATS_TEST_KV_MARKER_TTL must be 0 or 1, got %S" value
+
 let endpoint () =
   let value = required "NATS_TEST_SERVER" in
   match Nats.Endpoint.of_string value with
@@ -119,13 +125,17 @@ let expect_status status bucket values marker_ttl =
   (match Nats_eio.Key_value.Status.ttl status with
   | None -> ()
   | Some _ -> failf "Key-Value status unexpectedly supplied a TTL");
-  (match Nats_eio.Key_value.Status.limit_marker_ttl status with
-  | Some value when Mtime.Span.equal value marker_ttl -> ()
-  | Some value ->
+  (match (Nats_eio.Key_value.Status.limit_marker_ttl status, marker_ttl) with
+  | Some value, Some expected when Mtime.Span.equal value expected -> ()
+  | Some value, Some expected ->
       failf "Key-Value status marker TTL was %s, expected %s"
         (Format.asprintf "%a" Mtime.Span.pp value)
-        (Format.asprintf "%a" Mtime.Span.pp marker_ttl)
-  | None -> failf "Key-Value status omitted marker TTL");
+        (Format.asprintf "%a" Mtime.Span.pp expected)
+  | None, Some _ -> failf "Key-Value status omitted marker TTL"
+  | Some value, None ->
+      failf "Key-Value status unexpectedly supplied marker TTL %s"
+        (Format.asprintf "%a" Mtime.Span.pp value)
+  | None, None -> ());
   match Nats_eio.Key_value.Status.storage status with
   | Nats_eio.Key_value.Config.Memory -> ()
   | Nats_eio.Key_value.Config.File ->
@@ -169,6 +179,7 @@ let run env =
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.mono_clock env in
   let timeout = Mtime.Span.(10 * s) in
+  let marker_ttl_supported = marker_ttl_supported () in
   let bucket_name = required "NATS_TEST_INTEROP_BUCKET" in
   let prefix = required "NATS_TEST_INTEROP_PREFIX" in
   let endpoint = endpoint () in
@@ -200,7 +211,10 @@ let run env =
         expect_key_value_ok "initial Key-Value status"
           (Nats_eio.Key_value.status bucket)
       in
-      expect_status status bucket_name 0L Mtime.Span.(1 * min);
+      let marker_ttl =
+        if marker_ttl_supported then Some Mtime.Span.(1 * min) else None
+      in
+      expect_status status bucket_name 0L marker_ttl;
       expect_ok "flush Key-Value setup" (Nats_eio.Connection.flush connection);
       let start_response =
         request_control ~timeout connection prefix ".start" "start"
@@ -335,66 +349,70 @@ let run env =
       expect_history "purged Key-Value history"
         [ ("purge.key", "", 8L, Nats_eio.Key_value.Entry.Purge) ]
         purge_history;
-      let ttl_ocaml_key =
-        match Nats_eio.Key_value.Key.of_string "ttl.ocaml" with
-        | Ok key -> key
+      if marker_ttl_supported then (
+        let ttl_ocaml_key =
+          match Nats_eio.Key_value.Key.of_string "ttl.ocaml" with
+          | Ok key -> key
+          | Error error ->
+              failf "invalid OCaml TTL key: %a" Nats_eio.Key_value.Error.pp_key
+                error
+        in
+        let ttl_ocaml_revision =
+          expect_key_value_ok "create OCaml TTL Key-Value entry"
+            (Nats_eio.Key_value.create_key
+               ~ttl:Mtime.Span.(1 * min)
+               bucket ttl_ocaml_key "from-ocaml-ttl")
+        in
+        expect_revision "OCaml TTL entry" 9L ttl_ocaml_revision;
+        let ttl_response =
+          request_control ~timeout connection prefix ".ocaml-ttl-ready"
+            "created"
+        in
+        expect_payload "Go OCaml TTL validation" "go-ttl-validated" ttl_response;
+        let go_ttl_response =
+          request_control ~timeout connection prefix ".go-ttl-ready" "write"
+        in
+        expect_payload "Go TTL write" "written" go_ttl_response;
+        let ttl_go_key =
+          match Nats_eio.Key_value.Key.of_string "ttl.go" with
+          | Ok key -> key
+          | Error error ->
+              failf "invalid Go TTL key: %a" Nats_eio.Key_value.Error.pp_key
+                error
+        in
+        let ttl_go_entry =
+          expect_key_value_ok "get Go TTL Key-Value entry"
+            (Nats_eio.Key_value.get bucket ttl_go_key)
+        in
+        expect_entry "Go TTL entry" ~key:"ttl.go" ~value:"from-go-ttl"
+          ~revision:10L ~operation:Nats_eio.Key_value.Entry.Put ttl_go_entry;
+        let purge_ttl_revision =
+          expect_key_value_ok "purge OCaml TTL Key-Value entry"
+            (Nats_eio.Key_value.purge
+               ~marker_ttl:Mtime.Span.(1 * min)
+               bucket ttl_ocaml_key)
+        in
+        expect_revision "OCaml purge TTL marker" 11L purge_ttl_revision;
+        let purge_ttl_response =
+          request_control ~timeout connection prefix ".ocaml-purge-ttl-ready"
+            "purged"
+        in
+        expect_payload "Go OCaml purge TTL validation" "go-purge-ttl-validated"
+          purge_ttl_response;
+        let go_purge_ttl_response =
+          request_control ~timeout connection prefix ".go-purge-ttl" "purge"
+        in
+        expect_payload "Go purge TTL" "purged" go_purge_ttl_response;
+        match Nats_eio.Key_value.get bucket ttl_go_key with
+        | Error (Nats_eio.Key_value.Error.Key_deleted entry) ->
+            expect_entry "Go purge TTL marker" ~key:"ttl.go" ~value:""
+              ~revision:12L ~operation:Nats_eio.Key_value.Entry.Purge entry
+        | Ok entry ->
+            failf "Go purge TTL entry returned %S"
+              (Nats_eio.Key_value.Entry.value entry)
         | Error error ->
-            failf "invalid OCaml TTL key: %a" Nats_eio.Key_value.Error.pp_key
-              error
-      in
-      let ttl_ocaml_revision =
-        expect_key_value_ok "create OCaml TTL Key-Value entry"
-          (Nats_eio.Key_value.create_key
-             ~ttl:Mtime.Span.(1 * min)
-             bucket ttl_ocaml_key "from-ocaml-ttl")
-      in
-      expect_revision "OCaml TTL entry" 9L ttl_ocaml_revision;
-      let ttl_response =
-        request_control ~timeout connection prefix ".ocaml-ttl-ready" "created"
-      in
-      expect_payload "Go OCaml TTL validation" "go-ttl-validated" ttl_response;
-      let go_ttl_response =
-        request_control ~timeout connection prefix ".go-ttl-ready" "write"
-      in
-      expect_payload "Go TTL write" "written" go_ttl_response;
-      let ttl_go_key =
-        match Nats_eio.Key_value.Key.of_string "ttl.go" with
-        | Ok key -> key
-        | Error error ->
-            failf "invalid Go TTL key: %a" Nats_eio.Key_value.Error.pp_key error
-      in
-      let ttl_go_entry =
-        expect_key_value_ok "get Go TTL Key-Value entry"
-          (Nats_eio.Key_value.get bucket ttl_go_key)
-      in
-      expect_entry "Go TTL entry" ~key:"ttl.go" ~value:"from-go-ttl"
-        ~revision:10L ~operation:Nats_eio.Key_value.Entry.Put ttl_go_entry;
-      let purge_ttl_revision =
-        expect_key_value_ok "purge OCaml TTL Key-Value entry"
-          (Nats_eio.Key_value.purge
-             ~marker_ttl:Mtime.Span.(1 * min)
-             bucket ttl_ocaml_key)
-      in
-      expect_revision "OCaml purge TTL marker" 11L purge_ttl_revision;
-      let purge_ttl_response =
-        request_control ~timeout connection prefix ".ocaml-purge-ttl-ready"
-          "purged"
-      in
-      expect_payload "Go OCaml purge TTL validation" "go-purge-ttl-validated"
-        purge_ttl_response;
-      let go_purge_ttl_response =
-        request_control ~timeout connection prefix ".go-purge-ttl" "purge"
-      in
-      expect_payload "Go purge TTL" "purged" go_purge_ttl_response;
-      (match Nats_eio.Key_value.get bucket ttl_go_key with
-      | Error (Nats_eio.Key_value.Error.Key_deleted entry) ->
-          expect_entry "Go purge TTL marker" ~key:"ttl.go" ~value:""
-            ~revision:12L ~operation:Nats_eio.Key_value.Entry.Purge entry
-      | Ok entry ->
-          failf "Go purge TTL entry returned %S"
-            (Nats_eio.Key_value.Entry.value entry)
-      | Error error ->
-          failf "Go purge TTL entry returned %s" (key_value_error_message error));
+            failf "Go purge TTL entry returned %s"
+              (key_value_error_message error));
       let purge_deletes_response =
         request_control ~timeout connection prefix ".go-purge-deletes-ready"
           "prepare"

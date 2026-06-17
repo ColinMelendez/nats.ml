@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -24,6 +25,35 @@ const (
 
 func keyValueContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), waitTimeout)
+}
+
+func keyValueMarkerTTLSupported(version string) (bool, error) {
+	var major, minor, patch int
+	if _, err := fmt.Sscanf(version, "%d.%d.%d", &major, &minor, &patch); err != nil {
+		return false, fmt.Errorf("parse NATS server version %q: %w", version, err)
+	}
+	return major > 2 || major == 2 && minor >= 11, nil
+}
+
+func publishReadyFile(path, content string) error {
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, "."+filepath.Base(path)+".*")
+	if err != nil {
+		return fmt.Errorf("create temporary ready file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if _, err := temporary.WriteString(content); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("write temporary ready file: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close temporary ready file: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("publish ready file: %w", err)
+	}
+	return nil
 }
 
 func checkKeyValueEntry(label string, entry natsjetstream.KeyValueEntry, bucket, key, value string, revision uint64, operation natsjetstream.KeyValueOp) error {
@@ -139,18 +169,27 @@ func runJetStreamKeyValuePeer(config options) error {
 		return fmt.Errorf("connect: %w", err)
 	}
 	defer connection.Close()
+	markerTTLSupported, err := keyValueMarkerTTLSupported(connection.ConnectedServerVersion())
+	if err != nil {
+		return err
+	}
 
 	jetstream, err := natsjetstream.New(connection)
 	if err != nil {
 		return fmt.Errorf("JetStream context: %w", err)
 	}
 	ctx, cancel := keyValueContext()
-	keyValue, err := jetstream.CreateKeyValue(ctx, natsjetstream.KeyValueConfig{
-		Bucket:         config.bucket,
-		History:        kvHistory,
-		Storage:        natsjetstream.MemoryStorage,
-		LimitMarkerTTL: time.Minute,
-	})
+	keyValueConfig := natsjetstream.KeyValueConfig{
+		Bucket:  config.bucket,
+		History: kvHistory,
+		Storage: natsjetstream.MemoryStorage,
+	}
+	markerTTL := time.Duration(0)
+	if markerTTLSupported {
+		markerTTL = time.Minute
+		keyValueConfig.LimitMarkerTTL = markerTTL
+	}
+	keyValue, err := jetstream.CreateKeyValue(ctx, keyValueConfig)
 	cancel()
 	if err != nil {
 		return fmt.Errorf("create Key-Value bucket: %w", err)
@@ -164,7 +203,7 @@ func runJetStreamKeyValuePeer(config options) error {
 	if err != nil {
 		return fmt.Errorf("initial Key-Value status: %w", err)
 	}
-	if err := checkKeyValueStatus("initial Key-Value status", status, config.bucket, 0, time.Minute); err != nil {
+	if err := checkKeyValueStatus("initial Key-Value status", status, config.bucket, 0, markerTTL); err != nil {
 		return err
 	}
 	ctx, cancel = keyValueContext()
@@ -239,7 +278,11 @@ func runJetStreamKeyValuePeer(config options) error {
 	if err := connection.Flush(); err != nil {
 		return fmt.Errorf("flush Key-Value setup: %w", err)
 	}
-	if err := os.WriteFile(config.ready, []byte("ready\n"), 0600); err != nil {
+	readiness := "baseline\n"
+	if markerTTLSupported {
+		readiness = "marker-ttl\n"
+	}
+	if err := publishReadyFile(config.ready, readiness); err != nil {
 		return fmt.Errorf("write ready file: %w", err)
 	}
 
@@ -430,69 +473,73 @@ func runJetStreamKeyValuePeer(config options) error {
 		return err
 	}
 
-	ocamlTTLMessage, err := waitMessage("OCaml Key-Value TTL setup", ocamlTTLReadyMessages)
-	if err != nil {
-		return err
-	}
-	if err := validateKeyValueControl("OCaml Key-Value TTL setup", "created", ocamlTTLMessage); err != nil {
-		return err
-	}
-	if err := checkKeyValueMessage("OCaml Key-Value TTL entry", stream, config.bucket, kvOCamlTTLKey, time.Minute, ""); err != nil {
-		return err
-	}
-	if err := respondKeyValueControl(connection, "OCaml Key-Value TTL setup", ocamlTTLMessage, "go-ttl-validated"); err != nil {
-		return err
-	}
+	purgeDeletesPutRevision := uint64(9)
+	if markerTTLSupported {
+		ocamlTTLMessage, err := waitMessage("OCaml Key-Value TTL setup", ocamlTTLReadyMessages)
+		if err != nil {
+			return err
+		}
+		if err := validateKeyValueControl("OCaml Key-Value TTL setup", "created", ocamlTTLMessage); err != nil {
+			return err
+		}
+		if err := checkKeyValueMessage("OCaml Key-Value TTL entry", stream, config.bucket, kvOCamlTTLKey, time.Minute, ""); err != nil {
+			return err
+		}
+		if err := respondKeyValueControl(connection, "OCaml Key-Value TTL setup", ocamlTTLMessage, "go-ttl-validated"); err != nil {
+			return err
+		}
 
-	goTTLMessage, err := waitMessage("Go Key-Value TTL setup", goTTLReadyMessages)
-	if err != nil {
-		return err
-	}
-	if err := validateKeyValueControl("Go Key-Value TTL setup", "write", goTTLMessage); err != nil {
-		return err
-	}
-	ctx, cancel = keyValueContext()
-	goTTLRevision, err := keyValue.Create(ctx, kvGoTTLKey, []byte("from-go-ttl"), natsjetstream.KeyTTL(time.Minute))
-	cancel()
-	if err != nil {
-		return fmt.Errorf("create Go TTL Key-Value entry: %w", err)
-	}
-	if goTTLRevision != 10 {
-		return fmt.Errorf("Go TTL Key-Value entry revision was %d, expected 10", goTTLRevision)
-	}
-	if err := respondKeyValueControl(connection, "Go Key-Value TTL setup", goTTLMessage, "written"); err != nil {
-		return err
-	}
-
-	ocamlPurgeTTLMessage, err := waitMessage("OCaml Key-Value purge TTL", ocamlPurgeTTLReadyMessages)
-	if err != nil {
-		return err
-	}
-	if err := validateKeyValueControl("OCaml Key-Value purge TTL", "purged", ocamlPurgeTTLMessage); err != nil {
-		return err
-	}
-	if err := checkKeyValueMessage("OCaml Key-Value purge TTL marker", stream, config.bucket, kvOCamlTTLKey, time.Minute, "PURGE"); err != nil {
-		return err
-	}
-	if err := respondKeyValueControl(connection, "OCaml Key-Value purge TTL", ocamlPurgeTTLMessage, "go-purge-ttl-validated"); err != nil {
-		return err
-	}
-
-	goPurgeTTLMessage, err := waitMessage("Go Key-Value purge TTL", goPurgeTTLMessages)
-	if err != nil {
-		return err
-	}
-	if err := validateKeyValueControl("Go Key-Value purge TTL", "purge", goPurgeTTLMessage); err != nil {
-		return err
-	}
-	ctx, cancel = keyValueContext()
-	if err := keyValue.Purge(ctx, kvGoTTLKey, natsjetstream.LastRevision(goTTLRevision), natsjetstream.PurgeTTL(time.Minute)); err != nil {
+		goTTLMessage, err := waitMessage("Go Key-Value TTL setup", goTTLReadyMessages)
+		if err != nil {
+			return err
+		}
+		if err := validateKeyValueControl("Go Key-Value TTL setup", "write", goTTLMessage); err != nil {
+			return err
+		}
+		ctx, cancel = keyValueContext()
+		goTTLRevision, err := keyValue.Create(ctx, kvGoTTLKey, []byte("from-go-ttl"), natsjetstream.KeyTTL(time.Minute))
 		cancel()
-		return fmt.Errorf("purge Go TTL Key-Value entry: %w", err)
-	}
-	cancel()
-	if err := respondKeyValueControl(connection, "Go Key-Value purge TTL", goPurgeTTLMessage, "purged"); err != nil {
-		return err
+		if err != nil {
+			return fmt.Errorf("create Go TTL Key-Value entry: %w", err)
+		}
+		if goTTLRevision != 10 {
+			return fmt.Errorf("Go TTL Key-Value entry revision was %d, expected 10", goTTLRevision)
+		}
+		if err := respondKeyValueControl(connection, "Go Key-Value TTL setup", goTTLMessage, "written"); err != nil {
+			return err
+		}
+
+		ocamlPurgeTTLMessage, err := waitMessage("OCaml Key-Value purge TTL", ocamlPurgeTTLReadyMessages)
+		if err != nil {
+			return err
+		}
+		if err := validateKeyValueControl("OCaml Key-Value purge TTL", "purged", ocamlPurgeTTLMessage); err != nil {
+			return err
+		}
+		if err := checkKeyValueMessage("OCaml Key-Value purge TTL marker", stream, config.bucket, kvOCamlTTLKey, time.Minute, "PURGE"); err != nil {
+			return err
+		}
+		if err := respondKeyValueControl(connection, "OCaml Key-Value purge TTL", ocamlPurgeTTLMessage, "go-purge-ttl-validated"); err != nil {
+			return err
+		}
+
+		goPurgeTTLMessage, err := waitMessage("Go Key-Value purge TTL", goPurgeTTLMessages)
+		if err != nil {
+			return err
+		}
+		if err := validateKeyValueControl("Go Key-Value purge TTL", "purge", goPurgeTTLMessage); err != nil {
+			return err
+		}
+		ctx, cancel = keyValueContext()
+		if err := keyValue.Purge(ctx, kvGoTTLKey, natsjetstream.LastRevision(goTTLRevision), natsjetstream.PurgeTTL(time.Minute)); err != nil {
+			cancel()
+			return fmt.Errorf("purge Go TTL Key-Value entry: %w", err)
+		}
+		cancel()
+		if err := respondKeyValueControl(connection, "Go Key-Value purge TTL", goPurgeTTLMessage, "purged"); err != nil {
+			return err
+		}
+		purgeDeletesPutRevision = 13
 	}
 
 	purgeDeletesMessage, err := waitMessage("Go Key-Value purge-deletes setup", goPurgeDeletesReadyMessages)
@@ -508,8 +555,8 @@ func runJetStreamKeyValuePeer(config options) error {
 	if err != nil {
 		return fmt.Errorf("put purge-deletes Key-Value entry: %w", err)
 	}
-	if purgeDeletesRevision != 13 {
-		return fmt.Errorf("purge-deletes setup revision was %d, expected 13", purgeDeletesRevision)
+	if purgeDeletesRevision != purgeDeletesPutRevision {
+		return fmt.Errorf("purge-deletes setup revision was %d, expected %d", purgeDeletesRevision, purgeDeletesPutRevision)
 	}
 	ctx, cancel = keyValueContext()
 	err = keyValue.Delete(ctx, kvPurgeDeletesKey, natsjetstream.LastRevision(purgeDeletesRevision))
@@ -527,8 +574,9 @@ func runJetStreamKeyValuePeer(config options) error {
 		return fmt.Errorf("purge-deletes setup history had %d entries, expected 2", len(purgeDeletesHistory))
 	}
 	purgeDeletesRevision = purgeDeletesHistory[1].Revision()
-	if purgeDeletesRevision != 14 {
-		return fmt.Errorf("purge-deletes marker revision was %d, expected 14", purgeDeletesRevision)
+	purgeDeletesMarkerRevision := purgeDeletesPutRevision + 1
+	if purgeDeletesRevision != purgeDeletesMarkerRevision {
+		return fmt.Errorf("purge-deletes marker revision was %d, expected %d", purgeDeletesRevision, purgeDeletesMarkerRevision)
 	}
 	if err := respondKeyValueControl(connection, "Go Key-Value purge-deletes setup", purgeDeletesMessage, "prepared"); err != nil {
 		return err

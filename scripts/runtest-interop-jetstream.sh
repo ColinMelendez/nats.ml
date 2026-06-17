@@ -305,6 +305,19 @@ if [ ! -e "$ready" ]; then
   exit 1
 fi
 
+kv_marker_ttl=
+if [ "$jetstream_mode" = kv ]; then
+  case "$(sed -n '1p' "$ready")" in
+    baseline) kv_marker_ttl=0 ;;
+    marker-ttl) kv_marker_ttl=1 ;;
+    *)
+      echo "Go Key-Value peer reported an unknown capability set" >&2
+      cat "$peer_log" >&2 || true
+      exit 1
+      ;;
+  esac
+fi
+
 status=0
 case "$jetstream_mode" in
   pull) acceptance_executable=test/interop/interop_jetstream_acceptance.exe ;;
@@ -316,6 +329,7 @@ case "$jetstream_mode" in
 esac
 if NATS_TEST_SERVER="$server" NATS_TEST_INTEROP_PREFIX="$prefix" \
     NATS_TEST_INTEROP_STREAM="$stream" NATS_TEST_INTEROP_BUCKET="$bucket" \
+    NATS_TEST_KV_MARKER_TTL="$kv_marker_ttl" \
     nix develop .#integration -c dune exec \
     "$acceptance_executable" >"$ocaml_log" 2>&1
 then
