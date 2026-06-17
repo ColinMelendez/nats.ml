@@ -117,6 +117,22 @@ let assert_success label responses =
   | [] -> failf "%s returned no responses" label
   | _ -> failf "%s returned more than one targeted response" label
 
+let json_string_field name = function
+  | Jsont.Object (members, _) -> (
+      match Jsont.Json.find_mem name members with
+      | Some (_, Jsont.String (value, _)) -> Some value
+      | Some _ | None -> None)
+  | _ -> None
+
+let config_load_time label response =
+  match
+    Option.bind
+      (Nats_eio_system.Monitor.data response)
+      (json_string_field "config_load_time")
+  with
+  | Some value -> value
+  | None -> failf "%s VARZ response had no string config_load_time" label
+
 let run env =
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
@@ -301,6 +317,18 @@ let run env =
           if not recovered_connected then
             failf "recovered system account CONNECT event was not observed");
       expect_system "event close" (Nats_eio_system.Events.close account_events);
+      let reload_target =
+        expect_system "reload server target"
+          (Nats_eio_system.Target.server !reload_server_id)
+      in
+      let config_load_time_before =
+        expect_system "pre-reload server VARZ"
+          (Nats_eio_system.Monitor.request
+             ~timeout:Mtime.Span.(5 * s)
+             system ~target:reload_target Nats_eio_system.Monitor.Endpoint.Varz)
+        |> assert_success "pre-reload server VARZ"
+        |> config_load_time "pre-reload"
+      in
       (match
          Nats_eio_system.Control.reload
            ~timeout:Mtime.Span.(5 * s)
@@ -314,6 +342,31 @@ let run env =
         when reload_connection_loss_allowed ->
           ()
       | Error error -> failf "reload: %s" (system_error error));
+      let remaining = ref 16 in
+      let reload_observed = ref false in
+      while !remaining > 0 && not !reload_observed do
+        decr remaining;
+        match
+          Nats_eio_system.Monitor.request
+            ~timeout:Mtime.Span.(1 * s)
+            system ~target:reload_target Nats_eio_system.Monitor.Endpoint.Varz
+        with
+        | Ok responses ->
+            let config_load_time_after =
+              assert_success "post-reload server VARZ" responses
+              |> config_load_time "post-reload"
+            in
+            if not (String.equal config_load_time_before config_load_time_after)
+            then reload_observed := true
+            else Eio.Time.Mono.sleep clock 0.1
+        | Error (Nats_eio_system.Error.Connection Nats_eio.Error.Disconnected)
+        | Error (Nats_eio_system.Error.Connection Nats_eio.Error.Timeout) ->
+            ()
+        | Error error ->
+            failf "post-reload server VARZ: %s" (system_error error)
+      done;
+      if not !reload_observed then
+        failf "reload did not update the server config_load_time";
       print_endline "system administration: ok")
 
 let () =
