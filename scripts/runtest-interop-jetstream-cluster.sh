@@ -73,7 +73,8 @@ else
   server_debug_args=
 fi
 run_id=$$
-dune_build_dir=${NATS_TEST_DUNE_BUILD_DIR:-_build-interop-$run_id}
+dune_build_dir=${NATS_TEST_DUNE_BUILD_DIR-}
+dune_build_dir_owned=0
 acceptance_binary=${NATS_TEST_ACCEPTANCE_BINARY-}
 if [ -n "$acceptance_binary" ]; then
   case "$acceptance_binary" in
@@ -228,17 +229,6 @@ if [ "$auth_mode" = mtls ]; then
   tls_enabled=1
 fi
 
-if [ -z "$acceptance_binary" ]; then
-  if ! integration_command timeout --signal=TERM --kill-after=5s \
-      "${runner_timeout}s" dune build \
-      --build-dir "$dune_build_dir" \
-      "$acceptance_executable"
-  then
-    echo "$cluster_scenario cluster acceptance executable did not build" >&2
-    exit 1
-  fi
-fi
-
 run_acceptance() {
   if [ -n "$acceptance_binary" ]; then
     integration_command timeout --signal=TERM --kill-after=5s \
@@ -336,6 +326,9 @@ cleanup() {
   if [ -n "$auth_dir" ]; then
     rm -rf "$auth_dir"
   fi
+  if [ "$dune_build_dir_owned" -eq 1 ]; then
+    rm -rf "$dune_build_dir"
+  fi
   rm -f "$signal" "$signal.1" "$signal.failed" "$leader_file" \
     "$survivor_file" "$survivor_tmp" "$killed_file" "$kill_ready_file" \
     "$go_reconnected_file" "$ocaml_reconnected_file" \
@@ -353,6 +346,23 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+if [ -z "$dune_build_dir" ]; then
+  dune_build_dir=$(mktemp -d "$PWD/_build-interop.XXXXXX")
+  dune_build_dir=${dune_build_dir#"$PWD/"}
+  dune_build_dir_owned=1
+fi
+
+if [ -z "$acceptance_binary" ]; then
+  if ! integration_command timeout --signal=TERM --kill-after=5s \
+      "${runner_timeout}s" dune build \
+      --build-dir "$dune_build_dir" \
+      "$acceptance_executable"
+  then
+    echo "$cluster_scenario cluster acceptance executable did not build" >&2
+    exit 1
+  fi
+fi
 
 # shellcheck disable=SC1091 # script_dir points at this file's directory.
 . "$script_dir/interop-auth-material.sh"
