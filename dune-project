@@ -15,6 +15,7 @@
   bytesrw
   jsont
   mtime
+  (thumper :dev)
   (alcobar :with-test)
   (windtrap :with-test)))
 

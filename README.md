@@ -144,6 +144,35 @@ tooling does not become part of the normal OCaml development environment:
 nix develop .#integration
 ```
 
+### Protocol benchmarks
+
+The benchmark workspace pins Thumper separately from the normal dependency
+lock and compiles the complete local library under three native-code profiles:
+
+- `bench_no_opt`: `-Oclassic`, the practical baseline without Flambda's
+  call-site optimization passes;
+- `bench_o3`: `-O3`;
+- `bench_o3_unbox`: `-O3 -unbox-closures`.
+
+Run the matrix through the pinned Nix toolchain and give it a new or empty
+output directory:
+
+```sh
+results=$(mktemp -d)
+nix develop .#test -c ./scripts/benchmark-optimizer-matrix.sh "$results"
+```
+
+The runner checks for Dune 3.24.2 and the Flambda-enabled OCaml 5.5.0
+compiler before measuring. It waits up to two minutes for a quiet host by
+default; set `NATS_BENCH_WAIT_QUIET_SECONDS` to change that limit. The output
+contains the raw reports, JSON verdicts, profile-specific baselines, and a
+`summary.md` comparison. Negative percentages in the summary are faster.
+Loaded-host results are rejected by default. Set `NATS_BENCH_ALLOW_LOADED=1`
+only for an exploratory report; the generated summary records the caveat and
+such results must not become regression baselines.
+The current reference run and interpretation are in
+[`docs/benchmark-report.md`](docs/benchmark-report.md).
+
 The current pure-core tests are portable. An opt-in Core NATS acceptance run
 against a pinned `nats-server` Docker image is available with:
 

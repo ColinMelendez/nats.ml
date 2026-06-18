@@ -1,0 +1,28 @@
+(executable
+ (name bench_protocol)
+ (enabled_if
+  (or
+   (= %{profile} bench_no_opt)
+   (= %{profile} bench_o3)
+   (= %{profile} bench_o3_unbox)))
+ (libraries bytesrw nats thumper))
+
+(rule
+ (alias bench)
+ (enabled_if
+  (or
+   (= %{profile} bench_no_opt)
+   (= %{profile} bench_o3)
+   (= %{profile} bench_o3_unbox)))
+ (locks nats-bench)
+ (action
+  (progn
+   (run
+    %{exe:bench_protocol.exe}
+    --color
+    never
+    --baseline
+    nats-protocol-%{profile}.thumper)
+   (diff?
+    nats-protocol-%{profile}.thumper
+    nats-protocol-%{profile}.thumper.corrected))))

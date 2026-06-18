@@ -1,0 +1,18 @@
+(version 5.5.0)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (substitute gen_ocaml_config.ml.in gen_ocaml_config.ml)
+     (run ocaml gen_ocaml_config.ml))))))
+
+(avoid)
+
+(extra_sources
+ (gen_ocaml_config.ml.in
+  (fetch
+   (url
+    https://raw.githubusercontent.com/ocaml/ocaml/bcb802e851a1391ac6fff957d63b0edbf849225a/tools/opam/gen_ocaml-system_config.ml.in)
+   (checksum
+    sha256=71bcd3d35e28cbf71eda81991c8741268f4b87ced71573b2e75f64f136cebfc1))))

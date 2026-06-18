@@ -1,0 +1,10 @@
+(env
+ (bench_no_opt
+  (ocamlopt_flags
+   (:standard -Oclassic)))
+ (bench_o3
+  (ocamlopt_flags
+   (:standard -O3)))
+ (bench_o3_unbox
+  (ocamlopt_flags
+   (:standard -O3 -unbox-closures))))

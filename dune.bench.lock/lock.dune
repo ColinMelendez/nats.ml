@@ -19,14 +19,9 @@
   (with-doc false)
   (with-dev-setup false)
   (post true)
-  (opam-version 2.2.0))
- (unset_variables
-  with-test
-  sys-ocaml-libc
-  sys-ocaml-cc
-  sys-ocaml-arch
-  dev
-  build))
+  (opam-version 2.2.0)
+  (dev true))
+ (unset_variables with-test sys-ocaml-libc sys-ocaml-cc sys-ocaml-arch build))
 
 (solved_for_platforms
  ((arch x86_64)
