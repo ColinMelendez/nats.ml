@@ -11,14 +11,18 @@
 (depends
  (choice
   ((((arch x86_64)
-     (os linux))
+     (os linux)
+     (sys-ocaml-version 5.5.0))
     ((arch arm64)
-     (os linux)))
+     (os linux)
+     (sys-ocaml-version 5.5.0)))
    ())
   ((((arch x86_64)
-     (os macos))
+     (os macos)
+     (sys-ocaml-version 5.5.0))
     ((arch arm64)
-     (os macos)))
+     (os macos)
+     (sys-ocaml-version 5.5.0)))
    (conf-pkg-config))))
 
 (depexts

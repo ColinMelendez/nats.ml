@@ -1,2 +1,9 @@
-(lang dune 3.22)
+(lang dune 3.24)
 (pkg enabled)
+
+(lock_dir
+ (solver_env
+  (sys-ocaml-version 5.5.0))
+ (constraints
+  ocaml-system
+  (ocaml (= 5.5.0))))

@@ -7,7 +7,7 @@ maintainer: ["Colin <cwrmcolin@gmail.com>"]
 authors: ["Colin <cwrmcolin@gmail.com>"]
 license: "ISC"
 depends: [
-  "dune" {>= "3.22"}
+  "dune" {>= "3.24"}
   "ocaml" {>= "5.5"}
   "nats-eio" {= version}
   "eio"

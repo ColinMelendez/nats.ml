@@ -1,4 +1,4 @@
-(lang dune 3.22)
+(lang dune 3.24)
 (name nats)
 (generate_opam_files true)
 

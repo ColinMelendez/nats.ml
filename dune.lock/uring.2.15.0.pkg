@@ -3,9 +3,11 @@
 (build
  (choice
   ((((arch x86_64)
-     (os linux))
+     (os linux)
+     (sys-ocaml-version 5.5.0))
     ((arch arm64)
-     (os linux)))
+     (os linux)
+     (sys-ocaml-version 5.5.0)))
    ((action
      (progn
       (when
@@ -16,9 +18,11 @@
 (depends
  (choice
   ((((arch x86_64)
-     (os linux))
+     (os linux)
+     (sys-ocaml-version 5.5.0))
     ((arch arm64)
-     (os linux)))
+     (os linux)
+     (sys-ocaml-version 5.5.0)))
    (dune cstruct ocaml dune-configurator fmt optint))))
 
 (depexts
@@ -35,6 +39,8 @@
 (enabled_on_platforms
  (only
   ((arch x86_64)
-   (os linux))
+   (os linux)
+   (sys-ocaml-version 5.5.0))
   ((arch arm64)
-   (os linux))))
+   (os linux)
+   (sys-ocaml-version 5.5.0))))

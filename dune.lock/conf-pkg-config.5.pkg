@@ -3,9 +3,11 @@
 (build
  (choice
   ((((arch x86_64)
-     (os linux))
+     (os linux)
+     (sys-ocaml-version 5.5.0))
     ((arch arm64)
-     (os linux)))
+     (os linux)
+     (sys-ocaml-version 5.5.0)))
    ((action
      (progn
       (run pkg-config --help)
@@ -19,9 +21,11 @@
        pkg-config
        EOL)))))
   ((((arch x86_64)
-     (os macos))
+     (os macos)
+     (sys-ocaml-version 5.5.0))
     ((arch arm64)
-     (os macos)))
+     (os macos)
+     (sys-ocaml-version 5.5.0)))
    ((action
      (progn
       (when

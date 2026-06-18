@@ -2,7 +2,7 @@
 
 (dependency_hash 220108cd66e1b1c9ac2bb8d6dd94a7b7)
 
-(ocaml ocaml-base-compiler)
+(ocaml ocaml-system)
 
 (repositories
  (complete true)
@@ -10,7 +10,9 @@
   ((source
     https://github.com/ocaml-dune/opam-overlays.git#99fc2e18c45b4761ed5f6d282910c03c97e32bce))
   ((source
-    https://github.com/ocaml/opam-repository.git#45220c31b03bbad5f368a3e01c8e3da44844c5db))))
+    https://github.com/ocaml-dune/opam-repository-relocatable.git#d64df82c7e16de819a770cabf4066a06243ed80b))
+  ((source
+    https://github.com/ocaml/opam-repository.git#145fce2b2140de3353bafb4039fa64a2fd405ce5))))
 
 (expanded_solver_variable_bindings
  (variable_values
@@ -18,14 +20,24 @@
   (with-dev-setup false)
   (post true)
   (opam-version 2.2.0))
- (unset_variables with-test sys-ocaml-libc dev build))
+ (unset_variables
+  with-test
+  sys-ocaml-libc
+  sys-ocaml-cc
+  sys-ocaml-arch
+  dev
+  build))
 
 (solved_for_platforms
  ((arch x86_64)
-  (os linux))
+  (os linux)
+  (sys-ocaml-version 5.5.0))
  ((arch arm64)
-  (os linux))
+  (os linux)
+  (sys-ocaml-version 5.5.0))
  ((arch x86_64)
-  (os macos))
+  (os macos)
+  (sys-ocaml-version 5.5.0))
  ((arch arm64)
-  (os macos)))
+  (os macos)
+  (sys-ocaml-version 5.5.0)))

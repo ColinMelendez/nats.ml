@@ -3,18 +3,22 @@
 (build
  (choice
   ((((arch x86_64)
-     (os linux))
+     (os linux)
+     (sys-ocaml-version 5.5.0))
     ((arch arm64)
-     (os linux)))
+     (os linux)
+     (sys-ocaml-version 5.5.0)))
    ((action
      (run dune build -p %{pkg-self:name} -j %{jobs} @install))))))
 
 (depends
  (choice
   ((((arch x86_64)
-     (os linux))
+     (os linux)
+     (sys-ocaml-version 5.5.0))
     ((arch arm64)
-     (os linux)))
+     (os linux)
+     (sys-ocaml-version 5.5.0)))
    (dune eio fmt uring))))
 
 (source
@@ -27,6 +31,8 @@
 (enabled_on_platforms
  (only
   ((arch x86_64)
-   (os linux))
+   (os linux)
+   (sys-ocaml-version 5.5.0))
   ((arch arm64)
-   (os linux))))
+   (os linux)
+   (sys-ocaml-version 5.5.0))))

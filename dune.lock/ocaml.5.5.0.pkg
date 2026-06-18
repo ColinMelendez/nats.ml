@@ -12,8 +12,18 @@
       gen_ocaml_config.ml
       %{pkg-self:version}
       %{pkg-self:name}
-      "%{pkg:ocaml-base-compiler:version}"
-      false
+      (concat
+       (if
+        (catch_undefined_var %{pkg:ocaml-system:installed} false)
+        system
+        "")
+       ""
+       ""
+       ""
+       ""
+       ""
+       "")
+      %{pkg:ocaml-system:installed}
       ""
       ""
       ""
@@ -24,7 +34,7 @@
       ""))))))
 
 (depends
- (all_platforms (ocaml-base-compiler)))
+ (all_platforms (ocaml-system)))
 
 (exported_env
  (+= OCAMLTOP_INCLUDE_PATH "\%{toplevel}%")

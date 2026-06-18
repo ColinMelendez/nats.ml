@@ -17,7 +17,20 @@
       devShells = forAllSystems (
         system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [
+              (_: prev: {
+                dune_3 = prev.dune_3.overrideAttrs (_: rec {
+                  version = "3.24.2";
+                  src = prev.fetchurl {
+                    url = "https://github.com/ocaml/dune/releases/download/${version}/dune-${version}.tbz";
+                    hash = "sha256-RyeYaRsCFtr1OHCfD0cDs2F+8krQhmyQlgaLqrpNdio=";
+                  };
+                });
+              })
+            ];
+          };
           base_packages = with pkgs; [
             curl
             gawk
@@ -25,16 +38,39 @@
             git
             pkg-config
           ];
-          ocamlPackages = pkgs.ocamlPackages_latest.overrideScope (
+          ocamlPackages = pkgs.ocaml-ng.ocamlPackages_5_5.overrideScope (
             final: prev: {
-              ocaml = prev.ocaml.overrideAttrs (old: {
-                nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.pkg-config ];
-                buildInputs = (old.buildInputs or [ ]) ++ [ pkgs.zstd ];
-                # The zstd-enabled compiler is rebuilt locally; the repository
-                # checks remain enabled, so do not repeat OCaml's long upstream
-                # test suite in every developer toolchain build.
-                doCheck = false;
+              cppo = prev.cppo.overrideAttrs (old: {
+                postPatch = (old.postPatch or "") + ''
+                  # Dune 3.24 preserves the leading ./ in dependency paths.
+                  # Keep cppo's diagnostic fixtures aligned without disabling
+                  # its test suite.
+                  for reference in test/*.ref; do
+                    input="$(basename "''${reference%.ref}").cppo"
+                    if grep -Fq "\"$input\"" "$reference"; then
+                      substituteInPlace "$reference" \
+                        --replace-fail "\"$input\"" "\"./$input\""
+                    fi
+                    if grep -Fq "CPPO_FILE=$input" "$reference"; then
+                      substituteInPlace "$reference" \
+                        --replace-fail "CPPO_FILE=$input" "CPPO_FILE=./$input"
+                    fi
+                  done
+                '';
               });
+              ocaml =
+                (prev.ocaml.override {
+                  flambdaSupport = true;
+                }).overrideAttrs
+                  (old: {
+                    configureFlags = (old.configureFlags or [ ]) ++ [ "--disable-flat-float-array" ];
+                    nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.pkg-config ];
+                    buildInputs = (old.buildInputs or [ ]) ++ [ pkgs.zstd ];
+                    # The zstd-enabled compiler is rebuilt locally; the repository
+                    # checks remain enabled, so do not repeat OCaml's long upstream
+                    # test suite in every developer toolchain build.
+                    doCheck = false;
+                  });
             }
           );
           ocaml_packages = with ocamlPackages; [
