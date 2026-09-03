@@ -17,9 +17,7 @@ The first API-stability gate should cover Core NATS and its Eio facade. The
 longer-term SDK target is JetStream, Key-Value, Object Store, and Services, but
 those surfaces should stabilize only after the Core NATS connection,
 subscription, reconnect, and drain semantics have been exercised against a
-real server. NATS Streaming is intentionally out of scope. It is a separate,
-legacy protocol and compatibility with its APIs or data formats would weaken a
-new library without helping the NATS design.
+real server.
 
 ## 1. Research scope
 
@@ -52,9 +50,8 @@ drive the first architecture:
 | [Ruby](https://github.com/nats-io/nats-pure.rb) | Thread-safe callback and blocking request APIs, with Core, JetStream, and Services. |
 | [Elixir](https://github.com/nats-io/nats.ex) | A GenServer/OTP process model with supervised reconnecting consumers and a Services implementation; its concurrency and ownership model is intentionally unlike an OCaml library. |
 
-This survey intentionally does not treat old language-specific repositories or
-NATS Streaming clients as architectural authorities. The official ecosystem
-page is the source of truth for the maintained-client set.
+The official ecosystem page is the source of truth for the maintained-client
+set; old language-specific repositories do not drive this design.
 
 ## 2. What the protocol and product require
 
@@ -928,7 +925,6 @@ second client runtime.
 
 ### Non-goals
 
-- NATS Streaming/STAN compatibility.
 - A callback-only public API.
 - A protocol core that depends on Eio, Lwt, Unix, TLS, DNS, or a socket.
 - Blind replay or reconciliation of already-submitted mutations across

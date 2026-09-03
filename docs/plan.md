@@ -3,7 +3,7 @@
 ## Status
 
 This plan follows the research and design review in
-[`docs/design.md`](docs/design.md). It incorporates an independent outside
+[`docs/design.md`](design.md). It incorporates an independent outside
 review of that document. The review confirmed the core direction and surfaced
 five corrections that are now treated as prerequisites:
 
@@ -18,8 +18,6 @@ five corrections that are now treated as prerequisites:
 The long-term goal is a modern, feature-complete NATS SDK. The first stable
 release is deliberately smaller: Core NATS plus an Eio connection facade. The
 remaining NATS product surface is added behind later stability gates.
-
-NATS Streaming/STAN is not part of this plan.
 
 ### Current checkpoint
 
