@@ -25,7 +25,7 @@ line:
 | --- | --- | --- |
 | `nats:2.10.22` | Compatibility floor | Tested by this project, but no longer an upstream-maintained server line |
 | `nats:2.12.15` | Previous maintained line | Tested |
-| `nats:2.14.6` | Current line | Working-tree acceptance passed; clean-tag rerun required |
+| `nats:2.14.6` | Current line | Tested |
 
 The exact candidates live in `scripts/default-server-images.sh`, which is
 shared by every version-matrix runner. Other patch releases in these minor
@@ -104,5 +104,5 @@ NATS server conformance. Release notes must identify any gate that was not run
 or any scenario that remains environment-blocked.
 
 The current release-candidate run is recorded in
-[`release-evidence.md`](release-evidence.md), including its exact scope and the
-qualification that must be resolved before tagging a clean release tree.
+[`release-evidence.md`](release-evidence.md), including the tested commit and
+its exact scope.
