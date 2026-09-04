@@ -6,16 +6,24 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - name: Format
         run: nix develop -c dune build @fmt
       - name: Build
@@ -27,12 +35,32 @@ jobs:
 
   integration-tools:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - name: Check integration scripts
         run: nix develop .#integration -c shellcheck scripts/*.sh
       - name: Check Go interoperability peer
         run: >-
           nix develop .#integration -c sh -c
           'cd interop/nats-ocaml-interop-peer && go test ./...'
+
+  nats-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - name: Check current-line server behavior
+        run: >-
+          nix develop .#integration -c env
+          NATS_SERVER_IMAGE=nats:2.14.6
+          NATS_TEST_JETSTREAM=1
+          ./scripts/runtest-server.sh
+      - name: Check current-line Go interoperability
+        run: >-
+          nix develop .#integration -c env
+          NATS_INTEGRATION_SHELL=1
+          NATS_SERVER_IMAGE=nats:2.14.6
+          ./scripts/runtest-interop.sh
