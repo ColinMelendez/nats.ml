@@ -1800,8 +1800,7 @@ let manager_delete jetstream ~bucket =
 let manager_bucket_name ~prefix name =
   let prefix_length = String.length prefix in
   if
-    String.length name <= prefix_length
-    || not (String.equal (String.sub name 0 prefix_length) prefix)
+    String.length name <= prefix_length || not (String.starts_with ~prefix name)
   then None
   else Some (String.sub name prefix_length (String.length name - prefix_length))
 

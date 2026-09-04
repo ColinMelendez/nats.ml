@@ -465,32 +465,27 @@ let outgoing_connect state ~(credentials : Connect.t) ~tls_required =
           | Error error -> Error error
           | Ok output -> (
               let replay_operations =
-                List.fold_right
-                  (fun (subscription : subscription) operations ->
-                    let replay =
-                      [
-                        Op.Sub
-                          {
-                            subject = subscription.subject;
-                            queue_group = subscription.queue_group;
-                            sid = subscription.sid;
-                          };
-                      ]
+                List.fold_left
+                  (fun operations (subscription : subscription) ->
+                    let subscribe =
+                      Op.Sub
+                        {
+                          subject = subscription.subject;
+                          queue_group = subscription.queue_group;
+                          sid = subscription.sid;
+                        }
                     in
                     match subscription.remaining with
-                    | None -> replay @ operations
+                    | None -> subscribe :: operations
                     | Some remaining ->
-                        (replay
-                        @ [
-                            Op.Unsub
-                              {
-                                sid = subscription.sid;
-                                max_messages = Some remaining;
-                              };
-                          ])
-                        @ operations)
-                  (List.rev state.subscriptions)
-                  []
+                        subscribe
+                        :: Op.Unsub
+                             {
+                               sid = subscription.sid;
+                               max_messages = Some remaining;
+                             }
+                        :: operations)
+                  [] state.subscriptions
               in
               match encode_all state replay_operations with
               | Error error -> Error error
@@ -675,18 +670,18 @@ let outgoing_drain state =
   match state.phase with
   | Connected -> (
       let operations =
-        List.map
-          (fun (subscription : subscription) ->
-            Op.Unsub { sid = subscription.sid; max_messages = None })
-          (List.filter
-             (fun (subscription : subscription) ->
-               not
-                 (List.exists
-                    (fun sid -> Int.equal sid subscription.sid)
-                    state.draining_subscriptions))
-             (List.rev state.subscriptions))
+        List.fold_left
+          (fun operations (subscription : subscription) ->
+            if
+              List.exists
+                (fun sid -> Int.equal sid subscription.sid)
+                state.draining_subscriptions
+            then operations
+            else
+              Op.Unsub { sid = subscription.sid; max_messages = None }
+              :: operations)
+          [ Op.Ping ] state.subscriptions
       in
-      let operations = operations @ [ Op.Ping ] in
       match encode_all state operations with
       | Error error -> Error error
       | Ok output ->

@@ -738,7 +738,7 @@ module Stream = struct
         match cluster with
         | Some value when Int.equal (String.length value) 0 ->
             Error Error.Empty_placement_cluster
-        | _ when Option.is_none cluster && Int.equal (List.length tags) 0 ->
+        | _ when Option.is_none cluster && List.is_empty tags ->
             Error Error.Empty_placement
         | _ when List.exists (fun tag -> Int.equal (String.length tag) 0) tags
           ->
@@ -876,7 +876,7 @@ module Stream = struct
             | _ ->
                 if
                   Option.is_some filter_subject
-                  && List.length subject_transforms > 0
+                  && not (List.is_empty subject_transforms)
                 then Error Error.Source_filter_and_transforms
                 else
                   Ok
@@ -1048,7 +1048,8 @@ module Stream = struct
         match first_sequence with Some 0L -> None | value -> value
       in
       let allow_empty_subjects =
-        allow_empty_subjects || Option.is_some mirror || List.length sources > 0
+        allow_empty_subjects || Option.is_some mirror
+        || not (List.is_empty sources)
       in
       let ( let* ) value f =
         match value with Error error -> Error error | Ok value -> f value
@@ -1065,7 +1066,7 @@ module Stream = struct
         | _ -> Ok ()
       in
       let* () =
-        if Int.equal (List.length subjects) 0 && not allow_empty_subjects then
+        if List.is_empty subjects && not allow_empty_subjects then
           Error Error.Empty_subjects
         else Ok ()
       in
@@ -1289,7 +1290,7 @@ module Stream = struct
         Option.value ~default:value.consumer_limits consumer_limits
       in
       v_internal
-        ~allow_empty_subjects:(Int.equal (List.length value.subjects) 0)
+        ~allow_empty_subjects:(List.is_empty value.subjects)
         ~name ~subjects ?description:value.description ~storage ~retention
         ~replicas ?placement ?mirror ~sources ?subject_transform ?republish
         ~mirror_direct ~compression ~metadata ~discard ?max_msgs ?max_bytes
@@ -1313,7 +1314,7 @@ module Stream = struct
 
     let with_description value description =
       v_internal
-        ~allow_empty_subjects:(Int.equal (List.length value.subjects) 0)
+        ~allow_empty_subjects:(List.is_empty value.subjects)
         ~name:value.name ~subjects:value.subjects ?description
         ~storage:value.storage ~retention:value.retention ~discard:value.discard
         ?max_msgs:value.max_msgs
@@ -1594,7 +1595,7 @@ module Stream = struct
 
     let with_placement value placement =
       v_internal
-        ~allow_empty_subjects:(Int.equal (List.length value.subjects) 0)
+        ~allow_empty_subjects:(List.is_empty value.subjects)
         ~name:value.name ~subjects:value.subjects ?description:value.description
         ~storage:value.storage ~replicas:value.replicas ?placement
         ~compression:value.compression ~metadata:value.metadata
@@ -2507,7 +2508,7 @@ module Stream = struct
         (match subjects with
         | _ :: _ -> subjects
         | [] when Option.is_some (Config.mirror value) -> []
-        | [] when List.length (Config.sources value) > 0 -> []
+        | [] when not (List.is_empty (Config.sources value)) -> []
         | [] -> current.subjects);
       description = Config.description value;
       storage = Config.storage value;
@@ -3542,8 +3543,7 @@ module Consumer = struct
       let* () =
         match deliver_policy with
         | Last_per_subject
-          when Option.is_none filter_subject
-               && Int.equal (List.length filter_subjects) 0 ->
+          when Option.is_none filter_subject && List.is_empty filter_subjects ->
             Error
               (Error.Invalid_consumer_policy
                  {
@@ -3597,7 +3597,7 @@ module Consumer = struct
                      field = "ack_wait";
                      value = "cannot be set with flow_control acknowledgement";
                    })
-            else if List.length backoff > 0 then
+            else if not (List.is_empty backoff) then
               Error
                 (Error.Invalid_consumer_policy
                    {

@@ -67,31 +67,31 @@ let valid_limits limits =
 
 let find_crlf string =
   let length = String.length string in
+  let position = ref 0 in
   let found = ref None in
-  if length >= 2 then
-    for position = 0 to length - 2 do
-      match !found with
-      | Some _ -> ()
-      | None ->
-          if
-            Char.equal (String.get string position) '\r'
-            && Char.equal (String.get string (position + 1)) '\n'
-          then found := Some position
-    done;
+  while Option.is_none !found && !position < length - 1 do
+    if
+      Char.equal (String.get string !position) '\r'
+      && Char.equal (String.get string (!position + 1)) '\n'
+    then found := Some !position
+    else position := !position + 1
+  done;
   !found
 
 let contains_internal_line_break string =
   let found = ref false in
+  let position = ref 0 in
   let last = String.length string - 1 in
-  for position = 0 to last do
+  while (not !found) && !position <= last do
     let trailing_carriage_return =
-      Int.equal position last && Char.equal (String.get string position) '\r'
+      Int.equal !position last && Char.equal (String.get string !position) '\r'
     in
     if
       (not trailing_carriage_return)
-      && (Char.equal (String.get string position) '\r'
-         || Char.equal (String.get string position) '\n')
-    then found := true
+      && (Char.equal (String.get string !position) '\r'
+         || Char.equal (String.get string !position) '\n')
+    then found := true;
+    position := !position + 1
   done;
   !found
 
@@ -108,16 +108,18 @@ let parse_nonnegative keyword value =
   if Int.equal length 0 then invalid_length keyword value
   else
     let parsed = ref 0 in
-    let invalid = ref false in
-    for position = 0 to length - 1 do
-      let code = Char.code (String.get value position) in
-      if code < Char.code '0' || code > Char.code '9' then invalid := true
-      else if not !invalid then
+    let valid = ref true in
+    let position = ref 0 in
+    while !valid && !position < length do
+      let code = Char.code (String.get value !position) in
+      position := !position + 1;
+      if code < Char.code '0' || code > Char.code '9' then valid := false
+      else
         let digit = code - Char.code '0' in
-        if !parsed > (Stdlib.max_int - digit) / 10 then invalid := true
+        if !parsed > (Stdlib.max_int - digit) / 10 then valid := false
         else parsed := (!parsed * 10) + digit
     done;
-    if !invalid then invalid_length keyword value else Ok !parsed
+    if !valid then Ok !parsed else invalid_length keyword value
 
 let add_size keyword left right =
   if left > Stdlib.max_int - right then invalid_length keyword "overflow"
@@ -286,7 +288,13 @@ let read ?(eod = false) ?(limits = default_limits) reader =
                     match read_body size with
                     | Error error -> restore_error error
                     | Ok () ->
-                        let complete = Buffer.contents buffer in
+                        let complete =
+                          if
+                            Int.equal (String.length complete)
+                              (Buffer.length buffer)
+                          then complete
+                          else Buffer.contents buffer
+                        in
                         let has_body =
                           match framing with Line -> false | _ -> true
                         in
@@ -315,7 +323,8 @@ let framing packet = packet.framing
 let to_string packet =
   match packet.framing with
   | Line -> packet.line ^ "\r\n"
-  | Payload _ | Headers _ -> packet.line ^ "\r\n" ^ packet.body ^ "\r\n"
+  | Payload _ | Headers _ ->
+      String.concat "" [ packet.line; "\r\n"; packet.body; "\r\n" ]
 
 let pp ppf packet =
   Format.fprintf ppf "{%s; body=%d bytes}" packet.line

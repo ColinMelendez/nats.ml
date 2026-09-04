@@ -76,7 +76,7 @@ module Config = struct
         Error (Invalid_history history)
     | Ok () when Int.compare replicas 1 < 0 || Int.compare replicas 5 > 0 ->
         Error (Invalid_replicas replicas)
-    | Ok () when Option.is_some mirror && List.length sources > 0 ->
+    | Ok () when Option.is_some mirror && not (List.is_empty sources) ->
         Error Mirror_and_sources
     | Ok () -> (
         match ttl with
@@ -742,7 +742,7 @@ let key_of_delivery value message =
   let prefix_length = String.length prefix in
   if
     String.length subject <= prefix_length
-    || not (String.equal prefix (String.sub subject 0 prefix_length))
+    || not (String.starts_with ~prefix subject)
   then Error (Error.Invalid_message_subject subject)
   else
     let key =
@@ -1423,8 +1423,7 @@ let manager_delete jetstream ~bucket =
 let manager_bucket_name ~prefix name =
   let prefix_length = String.length prefix in
   if
-    String.length name <= prefix_length
-    || not (String.equal (String.sub name 0 prefix_length) prefix)
+    String.length name <= prefix_length || not (String.starts_with ~prefix name)
   then None
   else Some (String.sub name prefix_length (String.length name - prefix_length))
 

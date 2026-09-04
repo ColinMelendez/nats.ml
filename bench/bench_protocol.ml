@@ -79,6 +79,12 @@ let message_64_wire = Thumper.black_box (message_wire 1 payload_64)
 let message_4096_wire = Thumper.black_box (message_wire 1 payload_4096)
 let message_1m_wire = Thumper.black_box (message_wire 1 payload_1m)
 
+let message_1m_packet =
+  Thumper.black_box
+    (expect_packet
+       (Nats.Packet.read ~eod:true
+          (Bytesrw.Bytes.Reader.of_string message_1m_wire)))
+
 let header_message_4096_wire =
   Thumper.black_box (header_message_wire payload_4096)
 
@@ -137,6 +143,15 @@ let connected_client subscription_count =
 let one_subscription = Thumper.black_box (connected_client 1)
 let many_subscriptions = Thumper.black_box (connected_client 1024)
 
+let reconnecting_many_subscriptions =
+  let state = Nats.Client.prepare_reconnect many_subscriptions in
+  let transition =
+    expect_client
+      (Nats.Client.incoming ~eod:true state ~now:Mtime.min_stamp
+         (Bytesrw.Bytes.Reader.of_string info_wire))
+  in
+  Thumper.black_box transition.state
+
 let packet_case name chunks =
   Thumper.bench_with_setup name
     ~setup:(fun () -> repeating_reader chunks)
@@ -186,6 +201,8 @@ let () =
           packet_case "msg-64" [| message_64_wire |];
           packet_case "msg-4096" [| message_4096_wire |];
           packet_case "msg-1m" [| message_1m_wire |];
+          Thumper.bench "to-string-msg-1m" (fun () ->
+              Nats.Packet.to_string message_1m_packet);
           packet_case "hmsg-4096-headers-16" [| header_message_4096_wire |];
           packet_case "msg-4096-fragmented-1024"
             (chunks_of_size 1024 message_4096_wire);
@@ -208,6 +225,17 @@ let () =
         ];
       Thumper.group "client"
         [
+          Thumper.bench "drain-1024-subscriptions" (fun () ->
+              expect_client
+                (Nats.Client.outgoing many_subscriptions Nats.Client.Drain));
+          Thumper.bench "reconnect-1024-subscriptions" (fun () ->
+              expect_client
+                (Nats.Client.outgoing reconnecting_many_subscriptions
+                   (Nats.Client.Connect
+                      {
+                        credentials = Nats.Client.Connect.v ();
+                        tls_required = false;
+                      })));
           client_case "deliver-one-subscription" one_subscription
             message_64_wire;
           client_case "deliver-1024-subscriptions" many_subscriptions

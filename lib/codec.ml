@@ -56,11 +56,13 @@ let rest line keyword =
 
 let contains_line_break value =
   let found = ref false in
-  for position = 0 to String.length value - 1 do
+  let position = ref 0 in
+  while (not !found) && !position < String.length value do
     if
-      Char.equal (String.get value position) '\r'
-      || Char.equal (String.get value position) '\n'
-    then found := true
+      Char.equal (String.get value !position) '\r'
+      || Char.equal (String.get value !position) '\n'
+    then found := true;
+    position := !position + 1
   done;
   !found
 
@@ -70,10 +72,12 @@ let parse_nonnegative value =
   else
     let parsed = ref 0 in
     let valid = ref true in
-    for position = 0 to length - 1 do
-      let code = Char.code (String.get value position) in
+    let position = ref 0 in
+    while !valid && !position < length do
+      let code = Char.code (String.get value !position) in
+      position := !position + 1;
       if code < Char.code '0' || code > Char.code '9' then valid := false
-      else if !valid then
+      else
         let digit = code - Char.code '0' in
         if !parsed > (Stdlib.max_int - digit) / 10 then valid := false
         else parsed := (!parsed * 10) + digit
@@ -124,27 +128,20 @@ let message ~subject_value ~reply_value ~headers payload =
 
 let find_crlf_from value start =
   let length = String.length value in
+  let position = ref start in
   let found = ref None in
-  if start <= length - 2 then
-    for position = start to length - 2 do
-      match !found with
-      | Some _ -> ()
-      | None ->
-          if
-            Char.equal (String.get value position) '\r'
-            && Char.equal (String.get value (position + 1)) '\n'
-          then found := Some position
-    done;
+  while Option.is_none !found && !position < length - 1 do
+    if
+      Char.equal (String.get value !position) '\r'
+      && Char.equal (String.get value (!position + 1)) '\n'
+    then found := Some !position
+    else position := !position + 1
+  done;
   !found
-
-let starts_with value prefix =
-  let prefix_length = String.length prefix in
-  String.length value >= prefix_length
-  && String.equal (String.sub value 0 prefix_length) prefix
 
 let status first_line =
   if String.equal first_line "NATS/1.0" then Ok None
-  else if starts_with first_line "NATS/1.0 " then
+  else if String.starts_with ~prefix:"NATS/1.0 " first_line then
     let rest = String.sub first_line 9 (String.length first_line - 9) in
     let code_value, description =
       match String.index_opt rest ' ' with
@@ -523,7 +520,7 @@ let encode_output ?(limits = Packet.default_limits) output =
       match output.framing with
       | Packet.Line -> Ok (output.line ^ "\r\n")
       | Packet.Payload _ | Packet.Headers _ ->
-          Ok (output.line ^ "\r\n" ^ output.body ^ "\r\n"))
+          Ok (String.concat "" [ output.line; "\r\n"; output.body; "\r\n" ]))
 
 let encode ?(limits = Packet.default_limits) operation =
   let output =

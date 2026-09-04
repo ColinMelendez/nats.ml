@@ -2718,7 +2718,7 @@ let initial_connect_retryable = function
       false
 
 let connect ~sw ~net ~clock ?(config = Config.default) endpoints =
-  if Int.equal (List.length endpoints) 0 then Error Error.Invalid_endpoints
+  if List.is_empty endpoints then Error Error.Invalid_endpoints
   else
     let monotonic_clock = make_monotonic_clock clock in
     let pool = ref (Nats.Endpoint.Pool.v endpoints) in
@@ -2742,7 +2742,7 @@ let connect ~sw ~net ~clock ?(config = Config.default) endpoints =
           | Ok () -> Ok connection
           | Error error
             when initial_connect_retryable error
-                 && not (Int.equal (List.length !remaining) 0) ->
+                 && not (List.is_empty !remaining) ->
               pool := Nats.Endpoint.Pool.failed !pool endpoint;
               establish ()
           | Error error ->

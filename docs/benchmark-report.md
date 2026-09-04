@@ -13,7 +13,7 @@ profiles:
 `-Oclassic` is OCaml's practical low-optimization native-code baseline; it does
 not claim that every mandatory compiler transformation is disabled.
 
-## Reference run
+## Pre-optimization reference run
 
 - Date: 2026-09-03
 - Machine: Apple M2 Pro, 10 cores, 16 GiB RAM
@@ -90,6 +90,31 @@ is equal on the three wire-encoding cases. Across one invocation of all 19
 cases, the totals are 1,095,547 words, 1,095,169 words, and 1,094,666 words.
 The large payload copies dominate those totals; the client-delivery reductions
 are more meaningful locally.
+
+## Tidy-pass results
+
+The September 3 tidy pass removed repeated scans and intermediate strings from
+the packet, codec, drain, and reconnect paths. Allocation counts below are exact
+for the O3 profile; timing samples were taken on a loaded host and are therefore
+directional only.
+
+| Case | Before | After | Change |
+|---|---:|---:|---:|
+| Decode 1 MiB packet | 655,971 words | 524,894 words | -20.0% |
+| Decode 4 KiB message | 3,215 words | 2,698 words | -16.1% |
+| Encode 1 MiB publish | 393,259 words | 131,117 words | -66.7% |
+| Encode 4 KiB publish | 1,575 words | 553 words | -64.9% |
+| Encode 4 KiB header publish | 2,658 words | 1,513 words | -43.1% |
+| Render 1 MiB packet | 393,225 words | 131,083 words | -66.7% |
+| Drain 1,024 subscriptions | 47,147 words | 37,932 words | -19.5% |
+| Replay 1,024 subscriptions | 58,594 words | 55,522 words | -5.2% |
+
+The packet-boundary scan now stops at the first CRLF instead of continuing over
+the whole payload. Loaded-host samples showed the 1 MiB packet case falling from
+roughly 1.1 ms to 0.18 ms, but that timing should be repeated on a quiet host
+before it becomes a regression threshold. The benchmark suite now includes 22
+cases, adding packet rendering plus large subscription drain and reconnect
+replay coverage.
 
 ## Reproducing and accepting a baseline
 
