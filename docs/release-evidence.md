@@ -6,7 +6,7 @@ repeatable commands or make the test matrix a complete NATS conformance suite.
 
 ## 2026-09-03 clean release candidate
 
-Commit `bafb8851b25816bcc5b1344376a3ba0849ea7377` was exercised from a
+Commit `dfc59817f5e6e50673de86d3d246b2ba7c3c0392` was exercised from a
 clean, detached checkout with OCaml 5.5. The Go peer used
 `github.com/nats-io/nats.go v1.53.1`. Docker acceptance used the owned
 `nats-tests` Colima profile with 4 CPUs, 6 GiB RAM, and a 12 GiB disk.
@@ -53,18 +53,21 @@ the server's asynchronous consumer-state file write.
 
 ### Environment notes
 
-The first cluster attempt was discarded after automatic Nix garbage
-collection removed the unrooted OCaml compiler between cases. The complete
-affected cluster gate was rerun with a persistent Nix profile and passed.
+Persistent Nix profiles kept the compiler and integration tools rooted for the
+run. `TMPDIR` was under the clean checkout parent so every host path used by a
+container was available through Colima's shared filesystem.
 
-The first durable Push reconnect attempt was discarded because macOS `/tmp`
-is not shared at the same path inside the Colima VM. The complete 18-case
-reconnect compatibility gate was rerun with `TMPDIR` under the shared clean
-checkout parent and passed.
+The first anonymous cluster case was repeated after switching the matrix to a
+prebuilt acceptance executable. The complete anonymous cluster matrices were
+then run from their first case and passed. An authenticated reconnect batch was
+also discarded when it was started from the default development environment,
+which does not contain the credential generator. The complete 15-case batch
+was rerun in the integration environment and passed; the three anonymous cases
+were also repeated in a standalone run.
 
-The wrapper stopped the owned VM after every matrix. No acceptance container,
-test process, or generated authentication or TLS directory remained after the
-run. No release gate or scenario remains blocked.
+The owned VM was stopped after the final matrix. No acceptance container, test
+process, or generated authentication or TLS directory remained after the run.
+No release gate or scenario remains blocked.
 
 The broad 2.10.22 and 2.12.15 matrices retain their earlier recorded evidence;
 this clean refresh reran the changed hard-restart path on all three pins and
